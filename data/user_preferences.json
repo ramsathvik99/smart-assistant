@@ -1,0 +1,81 @@
+{
+  "user_id": "default_user",
+  "music": {
+    "telugu": {
+      "classical": {
+        "count": 5,
+        "last_used": "2026-03-20T14:44:45.295386"
+      },
+      "devotional": {
+        "count": 1,
+        "last_used": "2026-03-20T14:44:45.296289"
+      }
+    }
+  },
+  "movies": {
+    "telugu": {
+      "action": {
+        "count": 4,
+        "last_used": "2026-03-20T14:44:45.297531"
+      },
+      "drama": {
+        "count": 1,
+        "last_used": "2026-03-20T14:44:45.298629"
+      }
+    }
+  },
+  "life": {},
+  "usage_history": {
+    "music": {
+      "telugu": {
+        "genres": {
+          "classical": 5,
+          "devotional": 1
+        },
+        "total_usage": 6
+      }
+    },
+    "movies": {
+      "telugu": {
+        "genres": {
+          "action": 4,
+          "drama": 1
+        },
+        "total_usage": 5
+      }
+    },
+    "life": {}
+  },
+  "language_detection": {
+    "telugu_keywords": [
+      "telugu",
+      "andhra",
+      "tamil",
+      "malayalam",
+      "kannada",
+      "hindi"
+    ],
+    "music_keywords": [
+      "song",
+      "music",
+      "gaana",
+      "pata",
+      "melody",
+      "beat"
+    ],
+    "movie_keywords": [
+      "movie",
+      "cinema",
+      "film",
+      "picture",
+      "flick"
+    ],
+    "life_keywords": [
+      "advice",
+      "suggest",
+      "help",
+      "tip",
+      "recommend"
+    ]
+  }
+}

@@ -1,0 +1,844 @@
+{
+  "users": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('users_id_seq'::regclass)"
+      },
+      {
+        "name": "username",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "password",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "voice_identity_hash",
+        "type": "text",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": []
+  },
+  "user_memory": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('user_memory_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "memory",
+        "type": "jsonb",
+        "nullable": true,
+        "default": "'{}'::jsonb"
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "user_preferences": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('user_preferences_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "pref_key",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "pref_value",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "system_memory": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('system_memory_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "key",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "value",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "plugins": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('plugins_id_seq'::regclass)"
+      },
+      {
+        "name": "plugin_id",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "is_enabled",
+        "type": "boolean true",
+        "nullable": true,
+        "default": "TRUE"
+      },
+      {
+        "name": "permissions",
+        "type": "jsonb",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": []
+  },
+  "plugin_logs": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('plugin_logs_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "plugin_id",
+        "type": "integer",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "action",
+        "type": "text",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "status",
+        "type": "text",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "error_message",
+        "type": "text",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      },
+      {
+        "column": "plugin_id",
+        "references_table": "plugins",
+        "references_column": "id"
+      }
+    ]
+  },
+  "decision_logs": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('decision_logs_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "plugin_id",
+        "type": "integer",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "decision",
+        "type": "text",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      },
+      {
+        "column": "plugin_id",
+        "references_table": "plugins",
+        "references_column": "id"
+      }
+    ]
+  },
+  "security_audit_logs": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('security_audit_logs_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "action_name",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "params",
+        "type": "text",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "status",
+        "type": "text",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "reminders": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('reminders_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "task_text",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "due_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "is_notified",
+        "type": "boolean false",
+        "nullable": true,
+        "default": "FALSE"
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "messages": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('messages_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "role",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "content",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "notes": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('notes_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "note",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "pinned",
+        "type": "boolean false",
+        "nullable": true,
+        "default": "FALSE"
+      },
+      {
+        "name": "done",
+        "type": "boolean false",
+        "nullable": true,
+        "default": "FALSE"
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "active_contexts": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('active_contexts_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "context_data",
+        "type": "jsonb",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "calendar_events": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid gen_random_uuid()",
+        "nullable": true,
+        "default": "gen_random_uuid()"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "title",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "description",
+        "type": "text",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "start_datetime",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "end_datetime",
+        "type": "timestamp",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "is_all_day",
+        "type": "boolean false",
+        "nullable": true,
+        "default": "FALSE"
+      },
+      {
+        "name": "event_type",
+        "type": "text check (event_type in ('event', 'reminder'))",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "recurrence_rules": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid gen_random_uuid()",
+        "nullable": true,
+        "default": "gen_random_uuid()"
+      },
+      {
+        "name": "event_id",
+        "type": "uuid calendar_events(id)",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "frequency",
+        "type": "text check (frequency in ('daily', 'weekly', 'monthly', 'yearly'))",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "interval",
+        "type": "integer 1",
+        "nullable": true,
+        "default": "1"
+      },
+      {
+        "name": "days_of_week",
+        "type": "text, -- e.g. 'mon,tue,fri' for weekly recurrence",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "end_date",
+        "type": "date",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "event_id",
+        "references_table": "calendar_events",
+        "references_column": "id"
+      }
+    ]
+  },
+  "calendar_settings": {
+    "columns": [
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "region",
+        "type": "text 'in'",
+        "nullable": true,
+        "default": "'IN'"
+      },
+      {
+        "name": "timezone",
+        "type": "text 'asia/kolkata'",
+        "nullable": true,
+        "default": "'Asia/Kolkata'"
+      },
+      {
+        "name": "end_of_day_prompt_enabled",
+        "type": "boolean true",
+        "nullable": true,
+        "default": "TRUE"
+      },
+      {
+        "name": "weekly_summary_enabled",
+        "type": "boolean true",
+        "nullable": true,
+        "default": "TRUE"
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "user_id"
+    ],
+    "foreign_keys": [
+      {
+        "column": "user_id",
+        "references_table": "users",
+        "references_column": "id"
+      }
+    ]
+  },
+  "for full conversational memory\nCREATE TABLE IF NOT EXISTS conversations": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('for full conversational memory\nCREATE TABLE IF NOT EXISTS conversations_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "user_input",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "assistant_response",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "timestamp",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      },
+      {
+        "name": "session_id",
+        "type": "varchar(100)",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "metadata",
+        "type": "jsonb",
+        "nullable": true,
+        "default": "'{}'"
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": []
+  },
+  "for semantic memory extraction\nCREATE TABLE IF NOT EXISTS memory_facts": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "integer",
+        "nullable": true,
+        "default": "nextval('for semantic memory extraction\nCREATE TABLE IF NOT EXISTS memory_facts_id_seq'::regclass)"
+      },
+      {
+        "name": "user_id",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "fact_key",
+        "type": "varchar(100)",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "fact_value",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "confidence",
+        "type": "float 0.0",
+        "nullable": true,
+        "default": "0.0"
+      },
+      {
+        "name": "source",
+        "type": "varchar(50) 'conversation'",
+        "nullable": true,
+        "default": "'conversation'"
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      },
+      {
+        "name": "last_accessed",
+        "type": "timestamp with time zone",
+        "nullable": true,
+        "default": "CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_keys": [
+      "id"
+    ],
+    "foreign_keys": []
+  }
+}
