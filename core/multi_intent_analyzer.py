@@ -116,6 +116,19 @@ class MultiIntentAnalyzer:
         (Intent.REMINDERS, Intent.MUSIC): r'remind.*music|remember.*song',
         (Intent.REMINDERS, Intent.WEATHER_QUERY): r'remind.*weather',
         (Intent.REMINDERS, Intent.EMAIL): r'remind.*email',
+
+        # OPEN_APPLICATION (open it) depends on FILE_OPERATIONS (find file)
+        (Intent.OPEN_APPLICATION, Intent.FILE_OPERATIONS): r'find.*open|search.*open|open\s+(?:it|that|them|the\s+file)',
+
+        # Browser search depends on browser open
+        (Intent.RAG_SEARCH, Intent.OPEN_APPLICATION): r'open.*search|launch.*search|browser.*search',
+        (Intent.OPEN_APPLICATION, Intent.OPEN_APPLICATION): r'open.*search|chrome.*search|youtube.*search',
+
+        # TASK_MANAGEMENT status query depends on task creation
+        (Intent.TASK_MANAGEMENT, Intent.TASK_MANAGEMENT): r'create.*status|task.*status|clean.*status|logs.*status|create.*running|task.*running|status.*running|clean.*running',
+
+        # DEVICE_CONTROL check depends on device control action
+        (Intent.DEVICE_CONTROL, Intent.DEVICE_CONTROL): r'turn.*(?:on|off).*whether|toggle.*whether|set.*is\s+it|turn.*is\s+it',
     }
     
     # Confidence thresholds
@@ -205,8 +218,39 @@ class MultiIntentAnalyzer:
         # Step 2: Analyze each segment
         intent_matches = []
         for segment_text, segment_idx in segments:
-            intent, params = self.router.route_command(segment_text)
-            confidence = self._calculate_segment_confidence(intent, segment_text)
+            seg_lower = segment_text.lower().strip()
+
+            # Contextual dependent clause recognition based on upstream matches
+            is_status_query = bool(re.search(r'\b(?:check|get|show|tell\s+me|what(?:\'s|\s+is))\s+(?:its|the)\s+status\b', seg_lower)) or seg_lower in ("what's its status", "what is its status", "its status", "check its status")
+            is_running_query = bool(re.search(r'\b(?:tell\s+me\s+whether\s+it\s+is\s+(?:still\s+)?running|is\s+it\s+(?:still\s+)?running|check\s+if\s+it(?:\'s|\s+is)\s+(?:still\s+)?running)\b', seg_lower))
+            is_state_query = bool(re.search(r'\b(?:tell\s+me\s+whether\s+it\s+is|is\s+it|check\s+if\s+it(?:\'s|\s+is))\s+(?:on|off)\b', seg_lower))
+            is_open_anaphora = bool(re.match(r'^(?:open|launch)\s+(?:it|that|the\s+file)[.!]?$', seg_lower))
+
+            upstream_intent = intent_matches[-1].intent if intent_matches else None
+
+            if (is_status_query or is_running_query) and upstream_intent == Intent.TASK_MANAGEMENT:
+                intent = Intent.TASK_MANAGEMENT
+                params = {"action": "task_status", "raw_input": segment_text}
+                confidence = 0.95
+            elif (is_status_query or is_state_query) and upstream_intent == Intent.DEVICE_CONTROL:
+                intent = Intent.DEVICE_CONTROL
+                params = {"action": "check_state", "raw_input": segment_text}
+                confidence = 0.95
+            elif is_state_query:
+                intent = Intent.DEVICE_CONTROL
+                params = {"action": "check_state", "raw_input": segment_text}
+                confidence = 0.95
+            elif is_status_query or is_running_query:
+                intent = Intent.TASK_MANAGEMENT
+                params = {"action": "task_status", "raw_input": segment_text}
+                confidence = 0.95
+            elif is_open_anaphora and upstream_intent == Intent.FILE_OPERATIONS:
+                intent = Intent.OPEN_APPLICATION
+                params = {"action": "open_file", "raw_input": segment_text}
+                confidence = 0.95
+            else:
+                intent, params = self.router.route_command(segment_text)
+                confidence = self._calculate_segment_confidence(intent, segment_text)
             
             # Only include matches with sufficient confidence
             if confidence >= self.MIN_CONFIDENCE:
@@ -348,8 +392,8 @@ class MultiIntentAnalyzer:
         
         for i, match_i in enumerate(intent_matches):
             for j, match_j in enumerate(intent_matches):
-                if i == j:
-                    continue
+                if j >= i:
+                    continue  # Later intent i can only depend on earlier intent j
                 
                 # Check if match_i depends on match_j
                 key = (match_i.intent, match_j.intent)
@@ -378,15 +422,20 @@ class MultiIntentAnalyzer:
         # Topological sort for dependencies
         ordered = []
         processed = set()
+        visiting = set()
         
         def process_intent(idx):
             if idx in processed:
                 return
+            if idx in visiting:
+                return  # Cycle break
+            visiting.add(idx)
             
             # Process dependencies first
             for dep_idx in dependencies.get(idx, []):
                 process_intent(dep_idx)
             
+            visiting.remove(idx)
             ordered.append((original_positions[idx], idx))
             processed.add(idx)
         

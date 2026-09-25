@@ -10,12 +10,6 @@ from .folder_manager import create_folder, delete_folder, list_folders
 from .file_manager import open_file, get_file_info, list_files
 from .app_launcher import launch_application, get_running_applications
 
-# Import system enhancements
-try:
-    from system_enhancements.structured_executor import execute_structured
-    ENHANCEMENTS_AVAILABLE = True
-except ImportError:
-    ENHANCEMENTS_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -168,15 +162,8 @@ def execute_action(action_data, confirm=False):
                 "message": "Invalid JSON format for action data"
             }
     
-    # Use structured executor if available, otherwise fall back to original
-    if ENHANCEMENTS_AVAILABLE and not confirm:  # Only use enhancements for non-confirmed calls
-        # Create a wrapper function that calls the original executor
-        def original_executor(data):
-            return _executor.execute_action(data, confirm)
-        
-        return execute_structured(action_data, original_executor)
-    else:
-        return _executor.execute_action(action_data, confirm)
+    return _executor.execute_action(action_data, confirm)
+
 
 def get_action_history(limit=10):
     """Get recent action history"""

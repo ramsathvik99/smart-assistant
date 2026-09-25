@@ -1,0 +1,26 @@
+{
+  "user_id": 501,
+  "rules": [
+    {
+      "id": "680fff86",
+      "user_id": 501,
+      "rule": "User A confidential coding rule",
+      "category": "general",
+      "origin": "user_directive",
+      "active": true,
+      "created_at": 1790090759.9315684,
+      "updated_at": 1790090851.1804242
+    },
+    {
+      "id": "29d39a82",
+      "user_id": 501,
+      "rule": "I prefer concise explanations",
+      "category": "general",
+      "origin": "user_directive",
+      "active": true,
+      "created_at": 1790092233.936272,
+      "updated_at": 1790092506.701869
+    }
+  ],
+  "updated_at": 1790092506.7047608
+}

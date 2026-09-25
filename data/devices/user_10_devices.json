@@ -1,0 +1,130 @@
+{
+  "user_id": 10,
+  "devices": {
+    "android_user10galaxys24_6421fb42": {
+      "device_id": "android_user10galaxys24_6421fb42",
+      "user_id": 10,
+      "name": "User10 Galaxy S24",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": true,
+      "battery": 75,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T14:06:34.196110+00:00",
+      "last_seen": "2026-09-22T14:06:34.196146+00:00",
+      "secret_hash": "868a9aefb25a795d6427d05c192ac79292709dc49b4561c604d8e0a0add5cc71",
+      "revoked": false,
+      "metadata": {}
+    },
+    "android_user10galaxys24_1b3d6aed": {
+      "device_id": "android_user10galaxys24_1b3d6aed",
+      "user_id": 10,
+      "name": "User10 Galaxy S24",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": true,
+      "battery": 75,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T14:08:55.950585+00:00",
+      "last_seen": "2026-09-22T14:08:55.950618+00:00",
+      "secret_hash": "776d49bed45686946813e0342fc5be4c6729e7a2358ef11f883b6c4f9e421b68",
+      "revoked": false,
+      "metadata": {}
+    },
+    "android_user10galaxys24_5e826778": {
+      "device_id": "android_user10galaxys24_5e826778",
+      "user_id": 10,
+      "name": "User10 Galaxy S24",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": true,
+      "battery": 75,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T14:11:01.320251+00:00",
+      "last_seen": "2026-09-22T14:11:01.320277+00:00",
+      "secret_hash": "770adb6cde6738d4a1fc8bf6d00a4dad2ea77dc600b1a580a5fcab6983cad9de",
+      "revoked": false,
+      "metadata": {}
+    },
+    "android_user10galaxys24_8ec7f0f7": {
+      "device_id": "android_user10galaxys24_8ec7f0f7",
+      "user_id": 10,
+      "name": "User10 Galaxy S24",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": true,
+      "battery": 75,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T15:05:17.059210+00:00",
+      "last_seen": "2026-09-22T15:05:17.059255+00:00",
+      "secret_hash": "766c290afbac9d439be033c0a9d423c7c9a15fbf216288715af679530bdccb33",
+      "revoked": false,
+      "metadata": {}
+    },
+    "android_user10galaxys24_d615350f": {
+      "device_id": "android_user10galaxys24_d615350f",
+      "user_id": 10,
+      "name": "User10 Galaxy S24",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": true,
+      "battery": 75,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T15:20:36.112452+00:00",
+      "last_seen": "2026-09-22T15:20:36.112473+00:00",
+      "secret_hash": "d4d6e242fc2298d81f1db8000ef0725ea661b37e28ddb21a85bbfbc0ba49bb57",
+      "revoked": false,
+      "metadata": {}
+    }
+  }
+}

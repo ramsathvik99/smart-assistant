@@ -159,10 +159,8 @@ class AssistantSystemMenu:
             speak("Reloading modules")
             
             import importlib
-            import extensions.plugin_manager
             import extensions.ai_engine
             
-            importlib.reload(extensions.plugin_manager)
             importlib.reload(extensions.ai_engine)
             
             speak("Modules reloaded")

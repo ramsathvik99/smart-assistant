@@ -38,10 +38,12 @@ nova_env/
 Thumbs.db
 desktop.ini
 
-# Environment variables
+# Environment variables and secrets
 .env
 .env.local
 .env.*.local
+*.key
+data/screenshots/
 
 # Logs
 *.log

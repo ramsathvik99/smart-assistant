@@ -256,3 +256,462 @@ class DatabaseManager:
         """
         # usage_patterns table does not exist
         pass
+
+    # =========================================================================
+    # REMINDERS
+    # Canonical table: reminders(id, user_id, task_text, due_at, is_notified, created_at)
+    # =========================================================================
+
+    def add_reminder(self, user_id, task_text, due_at):
+        """Add a new reminder to the database."""
+        if not self.pool or not user_id:
+            return None
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO reminders (user_id, task_text, due_at, is_notified)
+                    VALUES (%s, %s, %s, FALSE)
+                    RETURNING id
+                    """,
+                    (user_id, task_text, due_at)
+                )
+                return cur.fetchone()[0]
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] add_reminder: {e}")
+            return None
+
+    def get_reminders(self, user_id, start_date=None, end_date=None):
+        """Get reminders for a user, optionally filtered by date range."""
+        if not self.pool or not user_id:
+            return []
+        try:
+            with self._get_cursor() as cur:
+                if start_date and end_date:
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND due_at BETWEEN %s AND %s
+                        ORDER BY due_at ASC
+                        """,
+                        (user_id, start_date, end_date)
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at
+                        FROM reminders
+                        WHERE user_id = %s
+                        ORDER BY due_at ASC
+                        """,
+                        (user_id,)
+                    )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "task_text": row[1],
+                        "due_at": row[2],
+                        "is_notified": row[3],
+                        "created_at": row[4]
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] get_reminders: {e}")
+            return []
+
+    def get_reminder_by_id(self, user_id, reminder_id):
+        """Get a specific reminder by ID."""
+        if not self.pool or not user_id:
+            return None
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, task_text, due_at, is_notified, created_at
+                    FROM reminders
+                    WHERE user_id = %s AND id = %s
+                    """,
+                    (user_id, reminder_id)
+                )
+                row = cur.fetchone()
+                if row:
+                    return {
+                        "id": row[0],
+                        "task_text": row[1],
+                        "due_at": row[2],
+                        "is_notified": row[3],
+                        "created_at": row[4]
+                    }
+                return None
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] get_reminder_by_id: {e}")
+            return None
+
+    def update_reminder(self, user_id, reminder_id, task_text=None, due_at=None):
+        """Update an existing reminder."""
+        if not self.pool or not user_id:
+            return False
+        try:
+            with self._get_cursor() as cur:
+                if task_text and due_at:
+                    cur.execute(
+                        """
+                        UPDATE reminders
+                        SET task_text = %s, due_at = %s
+                        WHERE user_id = %s AND id = %s
+                        """,
+                        (task_text, due_at, user_id, reminder_id)
+                    )
+                elif task_text:
+                    cur.execute(
+                        """
+                        UPDATE reminders
+                        SET task_text = %s
+                        WHERE user_id = %s AND id = %s
+                        """,
+                        (task_text, user_id, reminder_id)
+                    )
+                elif due_at:
+                    cur.execute(
+                        """
+                        UPDATE reminders
+                        SET due_at = %s
+                        WHERE user_id = %s AND id = %s
+                        """,
+                        (due_at, user_id, reminder_id)
+                    )
+                else:
+                    return False
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] update_reminder: {e}")
+            return False
+
+    def delete_reminder(self, user_id, reminder_id):
+        """Delete a reminder."""
+        if not self.pool or not user_id:
+            return False
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM reminders
+                    WHERE user_id = %s AND id = %s
+                    """,
+                    (user_id, reminder_id)
+                )
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] delete_reminder: {e}")
+            return False
+
+    def mark_reminder_notified(self, reminder_id):
+        """Mark a reminder as notified."""
+        if not self.pool:
+            return False
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reminders
+                    SET is_notified = TRUE
+                    WHERE id = %s
+                    """,
+                    (reminder_id,)
+                )
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] mark_reminder_notified: {e}")
+            return False
+
+    def get_pending_reminders(self, user_id=None):
+        """Get all reminders that haven't been notified yet."""
+        if not self.pool:
+            return []
+        try:
+            with self._get_cursor() as cur:
+                if user_id:
+                    cur.execute(
+                        """
+                        SELECT id, user_id, task_text, due_at, created_at
+                        FROM reminders
+                        WHERE user_id = %s AND is_notified = FALSE
+                        ORDER BY due_at ASC
+                        """,
+                        (user_id,)
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, user_id, task_text, due_at, created_at
+                        FROM reminders
+                        WHERE is_notified = FALSE
+                        ORDER BY due_at ASC
+                        """,
+                    )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "user_id": row[1],
+                        "task_text": row[2],
+                        "due_at": row[3],
+                        "created_at": row[4]
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] get_pending_reminders: {e}")
+            return []
+
+    def check_reminder_conflicts(self, user_id, due_at, exclude_id=None):
+        """Check for existing reminders at the same time."""
+        if not self.pool or not user_id:
+            return []
+        try:
+            with self._get_cursor() as cur:
+                if exclude_id:
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND due_at = %s
+                          AND id != %s
+                          AND is_notified = FALSE
+                        """,
+                        (user_id, due_at, exclude_id)
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND due_at = %s
+                          AND is_notified = FALSE
+                        """,
+                        (user_id, due_at)
+                    )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "task_text": row[1],
+                        "due_at": row[2]
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] check_reminder_conflicts: {e}")
+            return []
+
+    # =========================================================================
+    # PHASE 9: PERSISTENT GOALS (CROSS-SESSION CONTINUITY)
+    # Canonical persistence layer: PostgreSQL active_contexts
+    # =========================================================================
+
+    def _resolve_user_id_int(self, user_id):
+        """Resolves user_id (int or str username) to users(id) int."""
+        if not self.pool or user_id is None:
+            return None
+        if isinstance(user_id, int):
+            return user_id
+        if str(user_id).isdigit():
+            return int(user_id)
+        # Search by username
+        user_row = self.get_user_by_username(str(user_id))
+        if user_row:
+            return user_row[0]
+        # Auto-create user record so foreign key constraint is satisfied
+        return self.create_user(str(user_id), "cross_session_auth")
+
+    def save_persistent_goal(self, user_id, goal_data: dict) -> bool:
+        """
+        Persists an eligible goal to PostgreSQL active_contexts.
+        Privacy: Never stores raw audio, screenshots, passwords, tokens, or credentials.
+        """
+        if not self.pool or not goal_data:
+            return False
+        uid_int = self._resolve_user_id_int(user_id)
+        if uid_int is None:
+            return False
+        
+        goal_id = goal_data.get("goal_id")
+        if not goal_id:
+            return False
+
+        payload = dict(goal_data)
+        payload["context_type"] = "persistent_goal"
+        payload["persisted_user_id"] = str(user_id)
+        
+        # Privacy filter: Strip any accidental sensitive keys
+        for sensitive_key in ["password", "token", "auth_token", "secret", "credentials", "audio_data", "screenshot"]:
+            payload.pop(sensitive_key, None)
+            if "entities" in payload and isinstance(payload["entities"], dict):
+                payload["entities"].pop(sensitive_key, None)
+
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id FROM active_contexts
+                    WHERE user_id = %s AND (context_data->>'goal_id') = %s
+                    LIMIT 1
+                    """,
+                    (uid_int, goal_id)
+                )
+                row = cur.fetchone()
+                if row:
+                    cur.execute(
+                        """
+                        UPDATE active_contexts
+                        SET context_data = %s, updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (json.dumps(payload, default=str), row[0])
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO active_contexts (user_id, context_data, updated_at)
+                        VALUES (%s, %s, NOW())
+                        """,
+                        (uid_int, json.dumps(payload, default=str))
+                    )
+                return True
+        except Exception as e:
+            print(f"[DB PERSISTENT GOAL ERROR] save_persistent_goal: {e}")
+            return False
+
+    def get_persistent_goals(self, user_id, only_resumable: bool = True) -> list:
+        """
+        Retrieves persistent goals for user from PostgreSQL active_contexts.
+        Filters out terminal goals (COMPLETED, FAILED, CANCELLED) if only_resumable=True.
+        """
+        if not self.pool:
+            return []
+        uid_int = self._resolve_user_id_int(user_id)
+        if uid_int is None:
+            return []
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, context_data, updated_at
+                    FROM active_contexts
+                    WHERE user_id = %s AND (context_data->>'context_type') = 'persistent_goal'
+                    ORDER BY id ASC
+                    """,
+                    (uid_int,)
+                )
+                rows = cur.fetchall()
+                results = []
+                for cid, cdata, updated_at in rows:
+                    if not isinstance(cdata, dict):
+                        continue
+                    status = str(cdata.get("goal_status", "")).upper()
+                    resumable = bool(cdata.get("resumable", True))
+                    if only_resumable:
+                        if not resumable or status in ["COMPLETED", "FAILED", "CANCELLED"]:
+                            continue
+                    cdata["_db_id"] = cid
+                    results.append(cdata)
+                return results
+        except Exception as e:
+            print(f"[DB PERSISTENT GOAL ERROR] get_persistent_goals: {e}")
+            return []
+
+    def update_persistent_goal_status(self, user_id, goal_id: str, new_status: str, resumable: bool = None, last_known_result: str = None) -> bool:
+        """Updates status of a persistent goal in PostgreSQL active_contexts."""
+        if not self.pool or not goal_id:
+            return False
+        uid_int = self._resolve_user_id_int(user_id)
+        if uid_int is None:
+            return False
+        import time as _time
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, context_data FROM active_contexts
+                    WHERE user_id = %s AND (context_data->>'goal_id') = %s
+                    LIMIT 1
+                    """,
+                    (uid_int, goal_id)
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False
+                cid, cdata = row
+                cdata["goal_status"] = new_status
+                if resumable is not None:
+                    cdata["resumable"] = resumable
+                if last_known_result is not None:
+                    cdata["last_known_result"] = last_known_result
+                if new_status in ["COMPLETED", "FAILED", "CANCELLED"]:
+                    cdata["resumable"] = False
+                cdata["updated_at"] = _time.time()
+                cur.execute(
+                    """
+                    UPDATE active_contexts
+                    SET context_data = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (json.dumps(cdata, default=str), cid)
+                )
+                return True
+        except Exception as e:
+            print(f"[DB PERSISTENT GOAL ERROR] update_persistent_goal_status: {e}")
+            return False
+
+    def delete_persistent_goal(self, user_id, goal_id: str) -> bool:
+        """Deletes persistent goal from PostgreSQL active_contexts."""
+        if not self.pool or not goal_id:
+            return False
+        uid_int = self._resolve_user_id_int(user_id)
+        if uid_int is None:
+            return False
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM active_contexts
+                    WHERE user_id = %s AND (context_data->>'goal_id') = %s
+                    """,
+                    (uid_int, goal_id)
+                )
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"[DB PERSISTENT GOAL ERROR] delete_persistent_goal: {e}")
+            return False
+
+
+_default_db_manager = None
+
+def get_db():
+    """Returns canonical singleton DatabaseManager connected via PostgreSQL connection pool."""
+    global _default_db_manager
+    if _default_db_manager is None:
+        try:
+            from legacy.memory_manager import get_connection
+            class SimplePoolWrapper:
+                def __init__(self, connection_func):
+                    self.get_connection = connection_func
+                def getconn(self):
+                    return self.get_connection()
+                def putconn(self, conn):
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            _default_db_manager = DatabaseManager(SimplePoolWrapper(get_connection))
+        except Exception as e:
+            print(f"[DB MANAGER] get_db init error: {e}")
+            return None
+    return _default_db_manager
+

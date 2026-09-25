@@ -441,7 +441,6 @@ class RAGRetriever:
             return {"error": "User not authenticated. Cannot retrieve memory."}
 
         try:
-            from extensions.memory.memory_parser import get_memory
             from legacy.memory_manager import load_user_memory
 
             all_memory = load_user_memory(user_id)

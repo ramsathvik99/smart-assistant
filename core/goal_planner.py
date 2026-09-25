@@ -31,6 +31,15 @@ from core.multi_intent_analyzer import IntentAnalysis
 # Data Structures
 # ============================================================================
 
+class StepStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    WAITING_FOR_USER = "WAITING_FOR_USER"
+    CANCELLED = "CANCELLED"
+
+
 @dataclass
 class ExecutionStep:
     """Single step in execution plan"""
@@ -49,7 +58,14 @@ class ExecutionStep:
     input_context: Dict[str, Any] = field(default_factory=dict)
     output_context_keys: List[str] = field(default_factory=list)
     
-    # Execution metadata
+    # Execution metadata & Phase 2 state
+    status: str = "PENDING"
+    retry_count: int = 0
+    max_retries: int = 1
+    verification_condition: Optional[str] = None
+    observation: Optional[Dict[str, Any]] = None
+    state_difference: Optional[Dict[str, Any]] = None
+    result: Optional[Dict[str, Any]] = None
     retry_on_failure: bool = False
     continue_on_failure: bool = True
     timeout: float = 10.0
@@ -63,6 +79,10 @@ class ExecutionPlan:
     plan_id: str
     creation_time: str
     original_input: str
+    
+    # Execution status
+    goal_status: str = "PENDING"
+    active_step_index: int = 0
     
     # Plan structure
     steps: List[ExecutionStep] = field(default_factory=list)
@@ -83,6 +103,15 @@ class ExecutionPlan:
     confidence_score: float = 0.0
     success_rate_estimate: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Phase 3 Adaptive Execution State
+    original_plan: Optional[Dict[str, Any]] = None
+    adaptation_count: int = 0
+    max_adaptations: int = 2
+    adaptation_reason: Optional[str] = None
+    adaptation_history: List[Dict[str, Any]] = field(default_factory=list)
+    completed_steps: List[Dict[str, Any]] = field(default_factory=list)
+    failed_steps: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -116,6 +145,7 @@ class GoalPlanner:
         Intent.POWER_ACTION: 100,
         Intent.EMERGENCY: 99,
         Intent.DEVICE_CONTROL: 50,
+        Intent.VISUAL_SURFACE: 45,
         Intent.OPEN_APPLICATION: 40,
         Intent.FILE_OPERATIONS: 30,
         Intent.EMAIL: 25,
@@ -135,6 +165,7 @@ class GoalPlanner:
     
     # Execution duration estimates (in seconds)
     EXECUTION_DURATION = {
+        Intent.VISUAL_SURFACE: 0.1,
         Intent.MUSIC: 0.5,
         Intent.EMAIL: 0.8,
         Intent.REMINDERS: 0.3,
@@ -235,6 +266,15 @@ class GoalPlanner:
             confidence_score=intent_analysis.confidence_score,
             success_rate_estimate=self._estimate_success_rate(ordered_steps),
         )
+        plan.original_plan = {
+            "plan_id": plan.plan_id,
+            "original_input": plan.original_input,
+            "total_steps": plan.total_steps,
+            "steps": [
+                {"sequence": s.sequence, "intent": s.intent.name, "parameters": dict(s.parameters)}
+                for s in plan.steps
+            ]
+        }
         
         return plan
     
@@ -293,6 +333,8 @@ class GoalPlanner:
                 priority_score=self.INTENT_PRIORITY.get(intent, 0),
                 requires_confirmation=intent_dict["confidence"] < 0.8,
                 dependencies=intent_dict.get("dependencies", []),
+                retry_on_failure=intent in {Intent.OPEN_APPLICATION, Intent.FILE_OPERATIONS, Intent.RAG_SEARCH, Intent.WEATHER_QUERY},
+                max_retries=1,
             )
 
             steps.append(step)

@@ -1,4 +1,10 @@
 
+# ════════════════════════════════════════════════════════════════════════
+# RETIRED — This file is NOT the active production UI.
+# Production: modules/ui/floating_launcher.py (PyQt6)
+# This file is preserved for historical reference only.
+# ════════════════════════════════════════════════════════════════════════
+
 import os
 import sys
 import math

@@ -27,8 +27,18 @@ class CalendarStorage:
         cur = conn.cursor()
         
         try:
-            # Parse datetime
-            start_dt = datetime.strptime(f"{event['date']} {event.get('time', '00:00')}", "%Y-%m-%d %H:%M")
+            # Parse datetime with flexible time format support
+            raw_time = (event.get('time') or '00:00').strip()
+            parsed_dt = None
+            for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%d %I:%M %p", "%Y-%m-%d %I %p", "%Y-%m-%d %I:%M%p", "%Y-%m-%d %I%p"]:
+                try:
+                    parsed_dt = datetime.strptime(f"{event['date']} {raw_time}", fmt)
+                    break
+                except ValueError:
+                    continue
+            if not parsed_dt:
+                parsed_dt = datetime.strptime(f"{event['date']} 00:00", "%Y-%m-%d %H:%M")
+            start_dt = parsed_dt
             
             # Insert event
             event_id = str(uuid.uuid4())

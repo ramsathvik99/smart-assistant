@@ -30,6 +30,11 @@ def try_restore_session():
                     print("  Restored user:", name)
                     if asst_name:
                         print("  Restored assistant name:", asst_name)
+                    try:
+                        from core.proactive_observer import proactive_coordinator
+                        proactive_coordinator.start(str(last))
+                    except Exception:
+                        pass
                     return True
                 else:
                     print("[SYSTEM] User ID found but name missing.")
@@ -51,6 +56,8 @@ def login_success(user_id, username):
     Call this when a login is successful to update the session.
     Assistant name is loaded from the DB here too.
     """
+    if getattr(settings, 'CURRENT_USER_ID', None) == user_id and getattr(settings, 'CURRENT_USERNAME', None) == username:
+        return
     settings.set_last_user(user_id)
     settings.CURRENT_USER_ID = user_id
     settings.CURRENT_USERNAME = username
@@ -58,3 +65,8 @@ def login_success(user_id, username):
     asst_name = get_assistant_name_db(user_id)
     settings.CURRENT_ASSISTANT_NAME = asst_name
     print(f"[SYSTEM] Login successful. User: {username} ({user_id}) | Assistant name: {asst_name}")
+    try:
+        from core.proactive_observer import proactive_coordinator
+        proactive_coordinator.start(str(user_id))
+    except Exception as e:
+        print(f"[SYSTEM] Proactive observer startup error on login: {e}")

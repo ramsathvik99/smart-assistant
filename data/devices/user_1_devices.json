@@ -1,0 +1,55 @@
+{
+  "user_id": 1,
+  "devices": {
+    "android_user1phone_4f38cc58": {
+      "device_id": "android_user1phone_4f38cc58",
+      "user_id": 1,
+      "name": "User 1 Phone",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": false,
+      "battery": null,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-23T11:50:59.105818+00:00",
+      "last_seen": "2026-09-23T11:50:59.237803+00:00",
+      "secret_hash": "366d6e931fa9bbfcce9ebc5db2f0fdb74ba2c9bc1ca88b0146b55ef4c2c1f4af",
+      "revoked": true,
+      "metadata": {}
+    },
+    "android_user1phone_6c7ffab0": {
+      "device_id": "android_user1phone_6c7ffab0",
+      "user_id": 1,
+      "name": "User 1 Phone",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": false,
+      "battery": null,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-23T11:51:39.341443+00:00",
+      "last_seen": "2026-09-23T11:51:39.352744+00:00",
+      "secret_hash": "2a1eff913fa633a80a5eb2e3fa62b26a8c369ff2a22b604edcad9fe33670eb6d",
+      "revoked": true,
+      "metadata": {}
+    }
+  }
+}

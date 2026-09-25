@@ -275,7 +275,8 @@ class LLMEngine:
         memory: str = "",
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 500
+        max_tokens: int = 500,
+        user_id: Optional[int] = None
     ) -> Optional[str]:
         """
         Execute completion with strict multi-tier fallback:
@@ -317,6 +318,31 @@ class LLMEngine:
                 "- Never include internal reasoning or explanations\n"
                 "Provide only your final response to the user."
             )
+
+        # Resolve user ID for user-isolated personalization
+        resolved_uid = user_id
+        if resolved_uid is None:
+            try:
+                from instance.config import settings as _cfg
+                resolved_uid = getattr(_cfg, 'CURRENT_USER_ID', None) or _cfg.get_last_user() or 1
+            except Exception:
+                resolved_uid = 1
+
+        # Personalization: Inject authenticated user's learned rules & preferences
+        try:
+            from skills.learning.learned_rules import get_learned_rules_engine
+            lr_engine = get_learned_rules_engine()
+            injections = lr_engine.get_prompt_injections(int(resolved_uid))
+            if injections and injections.strip():
+                rule_block = (
+                    "\n[USER PERSONALIZATION & LEARNED RULES]\n"
+                    "The user has specified the following persistent preferences for your responses:\n"
+                    f"{injections.strip()}\n"
+                    "Adhere to these preferences while maintaining standard safety and operational guidelines.\n"
+                )
+                system_prompt = (system_prompt or "") + "\n" + rule_block
+        except Exception:
+            pass
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -583,10 +609,27 @@ class LLMEngine:
 
         # Low-confidence result → force clarification for destructive intents
         DESTRUCTIVE_INTENTS = {
-            "FILE_OPERATIONS", "POWER_ACTION", "CLOSE_APPLICATION",
-            "DEVICE_CONTROL", "EMAIL",
+            "FILE_OPERATIONS", "POWER_ACTION", "CLOSE_APPLICATION", "EMAIL",
         }
-        if confidence < 0.70 and intent_label in DESTRUCTIVE_INTENTS:
+        is_destructive = intent_label in DESTRUCTIVE_INTENTS
+        if intent_label == "DEVICE_CONTROL":
+            action_name = (normalised_entities.get("action") or "").lower()
+            text_low = user_input.lower()
+            read_only_keywords = [
+                "list", "show", "status", "connected", "online", "battery",
+                "check", "is my", "what devices", "paired devices"
+            ]
+            is_read_only = any(k in text_low for k in read_only_keywords) and not any(
+                d in text_low for d in ["lock", "disconnect", "unpair", "remove", "wipe", "delete", "shutdown", "reboot", "restart"]
+            )
+            disruptive_keywords = [
+                "lock", "disconnect", "unpair", "remove", "forget", "remote action",
+                "execute", "launch", "open", "turn on", "turn off", "toggle", "flashlight", "torch"
+            ]
+            if not is_read_only or any(d in text_low or d in action_name for d in disruptive_keywords):
+                is_destructive = True
+
+        if confidence < 0.70 and is_destructive:
             needs_clarification = True
             if not clarification_reason:
                 clarification_reason = (
@@ -604,7 +647,7 @@ class LLMEngine:
         }
 
         print(
-            f"[SEMANTIC_RESOLVE] '{user_input[:60]}' → intent={intent_label} "
+            f"[SEMANTIC_RESOLVE] '{user_input[:60]}' -> intent={intent_label} "
             f"confidence={confidence:.2f} clarify={needs_clarification}"
         )
         return result

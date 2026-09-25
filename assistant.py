@@ -1,5 +1,10 @@
 # assistant.py
 import sys
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 print("[DEBUG] Running Python:", sys.executable)
 import os
 import time
@@ -10,8 +15,31 @@ from dotenv import load_dotenv
 
 # PROJECT ROOT - Set before any other imports
 PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+
+def setup_canonical_sys_path():
+    """
+    Ensure canonical sys.path ordering:
+    PROJECT_ROOT must strictly precede PROJECT_ROOT / 'legacy'.
+    PROJECT_ROOT / 'skills' must NOT be added directly so 'skills' imports as a package.
+    """
+    canonical_dirs = [
+        PROJECT_ROOT,
+        PROJECT_ROOT / "extensions",
+        PROJECT_ROOT / "core",
+        PROJECT_ROOT / "modules",
+        PROJECT_ROOT / "legacy",
+    ]
+    for d in reversed(canonical_dirs):
+        sp = str(d)
+        while sp in sys.path:
+            sys.path.remove(sp)
+        sys.path.insert(0, sp)
+    # Ensure skills/ directory is NOT directly on sys.path to prevent namespace collision
+    skills_sp = str(PROJECT_ROOT / "skills")
+    while skills_sp in sys.path:
+        sys.path.remove(skills_sp)
+
+setup_canonical_sys_path()
 
 CURRENT_DIR = PROJECT_ROOT
 
@@ -40,25 +68,14 @@ def start_assistant_backend():
     load_dotenv(legacy_env_path, override=True)
     print(f"[LAUNCHER] Loaded environment from: {root_env_path} and {legacy_env_path}")
     
-    # Ensure proper directories are in sys.path
-    root_dir = PROJECT_ROOT
-    legacy_dir = PROJECT_ROOT / "legacy"
-    extensions_dir = PROJECT_ROOT / "extensions"
-    core_dir = PROJECT_ROOT / "core"
-    communication_dir = PROJECT_ROOT / "communication"
-    commands_dir = PROJECT_ROOT / "commands"
-    skills_dir = PROJECT_ROOT / "skills"
-    tools_dir = PROJECT_ROOT / "tools"
-    
-    for directory in [root_dir, legacy_dir, extensions_dir, core_dir, communication_dir, commands_dir, skills_dir, tools_dir]:
-        if directory not in sys.path:
-            sys.path.insert(0, directory)
+    # Ensure proper directories are in sys.path with canonical priority
+    setup_canonical_sys_path()
+
 
     try:
-        # Change CWD to legacy directory early
-        # This ensures legacy relative paths (config, db, assets) work correctly
+        # Keep CWD at project root so all module paths resolve correctly
         import os
-        os.chdir(legacy_dir)
+        os.chdir(str(PROJECT_ROOT))
         
         # Import consolidated config early to establish shared state
         from instance.config import settings
@@ -111,7 +128,7 @@ def initialize_core():
     try:
         from extensions.system.initialization_manager import startup as init_startup
         init_startup()
-        print("[LAUNCHER] ✅ Core services initialized")
+        print("[LAUNCHER] [OK] Core services initialized")
     except Exception as e:
         print(f"[LAUNCHER] CRITICAL: Core services initialization failed: {e}")
         raise
@@ -146,8 +163,20 @@ def shutdown():
             orchestrator.cleanup_and_shutdown()
         except Exception as e:
             print(f"[LAUNCHER] Error during orchestrator shutdown: {e}")
+
+    try:
+        from dashboard.server import stop_dashboard_server
+        stop_dashboard_server()
+    except Exception:
+        pass
+
+    try:
+        from core.proactive_observer import proactive_coordinator
+        proactive_coordinator.stop()
+    except Exception:
+        pass
     
-    print("[LAUNCHER] ✅ Shutdown complete")
+    print("[LAUNCHER] [OK] Shutdown complete")
     sys.exit(0)
 
 def start_assistant():
@@ -166,19 +195,9 @@ def start_assistant():
     load_dotenv(legacy_env_path, override=True)
     print(f"[LAUNCHER] Loaded environment from: {root_env_path} and {legacy_env_path}")
     
-    # Ensure proper directories are in sys.path
-    root_dir = PROJECT_ROOT
-    legacy_dir = PROJECT_ROOT / "legacy"
-    extensions_dir = PROJECT_ROOT / "extensions"
-    core_dir = PROJECT_ROOT / "core"
-    communication_dir = PROJECT_ROOT / "communication"
-    commands_dir = PROJECT_ROOT / "commands"
-    skills_dir = PROJECT_ROOT / "skills"
-    tools_dir = PROJECT_ROOT / "tools"
-    
-    for directory in [root_dir, legacy_dir, extensions_dir, core_dir, communication_dir, commands_dir, skills_dir, tools_dir]:
-        if directory not in sys.path:
-            sys.path.insert(0, directory)
+    # Ensure proper directories are in sys.path with canonical priority
+    setup_canonical_sys_path()
+
 
     try:
         # Change CWD to legacy directory early
@@ -211,7 +230,7 @@ def start_assistant():
         # Start the orchestrator (this runs legacy.main as a module)
         print("[LAUNCHER] Starting orchestrator...")
         orchestrator.start()
-        print("[LAUNCHER] ✅ Orchestrator started successfully")
+        print("[LAUNCHER] [OK] Orchestrator started successfully")
         
         # Keep-alive loop - prevents assistant.py from exiting
         print("[LAUNCHER] Assistant is now running. Press Ctrl+C to shutdown.")
@@ -248,24 +267,26 @@ def initialize_unified_routing():
 def main():
     """Main entry point for Assistant - complete system with GUI"""
     print("[ASSISTANT] Starting complete system...")
-    
-    # Initialize environment
-    initialize_backend_only()
-    
+
+    # Load environment variables
+    root_env_path = PROJECT_ROOT / '.env'
+    legacy_env_path = PROJECT_ROOT / 'legacy' / '.env'
+    load_dotenv(root_env_path)
+    load_dotenv(legacy_env_path, override=True)
+
+    # Add all required directories to sys.path with canonical priority
+    setup_canonical_sys_path()
+
+    # Keep CWD at project root so all module paths resolve correctly
+    os.chdir(str(PROJECT_ROOT))
+
     # Initialize Unified Routing
     initialize_unified_routing()
 
-    print("[ASSISTANT] Running system entry point...")
-    from legacy.main import main as legacy_main
-    legacy_main()
-
-    # Keep application running
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n[ASSISTANT] Shutdown requested.")
-        shutdown()
+    print("[ASSISTANT] Launching PyQt6 UI...")
+    from modules.ui.pyqt_app import AssistantApp
+    app = AssistantApp()
+    app.run()  # blocks until QApplication.quit() is called
 
 
 def initialize_environment():
@@ -279,21 +300,9 @@ def initialize_environment():
     load_dotenv(legacy_env_path, override=True)
     print(f"[LAUNCHER] Loaded environment from: {root_env_path} and {legacy_env_path}")
     
-    # Ensure proper directories are in sys.path
-    directories = [
-        PROJECT_ROOT,
-        PROJECT_ROOT / "legacy",
-        PROJECT_ROOT / "extensions", 
-        PROJECT_ROOT / "core",
-        PROJECT_ROOT / "communication",
-        PROJECT_ROOT / "commands",
-        PROJECT_ROOT / "skills",
-        PROJECT_ROOT / "tools"
-    ]
-    
-    for directory in directories:
-        if directory not in sys.path:
-            sys.path.insert(0, directory)
+    # Ensure proper directories are in sys.path with canonical priority
+    setup_canonical_sys_path()
+
 
 def initialize_backend_only():
     """Initialize backend environment without starting background threads"""
@@ -305,14 +314,12 @@ def initialize_backend_only():
     load_dotenv(root_env_path)
     load_dotenv(legacy_env_path, override=True)
     
-    # Standard sys.path setup
-    paths = [PROJECT_ROOT, PROJECT_ROOT / "legacy", PROJECT_ROOT / "extensions"]
-    for p in paths:
-        if str(p) not in sys.path: sys.path.insert(0, str(p))
+    # Standard sys.path setup with canonical priority
+    setup_canonical_sys_path()
     
-    # Change CWD to legacy directory
+    # Keep CWD at project root so all module paths resolve correctly
     import os
-    os.chdir(PROJECT_ROOT / "legacy")
+    os.chdir(str(PROJECT_ROOT))
     print("[ASSISTANT] Environment Ready")
 
 def start_backend():

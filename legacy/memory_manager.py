@@ -121,8 +121,7 @@ def get_or_create_user(username, password):
 
         # Hash the entered password and compare
         entered_hash = hashlib.sha256(password.encode()).hexdigest()
-        print(f"[DEBUG] Entered password hash: {entered_hash}")
-        print(f"[DEBUG] Stored password hash: {stored_pass}")
+        print("[AUTH] Password verification completed")
         
         if stored_pass != entered_hash:
             cur.close()
@@ -297,6 +296,7 @@ def get_done_notes_db(user_id):
 
 # ---------------- USER MEMORY (long-term) ---------------- #
 def load_user_memory(user_id):
+    import re
     conn = get_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
@@ -306,9 +306,30 @@ def load_user_memory(user_id):
     cur.close()
     conn.close()
     
-    memory_data = row["memory"] if row and row["memory"] else {}
-    print(f"[DEBUG] load_user_memory: user_id={user_id}, memory={memory_data}")
+    memory_data = dict(row["memory"]) if row and row["memory"] else {}
     
+    # Non-destructive normalization on read
+    # 1. Height extraction from existing records
+    if "height" not in memory_data:
+        for k in list(memory_data.keys()):
+            if "height" in k:
+                m = re.search(r'(\d+)\s*(?:ft|feet)', k + ' ' + str(memory_data[k]), re.IGNORECASE)
+                if m:
+                    memory_data["height"] = f"{m.group(1)} feet"
+                    break
+
+    # 2. Age cleanup
+    if "age" in memory_data:
+        m = re.search(r'(\d+)\s*(?:years?)?', str(memory_data["age"]), re.IGNORECASE)
+        if m:
+            memory_data["age"] = f"{m.group(1)} years"
+
+    # 3. Synchronize favorite/favourite food
+    latest_food = memory_data.get("favorite_food") or memory_data.get("favourite_food")
+    if latest_food:
+        memory_data["favorite_food"] = latest_food
+        memory_data["favourite_food"] = latest_food
+
     return memory_data
 
 
@@ -438,4 +459,186 @@ def set_assistant_name_db(user_id, name):
     except Exception as e:
         print(f"[DB ERROR] set_assistant_name_db: {e}")
         return False
+
+
+def get_user_preference_db(user_id, key: str, default=None):
+    """
+    Retrieve a user-specific preference from PostgreSQL user_preferences table,
+    falling back to data/user_preferences.json if offline.
+    """
+    if not user_id or not key:
+        return default
+
+    # 1. Try PostgreSQL canonical storage
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT pref_value FROM user_preferences WHERE user_id = %s AND pref_key = %s",
+            (user_id, key)
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0] is not None:
+            val = str(row[0]).strip()
+            if val:
+                return val
+    except Exception as e:
+        print(f"[DB PREF ERROR] get_user_preference_db ({key}): {e}")
+
+    # 2. Fallback to local JSON store
+    try:
+        import os, json
+        json_path = os.path.join(os.path.dirname(__file__), "..", "data", "user_preferences.json")
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            user_sec = data.get("ui_preferences", {}).get(str(user_id), {})
+            if key in user_sec:
+                return user_sec[key]
+    except Exception:
+        pass
+
+    return default
+
+
+def set_user_preference_db(user_id, key: str, value) -> bool:
+    """
+    Persist a user-specific preference into PostgreSQL user_preferences table,
+    with automatic JSON backup mirroring.
+    """
+    if not user_id or not key:
+        return False
+
+    val_str = str(value).strip()
+    db_success = False
+
+    # 1. Persist to PostgreSQL
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO user_preferences (user_id, pref_key, pref_value)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id, pref_key) DO UPDATE SET pref_value = EXCLUDED.pref_value
+            """,
+            (user_id, key, val_str)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        db_success = True
+    except Exception as e:
+        print(f"[DB PREF ERROR] set_user_preference_db ({key}): {e}")
+
+    # 2. Mirror into data/user_preferences.json for offline resilience
+    try:
+        import os, json
+        json_path = os.path.join(os.path.dirname(__file__), "..", "data", "user_preferences.json")
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        data = {}
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+
+        if "ui_preferences" not in data or not isinstance(data["ui_preferences"], dict):
+            data["ui_preferences"] = {}
+        uid_key = str(user_id)
+        if uid_key not in data["ui_preferences"]:
+            data["ui_preferences"][uid_key] = {}
+        data["ui_preferences"][uid_key][key] = val_str
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[JSON PREF ERROR] mirror to json: {e}")
+
+    return db_success or True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VOICE IDENTITY (per-user)
+# Keys stored in user_preferences:
+#   assistant_voice_id       — SAPI5 voice id string (pyttsx3)
+#   assistant_voice_gender   — "male" | "female"
+#   assistant_voice_tone     — "calm" | "professional" | "friendly" | "energetic" | "soft"
+#   assistant_voice_rate     — int (words-per-minute)
+#   assistant_voice_volume   — float string e.g. "1.0"
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VOICE_KEYS = [
+    "assistant_voice_id",
+    "assistant_voice_gender",
+    "assistant_voice_tone",
+    "assistant_voice_rate",
+    "assistant_voice_volume",
+]
+
+_TONE_PARAMS = {
+    "calm":         {"rate": 130, "volume": 0.9},
+    "professional": {"rate": 155, "volume": 1.0},
+    "friendly":     {"rate": 165, "volume": 1.0},
+    "energetic":    {"rate": 185, "volume": 1.0},
+    "soft":         {"rate": 125, "volume": 0.75},
+}
+
+
+def has_voice_profile_db(user_id) -> bool:
+    """Return True if this user has already configured a voice identity."""
+    if not user_id:
+        return False
+    val = get_user_preference_db(user_id, "assistant_voice_id", None)
+    return bool(val and str(val).strip())
+
+
+def get_voice_profile_db(user_id) -> dict:
+    """
+    Load the full voice profile for a user from user_preferences.
+    Returns a dict with keys: voice_id, voice_gender, voice_tone, voice_rate, voice_volume, voice_provider.
+    Missing keys fall back to safe defaults.
+    """
+    if not user_id:
+        return {}
+    profile = {}
+    profile["voice_id"]       = get_user_preference_db(user_id, "assistant_voice_id",       None)
+    profile["voice_gender"]   = get_user_preference_db(user_id, "assistant_voice_gender",   "male")
+    profile["voice_tone"]     = get_user_preference_db(user_id, "assistant_voice_tone",     "professional")
+    profile["voice_provider"] = get_user_preference_db(user_id, "assistant_voice_provider", "windows")
+    rate_str                  = get_user_preference_db(user_id, "assistant_voice_rate",     "155")
+    vol_str                   = get_user_preference_db(user_id, "assistant_voice_volume",   "1.0")
+    try:
+        profile["voice_rate"] = int(rate_str)
+    except (TypeError, ValueError):
+        profile["voice_rate"] = 155
+    try:
+        profile["voice_volume"] = float(vol_str)
+    except (TypeError, ValueError):
+        profile["voice_volume"] = 1.0
+    return profile
+
+
+def set_voice_profile_db(user_id, voice_id: str, voice_gender: str,
+                          voice_tone: str, voice_rate: int, voice_volume: float,
+                          voice_provider: str = "windows") -> bool:
+    """
+    Persist a complete voice profile for the given user.
+    Raises no exceptions — returns True on success, False otherwise.
+    """
+    if not user_id:
+        return False
+    ok = True
+    ok &= set_user_preference_db(user_id, "assistant_voice_id",       str(voice_id))
+    ok &= set_user_preference_db(user_id, "assistant_voice_gender",   str(voice_gender))
+    ok &= set_user_preference_db(user_id, "assistant_voice_tone",     str(voice_tone))
+    ok &= set_user_preference_db(user_id, "assistant_voice_rate",     str(voice_rate))
+    ok &= set_user_preference_db(user_id, "assistant_voice_volume",   str(voice_volume))
+    ok &= set_user_preference_db(user_id, "assistant_voice_provider", str(voice_provider))
+    print(f"[DB] Voice profile saved for user {user_id}: gender={voice_gender}, "
+          f"tone={voice_tone}, rate={voice_rate}, volume={voice_volume}, provider={voice_provider}")
+    return ok
 

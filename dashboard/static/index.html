@@ -1,0 +1,1568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Assistant — Web Control Surface</title>
+  <style>
+    :root {
+      --bg: #030608;
+      --bg-card: rgba(8, 14, 22, 0.78);
+      --bg-card-hover: rgba(12, 20, 32, 0.88);
+      --border: rgba(0, 212, 255, 0.18);
+      --border-hover: rgba(0, 212, 255, 0.45);
+      --cyan: #00d4ff;
+      --cyan-glow: rgba(0, 212, 255, 0.25);
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --green: #00e56b;
+      --green-glow: rgba(0, 229, 107, 0.2);
+      --amber: #ffaa30;
+      --red: #ff4757;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background-image:
+        linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+
+    /* ── Top Header ── */
+    header {
+      background: rgba(4, 7, 12, 0.92);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .badge-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: rgba(0, 212, 255, 0.12);
+      border: 1.5px solid var(--cyan);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 19px;
+      font-weight: 800;
+      color: var(--cyan);
+      box-shadow: 0 0 16px var(--cyan-glow);
+    }
+    .brand-title {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      color: var(--text);
+    }
+    .brand-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .undo-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(168, 85, 247, 0.15);
+      border: 1px solid var(--purple);
+      color: #d8b4fe;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .undo-btn:hover:not(:disabled) {
+      background: rgba(168, 85, 247, 0.35);
+      box-shadow: 0 0 12px rgba(168, 85, 247, 0.3);
+    }
+    .undo-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      border-color: rgba(255, 255, 255, 0.1);
+      color: var(--text-muted);
+    }
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      background: rgba(0, 212, 255, 0.08);
+      border: 1px solid var(--border);
+      color: var(--cyan);
+    }
+    .state-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--cyan);
+      box-shadow: 0 0 8px var(--cyan);
+    }
+
+    /* ── Main Layout ── */
+    main {
+      flex: 1;
+      padding: 20px 28px 40px;
+      max-width: 1400px;
+      margin: 0 auto;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    /* ── Telemetry Grid ── */
+    .telem-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+    }
+    .metric-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .metric-title {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+    .metric-val {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    /* ── Navigation Tabs ── */
+    .tabs-wrapper {
+      overflow-x: auto;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 6px;
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      min-width: max-content;
+    }
+    .tab-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tab-btn:hover {
+      color: var(--text);
+      background: rgba(0, 212, 255, 0.06);
+    }
+    .tab-btn.active {
+      background: rgba(0, 212, 255, 0.14);
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+
+    /* ── Tab Content Sections ── */
+    .tab-content {
+      display: none;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .tab-content.active {
+      display: flex;
+    }
+
+    .panel-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid rgba(0, 212, 255, 0.1);
+      padding-bottom: 12px;
+    }
+    .panel-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--cyan);
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* ── Terminal Feed ── */
+    .terminal-feed {
+      height: 260px;
+      overflow-y: auto;
+      background: rgba(4, 7, 12, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: monospace;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .term-msg {
+      line-height: 1.4;
+    }
+    .term-msg.user { color: var(--cyan); }
+    .term-msg.assistant { color: #e6edf3; }
+    .cmd-form {
+      display: flex;
+      gap: 10px;
+    }
+    .cmd-input {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: #fff;
+      font-size: 13px;
+      outline: none;
+    }
+    .cmd-input:focus {
+      border-color: var(--cyan);
+      box-shadow: 0 0 10px var(--cyan-glow);
+    }
+    .btn-action {
+      background: rgba(0, 212, 255, 0.16);
+      border: 1px solid var(--cyan);
+      color: var(--cyan);
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-action:hover {
+      background: rgba(0, 212, 255, 0.32);
+    }
+    .btn-danger {
+      background: rgba(255, 71, 87, 0.15);
+      border-color: var(--red);
+      color: var(--red);
+    }
+    .btn-danger:hover {
+      background: rgba(255, 71, 87, 0.32);
+    }
+    .btn-success {
+      background: rgba(0, 229, 107, 0.15);
+      border-color: var(--green);
+      color: var(--green);
+    }
+    .btn-success:hover {
+      background: rgba(0, 229, 107, 0.32);
+    }
+
+    /* ── Progress Bar ── */
+    .progress-bar-bg {
+      height: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--cyan), #3b82f6);
+      transition: width 0.3s ease;
+    }
+
+    /* ── Lists / Tables / Cards ── */
+    .data-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 380px;
+      overflow-y: auto;
+    }
+    .data-item {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 8px;
+      padding: 10px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .data-item:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(0, 212, 255, 0.18);
+    }
+    .grid-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 14px;
+    }
+    .device-card, .doc-card, .smart-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      transition: all 0.2s ease;
+    }
+    .device-card:hover, .doc-card:hover, .smart-card:hover {
+      border-color: var(--border-hover);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .badge-online { background: rgba(0, 229, 107, 0.15); color: var(--green); border: 1px solid var(--green); }
+    .badge-offline { background: rgba(255, 71, 87, 0.15); color: var(--red); border: 1px solid var(--red); }
+    .badge-cyan { background: rgba(0, 212, 255, 0.15); color: var(--cyan); border: 1px solid var(--cyan); }
+    .badge-amber { background: rgba(255, 170, 48, 0.15); color: var(--amber); border: 1px solid var(--amber); }
+
+    .empty-state {
+      padding: 36px 20px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+      border: 1px dashed rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(6px);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-card {
+      background: #080e16;
+      border: 1px solid var(--cyan);
+      box-shadow: 0 0 30px var(--cyan-glow);
+      border-radius: 14px;
+      padding: 24px;
+      max-width: 480px;
+      width: 90%;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Header -->
+  <header>
+    <div class="brand">
+      <div class="badge-icon" id="badgeInitial">A</div>
+      <div>
+        <div class="brand-title" id="assistantTitle">SMART ASSISTANT CONTROL SURFACE</div>
+        <div class="brand-sub">Canonical Unified Capability Surface</div>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <button class="undo-btn" id="btnGlobalUndo" onclick="triggerUndo()" title="Undo last reversible action">
+        <span>↶</span> <span id="undoLabel">Undo (0)</span>
+      </button>
+
+      <div class="state-pill" id="statePill">
+        <div class="state-dot" id="stateDot"></div>
+        <span id="stateText">IDLE</span>
+      </div>
+
+      <div style="font-size: 12px; color: var(--text-muted);" id="userLabel">User: user (ID: 1)</div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Telemetry Row -->
+    <div class="telem-grid">
+      <div class="metric-card">
+        <div class="metric-title">System State</div>
+        <div class="metric-val" id="metricState" style="color: var(--cyan);">IDLE</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">CPU Utilization</div>
+        <div class="metric-val" id="metricCPU">-- %</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">RAM Usage</div>
+        <div class="metric-val" id="metricRAM">-- %</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">PostgreSQL Database</div>
+        <div class="metric-val" id="metricDB" style="color: var(--green);">CONNECTED</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">Assistant Uptime</div>
+        <div class="metric-val" id="metricUptime">--</div>
+      </div>
+    </div>
+
+    <!-- 10 Navigation Tabs -->
+    <div class="tabs-wrapper">
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('tab-terminal')">💬 Terminal</button>
+        <button class="tab-btn" onclick="switchTab('tab-tasks')">⚡ Background Tasks</button>
+        <button class="tab-btn" onclick="switchTab('tab-devices')">📱 Mobile Devices</button>
+        <button class="tab-btn" onclick="switchTab('tab-smarthome')">🏠 Smart Home</button>
+        <button class="tab-btn" onclick="switchTab('tab-memory')">🧠 Memory & Rules</button>
+        <button class="tab-btn" onclick="switchTab('tab-files')">📁 Files & Explorer</button>
+        <button class="tab-btn" onclick="switchTab('tab-documents')">📄 Documents</button>
+        <button class="tab-btn" onclick="switchTab('tab-calendar')">📅 Calendar & Reminders</button>
+        <button class="tab-btn" onclick="switchTab('tab-audio')">🎧 Audio & System</button>
+        <button class="tab-btn" onclick="switchTab('tab-media')">🎵 Media Player</button>
+      </div>
+    </div>
+
+    <!-- TAB 1: Terminal & Chat -->
+    <div class="tab-content active" id="tab-terminal">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">💬 Interactive Assistant Terminal</div>
+          <button class="btn-action" style="padding: 4px 10px; font-size: 11px;" onclick="clearTerminal()">Clear</button>
+        </div>
+        <div class="terminal-feed" id="termFeed">
+          <div class="term-msg assistant">[System] Connected to Smart Assistant Core. Enter a command or voice instruction below.</div>
+        </div>
+        <form class="cmd-form" onsubmit="submitCommand(event)">
+          <input type="text" class="cmd-input" id="cmdInput" placeholder="Type a message or instruction for the assistant..." autocomplete="off">
+          <button type="submit" class="btn-action">Send Command</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- TAB 2: Background Tasks -->
+    <div class="tab-content" id="tab-tasks">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">⚡ Active Goal Planner Execution</div>
+          <button class="btn-action btn-danger" onclick="cancelTask()">Stop Running Task</button>
+        </div>
+        <div>
+          <div style="font-weight: 600; font-size: 13px; margin-bottom: 6px;" id="currentTaskLabel">No active planner task running</div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="taskProgressBar"></div>
+          </div>
+        </div>
+        <div style="font-size: 12px; color: var(--text-muted);" id="taskStepInfo">Standing by for execution</div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">📋 Persistent Background Task Queue</div>
+          <button class="btn-action" onclick="refreshTasks()">Refresh Queue</button>
+        </div>
+        <!-- Queue Form -->
+        <form class="cmd-form" onsubmit="submitQueueTask(event)">
+          <input type="text" class="cmd-input" id="queueTaskInput" placeholder="Submit background goal (e.g. 'Search for recent AI papers and save summary')..." autocomplete="off">
+          <button type="submit" class="btn-action btn-success">+ Queue Task</button>
+        </form>
+        <div class="data-list" id="taskQueueList">
+          <div class="empty-state">Loading tasks...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: Mobile Devices -->
+    <div class="tab-content" id="tab-devices">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">📱 Paired Mobile & Remote Devices</div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn-action btn-success" onclick="openPairModal()">+ Pair New Device</button>
+            <button class="btn-action" onclick="refreshDevices()">Refresh</button>
+          </div>
+        </div>
+        <div class="grid-cards" id="devicesGrid">
+          <div class="empty-state">Loading devices...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: Smart Home -->
+    <div class="tab-content" id="tab-smarthome">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">🏠 Smart Home Automation & Entities</div>
+          <button class="btn-action" onclick="refreshSmartHome()">Refresh Devices</button>
+        </div>
+        <div class="grid-cards" id="smartHomeGrid">
+          <div class="empty-state">Loading smart home entities...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 5: Memory & Rules -->
+    <div class="tab-content" id="tab-memory">
+      <!-- Section A: Learned Rules -->
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">🧠 Learned Behavioral Directives & Rules</div>
+          <button class="btn-action" onclick="refreshRules()">Refresh Rules</button>
+        </div>
+        <form class="cmd-form" onsubmit="submitNewRule(event)">
+          <input type="text" class="cmd-input" id="ruleInput" placeholder="Add learned directive (e.g. 'Always summarize emails in 3 bullet points')..." autocomplete="off">
+          <select class="cmd-input" style="flex:0 0 130px;" id="ruleCategory">
+            <option value="general">General</option>
+            <option value="coding">Coding</option>
+            <option value="communication">Communication</option>
+            <option value="appearance">Appearance</option>
+          </select>
+          <button type="submit" class="btn-action btn-success">+ Add Rule</button>
+        </form>
+        <div class="data-list" id="rulesList">
+          <div class="empty-state">Loading learned rules...</div>
+        </div>
+      </div>
+
+      <!-- Section B: PostgreSQL Memory & Notes -->
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">💾 PostgreSQL Long-Term Memory & Notes</div>
+          <button class="btn-action" onclick="refreshMemory()">Refresh Memory</button>
+        </div>
+        <div class="data-list" id="memoryList">
+          <div class="empty-state">Loading PostgreSQL memories...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 6: Files & Explorer -->
+    <div class="tab-content" id="tab-files">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">📁 Workspace File Explorer</div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn-action" onclick="findDuplicates()">Find Duplicates</button>
+            <button class="btn-action" onclick="refreshFiles()">Refresh</button>
+          </div>
+        </div>
+        <div id="fileStatsBar" style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">
+          Workspace Directory Analysis
+        </div>
+        <form class="cmd-form" onsubmit="searchFiles(event)">
+          <input type="text" class="cmd-input" id="fileSearchInput" placeholder="Search filenames in directory..." autocomplete="off">
+          <button type="submit" class="btn-action">Search</button>
+        </form>
+        <div class="data-list" id="fileList">
+          <div class="empty-state">Loading workspace files...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 7: Documents Gallery -->
+    <div class="tab-content" id="tab-documents">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">📄 Generated Document Artifacts (PDF, DOCX, XLSX, PPTX)</div>
+          <button class="btn-action" onclick="refreshDocuments()">Refresh Gallery</button>
+        </div>
+        <div class="grid-cards" id="documentsGrid">
+          <div class="empty-state">Loading generated documents...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 8: Calendar & Reminders -->
+    <div class="tab-content" id="tab-calendar">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">📅 Upcoming Calendar Schedule</div>
+          <button class="btn-action" onclick="refreshCalendar()">Refresh Calendar</button>
+        </div>
+        <form class="cmd-form" onsubmit="submitCalendarEvent(event)">
+          <input type="text" class="cmd-input" id="calTitle" placeholder="Event title..." required>
+          <input type="date" class="cmd-input" style="flex:0 0 140px;" id="calDate" required>
+          <input type="time" class="cmd-input" style="flex:0 0 110px;" id="calTime" value="09:00">
+          <button type="submit" class="btn-action btn-success">+ Add Event</button>
+        </form>
+        <div class="data-list" id="calendarList">
+          <div class="empty-state">Loading upcoming events...</div>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">⏰ PostgreSQL Reminders</div>
+          <button class="btn-action" onclick="refreshReminders()">Refresh Reminders</button>
+        </div>
+        <div class="data-list" id="remindersList">
+          <div class="empty-state">Loading reminders...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 9: Audio & System Context -->
+    <div class="tab-content" id="tab-audio">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">🎧 Audio Endpoints & DSP EchoGuard</div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn-action" onclick="playTestSound()">🔊 Play Test Sound</button>
+            <button class="btn-action" onclick="refreshAudio()">Refresh</button>
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+          <div>
+            <div style="font-size:12px; font-weight:700; color:var(--cyan); margin-bottom:8px;">OUTPUT SPEAKERS</div>
+            <select class="cmd-input" id="audioOutputSelect" style="width:100%; margin-bottom:10px;"></select>
+            <button class="btn-action" onclick="switchAudioOutput()">Switch Output Device</button>
+          </div>
+          <div>
+            <div style="font-size:12px; font-weight:700; color:var(--cyan); margin-bottom:8px;">ECHOGUARD DSP STATUS</div>
+            <div id="echoGuardStatus" style="font-size:13px; line-height:1.6; color:var(--text-muted);">
+              Calibrated: Checking...
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">🖥️ Active Window & Desktop Context</div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn-action" onclick="captureScreenshot()">📸 Capture Screenshot</button>
+            <button class="btn-action btn-danger" onclick="minimizeAllWindows()">Minimize All</button>
+            <button class="btn-action" onclick="refreshWindowContext()">Refresh</button>
+          </div>
+        </div>
+        <div id="windowContextDetails" style="font-size:13px; line-height:1.6; color:var(--text);">
+          Inspecting foreground desktop window...
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">📋 On-Demand Clipboard Technical Inspector</div>
+          <button class="btn-action" onclick="inspectClipboard()">Inspect Clipboard Now</button>
+        </div>
+        <div id="clipboardDetails" style="font-size:13px; line-height:1.6; color:var(--text-muted);">
+          Click "Inspect Clipboard Now" to analyze current clipboard technical content safely.
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 10: Media Player -->
+    <div class="tab-content" id="tab-media">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div class="panel-title">🎵 Media & Music Controller</div>
+          <button class="btn-action" onclick="refreshMusic()">Refresh Status</button>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:12px; align-items:center; text-align:center; padding:16px 0;">
+          <div style="font-size:18px; font-weight:700;" id="mediaTrackTitle">No media playing</div>
+          <div class="badge badge-amber" id="mediaStateBadge">STOPPED</div>
+          <div style="display:flex; gap:12px; margin-top:10px;">
+            <button class="btn-action" onclick="mediaAction('previous')">⏮ Prev</button>
+            <button class="btn-action btn-success" onclick="mediaAction('toggle_pause')">⏯ Play/Pause</button>
+            <button class="btn-action btn-danger" onclick="mediaAction('stop')">⏹ Stop</button>
+            <button class="btn-action" onclick="mediaAction('next')">⏭ Next</button>
+          </div>
+          <div style="display:flex; gap:10px; margin-top:8px;">
+            <button class="btn-action" onclick="mediaAction('volume_down')">🔉 Vol -</button>
+            <button class="btn-action" onclick="mediaAction('volume_mute')">🔇 Mute</button>
+            <button class="btn-action" onclick="mediaAction('volume_up')">🔊 Vol +</button>
+          </div>
+        </div>
+        <form class="cmd-form" onsubmit="playSongQuery(event)">
+          <input type="text" class="cmd-input" id="songQueryInput" placeholder="Search and play a song or artist..." autocomplete="off">
+          <button type="submit" class="btn-action btn-success">Play Song</button>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <!-- Modal for Pairing Offer -->
+  <div class="modal-overlay" id="pairModal">
+    <div class="modal-card">
+      <div class="panel-title" style="font-size:16px;">📱 Pair New Mobile Device</div>
+      <div style="font-size:13px; color:var(--text-muted);">
+        Enter this 6-digit code or pairing token in your mobile app to link your device securely:
+      </div>
+      <div style="font-size:32px; font-weight:800; letter-spacing:4px; color:var(--cyan); text-align:center; padding:12px; background:rgba(0,212,255,0.06); border-radius:8px;" id="pairCodeDisplay">
+        ------
+      </div>
+      <div style="font-size:11px; color:var(--text-muted); word-break:break-all;" id="pairTokenDisplay">
+        Token: --
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:8px;">
+        <button class="btn-action" onclick="closePairModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── TAB SWITCHING ────────────────────────────────────────────────────────
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      event.currentTarget.classList.add('active');
+      document.getElementById(tabId).classList.add('active');
+
+      if (tabId === 'tab-tasks') refreshTasks();
+      if (tabId === 'tab-devices') refreshDevices();
+      if (tabId === 'tab-smarthome') refreshSmartHome();
+      if (tabId === 'tab-memory') { refreshRules(); refreshMemory(); }
+      if (tabId === 'tab-files') refreshFiles();
+      if (tabId === 'tab-documents') refreshDocuments();
+      if (tabId === 'tab-calendar') { refreshCalendar(); refreshReminders(); }
+      if (tabId === 'tab-audio') { refreshAudio(); refreshWindowContext(); }
+      if (tabId === 'tab-media') refreshMusic();
+    }
+
+    function clearTerminal() {
+      document.getElementById('termFeed').innerHTML = '';
+    }
+
+    // ── CORE STATUS & TELEMETRY ──────────────────────────────────────────────
+    async function pollStatus() {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const json = await res.json();
+        const d = json.data;
+
+        if (d.assistant_name) {
+          document.getElementById('assistantTitle').innerText = `${d.assistant_name.toUpperCase()} CONTROL SURFACE`;
+          document.getElementById('badgeInitial').innerText = d.assistant_name[0].toUpperCase();
+        }
+        if (d.username) {
+          document.getElementById('userLabel').innerText = `User: ${d.username} (ID: ${d.user_id || '--'})`;
+        }
+
+        const state = (d.state || 'IDLE').toUpperCase();
+        document.getElementById('stateText').innerText = state;
+        document.getElementById('metricState').innerText = state;
+
+        const colors = {
+          'IDLE': '#00d4ff', 'LISTENING': '#00aaff', 'THINKING': '#a855f7',
+          'SPEAKING': '#00e56b', 'EXECUTING': '#ffaa30', 'ERROR': '#ff4757'
+        };
+        const c = colors[state] || '#00d4ff';
+        document.getElementById('stateDot').style.background = c;
+        document.getElementById('stateDot').style.boxShadow = `0 0 8px ${c}`;
+
+        document.getElementById('metricCPU').innerText = `${d.cpu_percent || 0} %`;
+        document.getElementById('metricRAM').innerText = `${d.ram_percent || 0} %`;
+        document.getElementById('metricDB').innerText = d.db_connected ? 'CONNECTED' : 'DISCONNECTED';
+        document.getElementById('metricDB').style.color = d.db_connected ? 'var(--green)' : 'var(--red)';
+        document.getElementById('metricUptime').innerText = d.uptime || '--';
+
+        pollUndo();
+      } catch (err) {
+        document.getElementById('stateText').innerText = 'OFFLINE';
+        document.getElementById('metricState').innerText = 'OFFLINE';
+      }
+    }
+
+    // ── GLOBAL UNDO ──────────────────────────────────────────────────────────
+    async function pollUndo() {
+      try {
+        const res = await fetch('/api/undo');
+        if (!res.ok) return;
+        const d = await res.json();
+        const btn = document.getElementById('btnGlobalUndo');
+        if (d.can_undo) {
+          btn.disabled = false;
+          document.getElementById('undoLabel').innerText = `Undo: ${d.latest || '1 action'}`;
+          btn.title = `Undo: ${d.latest}`;
+        } else {
+          btn.disabled = true;
+          document.getElementById('undoLabel').innerText = 'Undo (0)';
+          btn.title = 'No reversible actions in stack';
+        }
+      } catch (_) {}
+    }
+
+    async function triggerUndo() {
+      try {
+        const res = await fetch('/api/undo', { method: 'POST' });
+        const d = await res.json();
+        alert(d.message || (d.status === 'success' ? 'Reverted successfully.' : 'Could not undo.'));
+        pollUndo();
+      } catch (err) {
+        alert(`Undo error: ${err}`);
+      }
+    }
+
+    // ── TERMINAL COMMAND ─────────────────────────────────────────────────────
+    async function submitCommand(e) {
+      e.preventDefault();
+      const inp = document.getElementById('cmdInput');
+      const cmd = inp.value.trim();
+      if (!cmd) return;
+
+      const feed = document.getElementById('termFeed');
+      feed.innerHTML += `<div class="term-msg user">> ${escapeHtml(cmd)}</div>`;
+      inp.value = '';
+      feed.scrollTop = feed.scrollHeight;
+
+      try {
+        const res = await fetch('/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: cmd })
+        });
+        const json = await res.json();
+        feed.innerHTML += `<div class="term-msg assistant">${escapeHtml(json.response || 'Executed.')}</div>`;
+      } catch (err) {
+        feed.innerHTML += `<div class="term-msg" style="color: var(--red);">Error: ${err}</div>`;
+      }
+      feed.scrollTop = feed.scrollHeight;
+    }
+
+    // ── BACKGROUND TASKS & QUEUE ─────────────────────────────────────────────
+    async function refreshTasks() {
+      try {
+        const res = await fetch('/api/tasks');
+        if (!res.ok) return;
+        const d = await res.json();
+
+        // Active task
+        const act = d.active_task || {};
+        if (act.task) {
+          document.getElementById('currentTaskLabel').innerText = `Active Goal: ${act.task}`;
+          document.getElementById('taskProgressBar').style.width = `${act.progress || 0}%`;
+          document.getElementById('taskStepInfo').innerText = act.active_operation || 'In progress...';
+        } else {
+          document.getElementById('currentTaskLabel').innerText = 'No active planner task running';
+          document.getElementById('taskProgressBar').style.width = '0%';
+          document.getElementById('taskStepInfo').innerText = 'Standing by for planner execution';
+        }
+
+        // Persistent queue
+        const qList = document.getElementById('taskQueueList');
+        const queue = d.queue || [];
+        if (!queue.length) {
+          qList.innerHTML = '<div class="empty-state">No background tasks queued. Submit a goal above.</div>';
+          return;
+        }
+
+        let html = '';
+        for (const t of queue) {
+          const statusColors = {
+            'queued': 'badge-amber', 'running': 'badge-cyan', 'completed': 'badge-online',
+            'failed': 'badge-offline', 'cancelled': 'badge-offline'
+          };
+          const badgeClass = statusColors[t.status] || 'badge-amber';
+          html += `
+            <div class="data-item">
+              <div>
+                <span class="badge ${badgeClass}">${t.status}</span>
+                <span style="font-weight:600; margin-left:8px;">${escapeHtml(t.goal || '')}</span>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">ID: ${t.task_id} | Created: ${t.created_at || '--'}</div>
+              </div>
+              <div>
+                ${(t.status === 'queued' || t.status === 'running') ? `<button class="btn-action btn-danger" style="padding:4px 8px; font-size:11px;" onclick="cancelQueueTask('${t.task_id}')">Cancel</button>` : ''}
+              </div>
+            </div>`;
+        }
+        qList.innerHTML = html;
+      } catch (_) {}
+    }
+
+    async function submitQueueTask(e) {
+      e.preventDefault();
+      const inp = document.getElementById('queueTaskInput');
+      const goal = inp.value.trim();
+      if (!goal) return;
+      try {
+        const res = await fetch('/api/task/queue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ goal: goal })
+        });
+        const d = await res.json();
+        inp.value = '';
+        refreshTasks();
+      } catch (err) {
+        alert(`Error queueing task: ${err}`);
+      }
+    }
+
+    async function cancelTask() {
+      try {
+        await fetch('/api/task/cancel', { method: 'POST', body: JSON.stringify({}) });
+        refreshTasks();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function cancelQueueTask(taskId) {
+      try {
+        await fetch('/api/task/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: taskId })
+        });
+        refreshTasks();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    // ── MOBILE DEVICES ───────────────────────────────────────────────────────
+    async function refreshDevices() {
+      const grid = document.getElementById('devicesGrid');
+      grid.innerHTML = '<div class="empty-state">Loading devices...</div>';
+      try {
+        const res = await fetch('/api/devices');
+        const d = await res.json();
+        const devs = d.devices || [];
+        if (!devs.length) {
+          grid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">No mobile device connected. Click "+ Pair New Device" to pair an Android device.</div>';
+          return;
+        }
+
+        let html = '';
+        for (const dev of devs) {
+          const isConn = dev.is_connected;
+          html += `
+            <div class="device-card">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="font-weight:700; font-size:14px;">${escapeHtml(dev.device_name || 'Device')}</span>
+                <span class="badge ${isConn ? 'badge-online' : 'badge-offline'}">${isConn ? 'CONNECTED' : 'OFFLINE'}</span>
+              </div>
+              <div style="font-size:12px; color:var(--text-muted);">
+                Platform: ${dev.platform || 'Android'}<br>
+                Battery: ${dev.battery != null ? dev.battery + '%' : 'N/A'}<br>
+                Last Seen: ${dev.last_seen || '--'}
+              </div>
+              <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">
+                <button class="btn-action" style="padding:4px 8px; font-size:11px;" onclick="deviceAction('${dev.device_id}', 'flashlight_on')">🔦 Flashlight</button>
+                <button class="btn-action" style="padding:4px 8px; font-size:11px;" onclick="deviceAction('${dev.device_id}', 'battery')">⚡ Battery</button>
+                <button class="btn-action btn-danger" style="padding:4px 8px; font-size:11px;" onclick="unpairDevice('${dev.device_id}')">Unpair</button>
+              </div>
+            </div>`;
+        }
+        grid.innerHTML = html;
+      } catch (err) {
+        grid.innerHTML = `<div class="empty-state" style="color:var(--red);">Error loading devices: ${err}</div>`;
+      }
+    }
+
+    async function openPairModal() {
+      try {
+        const res = await fetch('/api/devices/pair', { method: 'POST' });
+        const d = await res.json();
+        document.getElementById('pairCodeDisplay').innerText = d.pairing_code || '------';
+        document.getElementById('pairTokenDisplay').innerText = `Token: ${d.pairing_token || '--'}`;
+        document.getElementById('pairModal').style.display = 'flex';
+      } catch (err) {
+        alert(`Pairing error: ${err}`);
+      }
+    }
+
+    function closePairModal() {
+      document.getElementById('pairModal').style.display = 'none';
+      refreshDevices();
+    }
+
+    async function unpairDevice(devId) {
+      if (!confirm(`Unpair device ${devId}?`)) return;
+      try {
+        await fetch('/api/devices/unpair', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_id: devId })
+        });
+        refreshDevices();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function deviceAction(devId, action) {
+      try {
+        const res = await fetch('/api/devices/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_id: devId, action: action })
+        });
+        const d = await res.json();
+        alert(d.message || d.status || 'Command dispatched.');
+        refreshDevices();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    // ── SMART HOME ───────────────────────────────────────────────────────────
+    async function refreshSmartHome() {
+      const grid = document.getElementById('smartHomeGrid');
+      grid.innerHTML = '<div class="empty-state">Loading smart home entities...</div>';
+      try {
+        const res = await fetch('/api/smarthome');
+        const d = await res.json();
+        const devs = d.devices || [];
+        if (!devs.length) {
+          grid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">No smart-home devices connected. Configure Home Assistant or MQTT.</div>';
+          return;
+        }
+
+        let html = '';
+        for (const dev of devs) {
+          const isOnline = dev.is_online;
+          const isOn = dev.state && dev.state.is_on;
+          html += `
+            <div class="smart-card">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="font-weight:700; font-size:14px;">${escapeHtml(dev.name || 'Entity')}</span>
+                <span class="badge ${isOnline ? 'badge-online' : 'badge-offline'}">${isOnline ? 'ONLINE' : 'OFFLINE'}</span>
+              </div>
+              <div style="font-size:12px; color:var(--text-muted);">
+                Room: ${dev.room || 'General'}<br>
+                Type: ${dev.device_type || 'Device'}<br>
+                Power: <strong style="color:${isOn ? 'var(--green)' : 'var(--text-muted)'};">${isOn ? 'ON' : 'OFF'}</strong>
+              </div>
+              <div style="display:flex; gap:6px; margin-top:6px;">
+                <button class="btn-action btn-success" style="padding:4px 10px; font-size:11px;" onclick="setPower('${dev.name}', true)">Turn On</button>
+                <button class="btn-action btn-danger" style="padding:4px 10px; font-size:11px;" onclick="setPower('${dev.name}', false)">Turn Off</button>
+              </div>
+            </div>`;
+        }
+        grid.innerHTML = html;
+      } catch (err) {
+        grid.innerHTML = `<div class="empty-state" style="color:var(--red);">Error: ${err}</div>`;
+      }
+    }
+
+    async function setPower(target, isOn) {
+      try {
+        const res = await fetch('/api/smarthome/power', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: target, is_on: isOn })
+        });
+        refreshSmartHome();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    // ── LEARNED RULES & MEMORY ───────────────────────────────────────────────
+    async function refreshRules() {
+      const list = document.getElementById('rulesList');
+      try {
+        const res = await fetch('/api/rules');
+        const d = await res.json();
+        const rules = d.rules || [];
+        if (!rules.length) {
+          list.innerHTML = '<div class="empty-state">No learned rules established yet. Add one above.</div>';
+          return;
+        }
+
+        let html = '';
+        for (const r of rules) {
+          html += `
+            <div class="data-item">
+              <div>
+                <span class="badge badge-cyan">${escapeHtml(r.category || 'general')}</span>
+                <span style="font-weight:600; margin-left:8px;">${escapeHtml(r.rule || '')}</span>
+                <span style="font-size:11px; color:${r.active ? 'var(--green)' : 'var(--red)'}; margin-left:8px;">[${r.active ? 'ACTIVE' : 'DISABLED'}]</span>
+              </div>
+              <div style="display:flex; gap:6px;">
+                <button class="btn-action" style="padding:4px 8px; font-size:11px;" onclick="toggleRule('${r.id}')">${r.active ? 'Disable' : 'Enable'}</button>
+                <button class="btn-action btn-danger" style="padding:4px 8px; font-size:11px;" onclick="deleteRule('${r.id}')">Delete</button>
+              </div>
+            </div>`;
+        }
+        list.innerHTML = html;
+      } catch (_) {}
+    }
+
+    async function submitNewRule(e) {
+      e.preventDefault();
+      const inp = document.getElementById('ruleInput');
+      const cat = document.getElementById('ruleCategory').value;
+      const text = inp.value.trim();
+      if (!text) return;
+      try {
+        await fetch('/api/rules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rule_text: text, category: cat })
+        });
+        inp.value = '';
+        refreshRules();
+      } catch (err) { alert(`Error adding rule: ${err}`); }
+    }
+
+    async function toggleRule(ruleId) {
+      try {
+        await fetch('/api/rules/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rule_id: ruleId })
+        });
+        refreshRules();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function deleteRule(ruleId) {
+      if (!confirm('Delete this learned rule?')) return;
+      try {
+        await fetch('/api/rules/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rule_id: ruleId })
+        });
+        refreshRules();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function refreshMemory() {
+      const list = document.getElementById('memoryList');
+      list.innerHTML = '<div class="empty-state">Loading PostgreSQL memories...</div>';
+      try {
+        const res = await fetch('/api/memory');
+        const json = await res.json();
+        const mem = json.memory || {};
+        const notes = json.notes || [];
+
+        let html = '';
+        for (const [k, v] of Object.entries(mem)) {
+          html += `<div class="data-item"><span style="font-weight:600; color:var(--cyan);">${escapeHtml(k)}</span><span style="color:var(--text-muted);">${escapeHtml(String(v))}</span></div>`;
+        }
+        for (const note of notes) {
+          const content = typeof note === 'string' ? note : (note.content || note.note || JSON.stringify(note));
+          html += `<div class="data-item"><span style="font-weight:600; color:var(--purple);">📝 Note</span><span>${escapeHtml(content)}</span></div>`;
+        }
+        list.innerHTML = html || '<div class="empty-state">No PostgreSQL memories saved yet.</div>';
+      } catch (err) {
+        list.innerHTML = `<div class="empty-state" style="color:var(--red);">Error: ${err}</div>`;
+      }
+    }
+
+    // ── FILES & EXPLORER ─────────────────────────────────────────────────────
+    async function refreshFiles(pathArg) {
+      const list = document.getElementById('fileList');
+      list.innerHTML = '<div class="empty-state">Loading files...</div>';
+      try {
+        const url = pathArg ? `/api/files?path=${encodeURIComponent(pathArg)}` : '/api/files';
+        const res = await fetch(url);
+        const d = await res.json();
+        const files = d.files || [];
+        const stats = d.stats || {};
+
+        document.getElementById('fileStatsBar').innerText = `Directory: ${d.current_directory || '--'} | Total Files: ${stats.total_files || files.length} | Size: ${stats.total_size_mb || 0} MB`;
+
+        if (!files.length) {
+          list.innerHTML = '<div class="empty-state">Directory is empty.</div>';
+          return;
+        }
+
+        let html = '';
+        for (const f of files.slice(0, 50)) {
+          const isDir = f.is_dir;
+          html += `
+            <div class="data-item">
+              <div>
+                <span>${isDir ? '📁' : '📄'}</span>
+                <span style="font-weight:600; margin-left:6px; cursor:${isDir ? 'pointer' : 'default'};" ${isDir ? `onclick="refreshFiles('${escapeHtml(f.path)}')"` : ''}>${escapeHtml(f.name)}</span>
+                <span style="font-size:11px; color:var(--text-muted); margin-left:8px;">${f.size_formatted || ''}</span>
+              </div>
+              <div style="display:flex; gap:6px;">
+                <button class="btn-action" style="padding:4px 8px; font-size:11px;" onclick="openFilePath('${escapeHtml(f.path)}')">Open</button>
+                <button class="btn-action btn-danger" style="padding:4px 8px; font-size:11px;" onclick="safeDeleteFile('${escapeHtml(f.path)}')">Delete</button>
+              </div>
+            </div>`;
+        }
+        list.innerHTML = html;
+      } catch (err) {
+        list.innerHTML = `<div class="empty-state" style="color:var(--red);">Error: ${err}</div>`;
+      }
+    }
+
+    async function searchFiles(e) {
+      e.preventDefault();
+      const q = document.getElementById('fileSearchInput').value.trim();
+      if (!q) return refreshFiles();
+      const list = document.getElementById('fileList');
+      list.innerHTML = '<div class="empty-state">Searching...</div>';
+      try {
+        const res = await fetch(`/api/files?query=${encodeURIComponent(q)}`);
+        const d = await res.json();
+        const files = d.files || [];
+        if (!files.length) {
+          list.innerHTML = `<div class="empty-state">No files matching "${escapeHtml(q)}".</div>`;
+          return;
+        }
+        let html = '';
+        for (const f of files) {
+          html += `
+            <div class="data-item">
+              <div>
+                <span>📄</span>
+                <span style="font-weight:600; margin-left:6px;">${escapeHtml(f.name)}</span>
+                <div style="font-size:11px; color:var(--text-muted);">${escapeHtml(f.path)}</div>
+              </div>
+              <div><button class="btn-action" style="padding:4px 8px; font-size:11px;" onclick="openFilePath('${escapeHtml(f.path)}')">Open</button></div>
+            </div>`;
+        }
+        list.innerHTML = html;
+      } catch (err) { list.innerHTML = `<div class="empty-state" style="color:var(--red);">Error: ${err}</div>`; }
+    }
+
+    async function findDuplicates() {
+      try {
+        const res = await fetch('/api/files/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'duplicates' })
+        });
+        const d = await res.json();
+        const dups = d.duplicates || [];
+        if (!dups.length) {
+          alert('No duplicate files detected in workspace.');
+        } else {
+          alert(`Found ${dups.length} duplicate groups.`);
+        }
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function openFilePath(path) {
+      try {
+        await fetch('/api/files/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'open', path: path })
+        });
+      } catch (err) { alert(`Error opening: ${err}`); }
+    }
+
+    async function safeDeleteFile(path) {
+      if (!confirm(`Safely move file to Trash?\n${path}`)) return;
+      try {
+        const res = await fetch('/api/files/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'delete', path: path })
+        });
+        const d = await res.json();
+        alert(d.message || (d.success ? 'Moved to recycle bin.' : 'Error deleting.'));
+        refreshFiles();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    // ── GENERATED DOCUMENTS ──────────────────────────────────────────────────
+    async function refreshDocuments() {
+      const grid = document.getElementById('documentsGrid');
+      grid.innerHTML = '<div class="empty-state">Loading generated documents...</div>';
+      try {
+        const res = await fetch('/api/documents');
+        const d = await res.json();
+        const docs = d.documents || [];
+        if (!docs.length) {
+          grid.innerHTML = '<div class="empty-state" style="grid-column: 1/-1;">No generated document artifacts found in output directory.</div>';
+          return;
+        }
+
+        let html = '';
+        for (const doc of docs) {
+          html += `
+            <div class="doc-card">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span class="badge badge-cyan">${doc.ext}</span>
+                <span style="font-size:11px; color:var(--text-muted);">${doc.size_formatted}</span>
+              </div>
+              <div style="font-weight:700; font-size:13px; word-break:break-all;">${escapeHtml(doc.filename)}</div>
+              <div style="font-size:11px; color:var(--text-muted);">Created: ${doc.created_at}</div>
+              <button class="btn-action" style="margin-top:6px;" onclick="openDocPath('${escapeHtml(doc.path)}')">Open Document</button>
+            </div>`;
+        }
+        grid.innerHTML = html;
+      } catch (err) { grid.innerHTML = `<div class="empty-state" style="color:var(--red);">Error: ${err}</div>`; }
+    }
+
+    async function openDocPath(path) {
+      try {
+        await fetch('/api/documents/open', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: path })
+        });
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    // ── CALENDAR & REMINDERS ─────────────────────────────────────────────────
+    async function refreshCalendar() {
+      const list = document.getElementById('calendarList');
+      list.innerHTML = '<div class="empty-state">Loading upcoming events...</div>';
+      try {
+        const res = await fetch('/api/calendar');
+        const d = await res.json();
+        const evs = d.events || [];
+        if (!evs.length) {
+          list.innerHTML = '<div class="empty-state">No upcoming events scheduled. Add an event above.</div>';
+          return;
+        }
+
+        let html = '';
+        for (const ev of evs) {
+          html += `
+            <div class="data-item">
+              <div>
+                <span style="font-weight:700; color:var(--cyan);">${escapeHtml(ev.date)} ${escapeHtml(ev.time || '')}</span>
+                <span style="font-weight:600; margin-left:10px;">${escapeHtml(ev.title)}</span>
+                ${ev.conflict ? '<span class="badge badge-amber" style="margin-left:8px;">⚠️ Conflict</span>' : ''}
+              </div>
+            </div>`;
+        }
+        list.innerHTML = html;
+      } catch (err) { list.innerHTML = `<div class="empty-state" style="color:var(--red);">Error: ${err}</div>`; }
+    }
+
+    async function submitCalendarEvent(e) {
+      e.preventDefault();
+      const title = document.getElementById('calTitle').value.trim();
+      const date = document.getElementById('calDate').value;
+      const time = document.getElementById('calTime').value;
+      if (!title || !date) return;
+      try {
+        await fetch('/api/calendar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: title, date: date, time: time })
+        });
+        document.getElementById('calTitle').value = '';
+        refreshCalendar();
+      } catch (err) { alert(`Error adding event: ${err}`); }
+    }
+
+    async function refreshReminders() {
+      const list = document.getElementById('remindersList');
+      list.innerHTML = '<div class="empty-state">Loading reminders...</div>';
+      try {
+        const res = await fetch('/api/reminders');
+        const json = await res.json();
+        const rems = json.reminders || [];
+        if (!rems.length) {
+          list.innerHTML = '<div class="empty-state">No upcoming reminders scheduled.</div>';
+          return;
+        }
+        let html = '';
+        for (const r of rems) {
+          html += `<div class="data-item"><span style="font-weight:600; color:var(--amber);">⏰ ${escapeHtml(r.title)}</span><span style="color:var(--text-muted);">${escapeHtml(r.reminder_time)}</span></div>`;
+        }
+        list.innerHTML = html;
+      } catch (err) { list.innerHTML = `<div class="empty-state" style="color:var(--red);">Error: ${err}</div>`; }
+    }
+
+    // ── AUDIO & SYSTEM CONTEXT ───────────────────────────────────────────────
+    async function refreshAudio() {
+      try {
+        const res = await fetch('/api/audio');
+        const d = await res.json();
+        const select = document.getElementById('audioOutputSelect');
+        select.innerHTML = '';
+        (d.outputs || []).forEach(out => {
+          const opt = document.createElement('option');
+          opt.value = out;
+          opt.innerText = out;
+          select.appendChild(opt);
+        });
+
+        const eg = d.echoguard || {};
+        document.getElementById('echoGuardStatus').innerHTML = `
+          Calibrated: <strong>${eg.calibrated ? 'YES' : 'STANDBY'}</strong><br>
+          Noise Floor: <strong>${eg.floor || 0}</strong><br>
+          Energy Threshold: <strong>${eg.threshold || 0}</strong><br>
+          Echo Filter Reliable: <strong style="color:${eg.reliable ? 'var(--green)' : 'var(--amber)'};">${eg.reliable ? 'ONLINE' : 'TRAINING'}</strong>
+        `;
+      } catch (_) {}
+    }
+
+    async function switchAudioOutput() {
+      const sel = document.getElementById('audioOutputSelect').value;
+      if (!sel) return;
+      try {
+        const res = await fetch('/api/audio/switch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device: sel, kind: 'output' })
+        });
+        const d = await res.json();
+        alert(d.message || 'Switched audio output device.');
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function playTestSound() {
+      try {
+        await fetch('/api/audio/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sound: 'alert' })
+        });
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function refreshWindowContext() {
+      const details = document.getElementById('windowContextDetails');
+      try {
+        const res = await fetch('/api/window');
+        const d = await res.json();
+        const win = (d.data && d.data.info) || {};
+        details.innerHTML = `
+          Active Window: <strong style="color:var(--cyan);">${escapeHtml(win.title || 'Desktop')}</strong><br>
+          Process: <strong>${escapeHtml(win.class_name || 'N/A')}</strong> | PID: <strong>${win.pid || 'N/A'}</strong><br>
+          Dimensions: <strong>${JSON.stringify(win.rect || [])}</strong>
+        `;
+      } catch (_) { details.innerText = 'Could not inspect active window.'; }
+    }
+
+    async function captureScreenshot() {
+      try {
+        const res = await fetch('/api/window/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'screenshot' })
+        });
+        const d = await res.json();
+        alert(d.message || (d.success ? 'Screenshot captured.' : 'Capture failed.'));
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function minimizeAllWindows() {
+      try {
+        await fetch('/api/window/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'minimize_all' })
+        });
+        refreshWindowContext();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function inspectClipboard() {
+      const details = document.getElementById('clipboardDetails');
+      details.innerText = 'Inspecting clipboard...';
+      try {
+        const res = await fetch('/api/clipboard');
+        const d = await res.json();
+        const clip = d.clipboard || {};
+        if (clip.success) {
+          details.innerHTML = `
+            Category: <span class="badge badge-cyan">${escapeHtml(clip.category_label || clip.category)}</span><br>
+            Character Count: <strong>${clip.char_count}</strong><br>
+            <div style="background:rgba(0,0,0,0.4); padding:8px; border-radius:6px; font-family:monospace; margin-top:6px; font-size:12px;">${escapeHtml(clip.preview || '')}</div>
+          `;
+        } else {
+          details.innerText = clip.message || 'Clipboard empty or not accessible.';
+        }
+      } catch (err) { details.innerText = `Error: ${err}`; }
+    }
+
+    // ── MEDIA PLAYER ─────────────────────────────────────────────────────────
+    async function refreshMusic() {
+      try {
+        const res = await fetch('/api/music');
+        const d = await res.json();
+        const m = d.music || {};
+        document.getElementById('mediaTrackTitle').innerText = m.current_song || (m.queue_length > 0 ? `Queue (${m.queue_length} songs)` : 'No media playing');
+        const isPl = m.is_playing;
+        const badge = document.getElementById('mediaStateBadge');
+        badge.innerText = isPl ? 'PLAYING' : 'IDLE';
+        badge.className = `badge ${isPl ? 'badge-online' : 'badge-amber'}`;
+      } catch (_) {}
+    }
+
+    async function mediaAction(act) {
+      try {
+        const res = await fetch('/api/music/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: act })
+        });
+        refreshMusic();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    async function playSongQuery(e) {
+      e.preventDefault();
+      const q = document.getElementById('songQueryInput').value.trim();
+      if (!q) return;
+      try {
+        const res = await fetch('/api/music/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'play', query: q })
+        });
+        document.getElementById('songQueryInput').value = '';
+        refreshMusic();
+      } catch (err) { alert(`Error: ${err}`); }
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ── AUTO-REFRESH LOOPS ───────────────────────────────────────────────────
+    setInterval(pollStatus, 1000);
+    setInterval(refreshTasks, 2000);
+    pollStatus();
+  </script>
+</body>
+</html>

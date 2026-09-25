@@ -11,20 +11,18 @@ Startup Order (Enforced):
 1. Configuration (settings)
 2. Logging
 3. TTS Coordinator (no other TTS calls until this is ready)
-4. Wake State Manager (before hotword listener)
-5. Database/Memory
-6. RAG System
-7. Reminder Engine
-8. Personality Engine
-9. GUI/Hotword (background services)
+4. Database/Memory
+5. RAG System
+6. Reminder Engine
+7. Personality Engine
+8. GUI (background services)
 
 Shutdown Order (Reverse):
-1. Stop hotword listener
-2. Stop reminder scheduler
-3. Stop proactive interaction
-4. Stop TTS coordinator (flush queue)
-5. Close GUI
-6. Close database
+1. Stop reminder scheduler
+2. Stop proactive interaction
+3. Stop TTS coordinator (flush queue)
+4. Close GUI
+5. Close database
 """
 
 import logging
@@ -41,9 +39,9 @@ class InitializationPhase(Enum):
     UNINITIALIZED = 0
     CONFIGURATION = 1
     LOGGING = 2
-    CORE_SERVICES = 3      # TTS Coordinator, State Manager
+    CORE_SERVICES = 3      # TTS Coordinator
     DATA_SERVICES = 4      # Database, Memory, RAG
-    BACKGROUND_SERVICES = 5  # Reminders, Proactive, Hotword
+    BACKGROUND_SERVICES = 5  # Reminders, Proactive
     READY = 6
     SHUTTING_DOWN = 7
     SHUTDOWN = 8
@@ -126,14 +124,8 @@ class ServiceInitializer:
             with self.lock:
                 self.phase = InitializationPhase.SHUTTING_DOWN
             
-            # Stop background services (hotword, reminders, proactive)
+            # Stop background services (reminders, proactive)
             logger.info("[INIT] Stopping background services...")
-            try:
-                from legacy.hotword_listener import stop_hotword_service
-                stop_hotword_service()
-                logger.info("[INIT] ✅ Hotword listener stopped")
-            except Exception as e:
-                logger.warning(f"[INIT] Failed to stop hotword: {e}")
             
             # Stop reminder scheduler
             reminder_scheduler = self.get_service("reminder_scheduler")
@@ -153,6 +145,14 @@ class ServiceInitializer:
                     logger.info("[INIT] ✅ Proactive interaction stopped")
             except Exception as e:
                 logger.warning(f"[INIT] Failed to stop proactive interaction: {e}")
+
+            # Stop proactive observation coordinator (Phase 6)
+            try:
+                from core.proactive_observer import ProactiveObservationCoordinator
+                ProactiveObservationCoordinator.get_instance().stop()
+                logger.info("[INIT] ✅ Proactive observation coordinator stopped")
+            except Exception as e:
+                logger.warning(f"[INIT] Failed to stop proactive observation coordinator: {e}")
             
             # Stop TTS coordinator (flush queue)
             logger.info("[INIT] Stopping TTS coordinator...")
@@ -214,7 +214,7 @@ class ServiceInitializer:
         logger.info("[INIT] ✅ Logging ready")
     
     def _phase_core_services(self):
-        """Phase 3: Core services (TTS Coordinator, State Manager)"""
+        """Phase 3: Core services (TTS Coordinator)"""
         logger.info("[INIT] Phase 3: Core Services")
         with self.lock:
             self.phase = InitializationPhase.CORE_SERVICES
@@ -227,15 +227,6 @@ class ServiceInitializer:
             logger.info("[INIT] ✅ TTS Coordinator initialized")
         except Exception as e:
             logger.error(f"[INIT] TTS Coordinator initialization failed: {e}")
-            raise
-        
-        # Wake State Manager
-        try:
-            from extensions.system.wake_state_manager import initialize_wake_state_manager
-            initialize_wake_state_manager()
-            logger.info("[INIT] ✅ Wake State Manager initialized")
-        except Exception as e:
-            logger.error(f"[INIT] Wake State Manager initialization failed: {e}")
             raise
     
     def _phase_data_services(self):
@@ -268,6 +259,18 @@ class ServiceInitializer:
             logger.info("[INIT] ✅ Proactive interaction ready")
         except Exception as e:
             logger.warning(f"[INIT] Proactive interaction warning: {e}")
+
+        # Proactive Observation Coordinator (Phase 6)
+        try:
+            from core.proactive_observer import ProactiveObservationCoordinator
+            from instance.config import settings
+            uid = getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user() or "default"
+            coord = ProactiveObservationCoordinator.get_instance()
+            coord.start(str(uid))
+            self.register_service("proactive_coordinator", coord)
+            logger.info(f"[INIT] ✅ Proactive observation coordinator started for user '{uid}'")
+        except Exception as e:
+            logger.warning(f"[INIT] Proactive observation coordinator warning: {e}")
     
     def get_status(self) -> Dict[str, Any]:
         """Get initialization status"""

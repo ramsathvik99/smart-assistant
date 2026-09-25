@@ -22,18 +22,16 @@ _tk_root = None
 _floating_button = None
 _launcher_panel = None
 _main_ui_instance = None
-_hotword_thread = None
 _on_login_success_callback = None
 
 
-def set_references(root, floating_button=None, launcher_panel=None, main_ui_instance=None, hotword_thread=None, on_login_success_callback=None):
+def set_references(root, floating_button=None, launcher_panel=None, main_ui_instance=None, on_login_success_callback=None):
     """Set global references for shutdown."""
-    global _tk_root, _floating_button, _launcher_panel, _main_ui_instance, _hotword_thread, _on_login_success_callback
+    global _tk_root, _floating_button, _launcher_panel, _main_ui_instance, _on_login_success_callback
     _tk_root = root
     _floating_button = floating_button
     _launcher_panel = launcher_panel
     _main_ui_instance = main_ui_instance
-    _hotword_thread = hotword_thread
     _on_login_success_callback = on_login_success_callback
     log_debug("Shutdown manager initialized with references")
 
@@ -119,15 +117,14 @@ def logout_user():
 
 
 def _stop_voice_listener():
-    """Stop the voice/hotword listener."""
-    log_debug("Stopping voice listener")
+    """Stop the continuous audio listener."""
+    log_debug("Stopping continuous audio listener")
     try:
-        # The hotword thread runs in a loop - we can't directly kill it
-        # But we can let it naturally exit when the application continues
-        # The next login will start a new hotword thread
-        pass
+        from legacy.sst import stop_continuous_audio_stream
+        stop_continuous_audio_stream()
+        log_debug("Continuous audio listener stopped")
     except Exception as e:
-        log_debug(f"Error stopping voice listener: {e}")
+        log_debug(f"Error stopping continuous audio listener: {e}")
 
 
 def _stop_background_services():
@@ -139,6 +136,15 @@ def _stop_background_services():
             from legacy.proactive_interaction import stop_proactive_interaction
             stop_proactive_interaction()
         except:
+            pass
+
+        # Stop proactive observation coordinator (Phase 6)
+        try:
+            from core.proactive_observer import proactive_coordinator
+            from instance.config import settings
+            uid = getattr(settings, 'CURRENT_USER_ID', None)
+            proactive_coordinator.logout_user(str(uid) if uid else None)
+        except Exception:
             pass
         
         # Stop any running threads

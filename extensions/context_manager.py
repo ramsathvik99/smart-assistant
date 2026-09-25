@@ -1,6 +1,7 @@
 # context_manager.py
+import os
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 class ContextType:
     BROWSER = "browser"
@@ -12,11 +13,16 @@ class ContextManager:
     """
     SINGLE CONTEXT MANAGER (CRITICAL)
     Tracks conversational memory and active domain context (apps/websites).
+    Also manages user-isolated short-term artifact references ("it", "that file", "the PDF").
     """
     def __init__(self, max_history=10, db_manager=None):
         self.max_history = max_history
         self.history = [] # List of {'role': 'user'/'assistant', 'text': str, 'intent': str, 'timestamp': float}
         
+        # USER-ISOLATED SHORT-TERM ARTIFACT CONTEXT
+        # Map: user_id -> List of artifact dicts
+        self.user_artifacts: Dict[Any, List[Dict[str, Any]]] = {}
+
         # ACTIVE DOMAIN CONTEXT
         self.active_context = {
             "type": ContextType.NONE,
@@ -44,6 +50,58 @@ class ContextManager:
         # Database Manager Reference (dependency injection)
         self.db_manager = db_manager
         self.current_user_id = None
+
+    def _resolve_uid(self, user_id: Any = None) -> Any:
+        if user_id is not None:
+            return user_id
+        if self.current_user_id is not None:
+            return self.current_user_id
+        try:
+            from instance.config import settings
+            return getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user() or 1
+        except Exception:
+            return 1
+
+    def add_user_artifact(self, user_id: Any, artifact: Dict[str, Any]):
+        """Register a successfully created file/artifact for user short-term reference."""
+        uid = self._resolve_uid(user_id)
+        if uid not in self.user_artifacts:
+            self.user_artifacts[uid] = []
+        
+        raw_path = artifact.get("path") or artifact.get("filepath")
+        if not raw_path:
+            return
+
+        ext = (artifact.get("type") or "").lower().lstrip(".")
+        if not ext and "." in os.path.basename(raw_path):
+            ext = os.path.basename(raw_path).rsplit(".", 1)[-1].lower()
+
+        art_entry = {
+            "path": os.path.abspath(raw_path),
+            "filename": artifact.get("filename") or os.path.basename(raw_path),
+            "type": ext,
+            "source_action": artifact.get("source_action", "file_creation"),
+            "timestamp": artifact.get("timestamp", time.time())
+        }
+        # Prepend to list, keeping max 20 entries
+        self.user_artifacts[uid].insert(0, art_entry)
+        self.user_artifacts[uid] = self.user_artifacts[uid][:20]
+        print(f"[CONTEXT] Artifact registered for user {uid}: {art_entry['filename']} ({art_entry['type']})")
+
+    def get_recent_user_artifacts(self, user_id: Any = None, artifact_type: Optional[str] = None, limit: int = 5) -> List[Dict[str, Any]]:
+        """Get recent artifacts for the given user, optionally filtered by file type."""
+        uid = self._resolve_uid(user_id)
+        arts = self.user_artifacts.get(uid, [])
+        if artifact_type:
+            target_type = artifact_type.lower().lstrip(".")
+            arts = [a for a in arts if a.get("type") == target_type or a.get("filename", "").lower().endswith(f".{target_type}")]
+        return arts[:limit]
+
+    def get_last_user_artifact(self, user_id: Any = None, artifact_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get the most recent artifact for the given user."""
+        arts = self.get_recent_user_artifacts(user_id=user_id, artifact_type=artifact_type, limit=1)
+        return arts[0] if arts else None
+
 
     def set_active_preference(self, key: str, value: Any):
         self.active_preferences[key] = value

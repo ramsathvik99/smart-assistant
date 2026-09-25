@@ -157,7 +157,7 @@ class SpecialDaysService:
                 results.append(h)
         if results: return results
         
-        from core.chatbrain import call_openai, call_gemini, call_groq
+        from extensions.ai_utils import call_openai, call_gemini, call_groq
         system_prompt = f"Identify the official holiday name for '{name}' in {self.region}. Return ONLY the official name or 'None'."
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": name}]
         resolved = call_openai(messages) or call_gemini(messages) or call_groq(messages)

@@ -85,25 +85,13 @@ def get_memory_for_personality() -> List[str] | None:
     print("[DEBUG] Personality memory system DISABLED to prevent LLM interference")
     return None
 
-# Command Intelligence Layer — REMOVED (module deleted in Phase 1 refactor)
-memory = None
-context = None
-router = None
-executor = None
-
-# Initialize Proactive Recommendations
-try:
-    from extensions.proactive_recommendations import get_proactive_engine, update_user_activity
-    proactive_engine = get_proactive_engine()
-    print("[PROACTIVE RECOMMENDATIONS] Initialized successfully")
-except ImportError as e:
-    print(f"[PROACTIVE RECOMMENDATIONS] Import failed: {e}")
-    proactive_engine = None
-    def update_user_activity(): pass
 
 # Initialize Reminder Engine
 try:
     from extensions.reminder_engine import initialize_scheduler
+    from extensions.database_manager import DatabaseManager
+    from legacy.memory_manager import get_connection
+    from instance.config import settings
     # NOTE: Do NOT re-import legacy.tts.speak here — it would shadow the
     # TTS coordinator's speak() imported at the top of this module and
     # break every call that passes priority=TTSPriority.COMMAND.
@@ -121,13 +109,34 @@ try:
         except Exception as e:
             print(f"[REMINDER ALERT] Sound failed: {e}")
 
+    # Create database manager for reminder persistence
+    class SimplePoolWrapper:
+        def __init__(self, connection_func):
+            self.get_connection = connection_func
+        
+        def getconn(self):
+            return self.get_connection()
+        
+        def putconn(self, conn):
+            try:
+                conn.close()
+            except:
+                pass
+
+    db_manager = DatabaseManager(SimplePoolWrapper(get_connection))
+
+    # Get the authenticated user ID from session
+    user_id = getattr(settings, 'CURRENT_USER_ID', None)
+
     # Use the coordinator's speak() (already imported at module top).
     # It will route through the priority queue to legacy.tts.speak().
     reminder_scheduler = initialize_scheduler(
         tts_callback=speak,
-        sound_callback=reminder_sound_alert
+        sound_callback=reminder_sound_alert,
+        db_manager=db_manager,
+        user_id=user_id
     )
-    print("[REMINDER ENGINE] Initialized successfully")
+    print(f"[REMINDER ENGINE] Initialized successfully with database persistence for user {user_id}")
 except ImportError as e:
     print(f"[REMINDER ENGINE] Import failed: {e}")
     reminder_scheduler = None
@@ -264,7 +273,7 @@ def extract_history_query(user_input):
 # 1) MAIN COMMAND PROCESSOR
 # ======================================================
 
-def process_input(text):
+def process_input(text, user_id=None):
     """Main entry point for processing user input. Routes strictly via Unified Command Router."""
     # Update proactive activity tracking
     try:
@@ -282,15 +291,23 @@ def process_input(text):
     # Falls back transparently to unified_command_router for single-intent commands.
     try:
         try:
+            from instance.config import settings as _cfg
+            current_uid = getattr(_cfg, 'CURRENT_USER_ID', None) or _cfg.get_last_user()
+        except Exception:
+            current_uid = None
+
+        effective_uid = user_id or current_uid
+
+        try:
             from core.brain import brain_route_and_execute
-            result = brain_route_and_execute(text)
+            result = brain_route_and_execute(text, user_id=effective_uid)
         except Exception as brain_err:
             # If Brain fails for any reason, fall back to direct single-intent router
             print(f"[BRAIN FALLBACK] {brain_err}")
             from core.unified_command_router import route_and_execute
-            result = route_and_execute(text)
+            result = route_and_execute(text, user_id=effective_uid)
 
-        response = result.get("response", "")
+        response = str(result.get("response") or "")
         
         # CRITICAL: Check if the request was properly handled to prevent incorrect fallbacks
         # If the request is marked as handled, do not attempt any additional processing

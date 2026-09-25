@@ -1,0 +1,130 @@
+{
+  "user_id": 3,
+  "devices": {
+    "android_oldphonename_3e2d6112": {
+      "device_id": "android_oldphonename_3e2d6112",
+      "user_id": 3,
+      "name": "Work Phone",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": false,
+      "battery": null,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T14:06:34.199711+00:00",
+      "last_seen": "2026-09-22T14:06:34.205973+00:00",
+      "secret_hash": "74da3338a74ada7764b3ba77bd9f00601264a7225836dedabea8dbc9e8d07069",
+      "revoked": true,
+      "metadata": {}
+    },
+    "android_oldphonename_97824327": {
+      "device_id": "android_oldphonename_97824327",
+      "user_id": 3,
+      "name": "Work Phone",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": false,
+      "battery": null,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T14:08:55.955712+00:00",
+      "last_seen": "2026-09-22T14:08:55.960618+00:00",
+      "secret_hash": "2f4b4b6d0ae36204d0102e1deed7ec49b3137d34c27949579a882dc21f235359",
+      "revoked": true,
+      "metadata": {}
+    },
+    "android_oldphonename_7b226a0a": {
+      "device_id": "android_oldphonename_7b226a0a",
+      "user_id": 3,
+      "name": "Work Phone",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": false,
+      "battery": null,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T14:11:01.323435+00:00",
+      "last_seen": "2026-09-22T14:11:01.328998+00:00",
+      "secret_hash": "b8fbe1dff4cad386ea2daa50a8f43f0cf747859f997614d76e664ce336f438c3",
+      "revoked": true,
+      "metadata": {}
+    },
+    "android_oldphonename_d4bc3e89": {
+      "device_id": "android_oldphonename_d4bc3e89",
+      "user_id": 3,
+      "name": "Work Phone",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": false,
+      "battery": null,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T15:05:17.063873+00:00",
+      "last_seen": "2026-09-22T15:05:17.069985+00:00",
+      "secret_hash": "746ce40584f809845ee6385edc8be8a0ea8f20da6a371eca712eec9712ff22b2",
+      "revoked": true,
+      "metadata": {}
+    },
+    "android_oldphonename_df564b4c": {
+      "device_id": "android_oldphonename_df564b4c",
+      "user_id": 3,
+      "name": "Work Phone",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": false,
+      "battery": null,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T15:20:36.114593+00:00",
+      "last_seen": "2026-09-22T15:20:36.118412+00:00",
+      "secret_hash": "2fe8050ea479ec3ac9bea447c48408d7dd093332715b3439b7ce8e23795a22c7",
+      "revoked": true,
+      "metadata": {}
+    }
+  }
+}

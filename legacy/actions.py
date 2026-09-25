@@ -471,11 +471,8 @@ def toggle_mute():
 def shutdown_assistant():
     """Terminate all Assistant process components."""
     targets = [
+        "assistant.py",
         "main.py",
-        "floating_button.py",
-        "tray.py",
-        "hotword_listener.py",
-        "assistant_gui.py"
     ]
 
     for p in psutil.process_iter(['pid', 'name', 'cmdline']):

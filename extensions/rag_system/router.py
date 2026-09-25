@@ -70,6 +70,7 @@ class RAGRouter:
         "RAG_SEARCH":           {"core_intent": "dynamic_fact_query", "sub_intent": "general_knowledge"},
         "GENERAL_CONVERSATION": {"core_intent": "chat",               "sub_intent": "general_knowledge"},
         "MEMORY_QUERY":         {"core_intent": "db_search",          "sub_intent": "memory_retrieval"},
+        "MEMORY_STORE":         {"core_intent": "db_search",          "sub_intent": "memory_storage"},
         "CODE_GENERATION":      {"core_intent": "chat",               "sub_intent": "code_generation"},
         "EMAIL":                {"core_intent": "chat",               "sub_intent": "general_knowledge"},
         "NOTES":                {"core_intent": "chat",               "sub_intent": "general_knowledge"},

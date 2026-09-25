@@ -154,8 +154,11 @@ class RAGSystem:
                      import json
                      fact = json.loads(raw_json)
                      
-                     from extensions.memory.memory_parser import save_memory
-                     save_memory(fact["key"], fact["value"])
+                     from legacy.memory_manager import update_user_memory
+                     from instance.config import settings as _cfg
+                     uid = getattr(_cfg, 'CURRENT_USER_ID', None) or _cfg.get_last_user()
+                     if uid:
+                         update_user_memory(uid, fact["key"], fact["value"])
                      
                      data = {"status": "success", "saved_fact": fact}
                      print(f"[PIPELINE - EXECUTION] Memory persisted: {fact['key']} = {fact['value']}")

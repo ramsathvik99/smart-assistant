@@ -77,5 +77,42 @@
       "tip",
       "recommend"
     ]
+  },
+  "ui_preferences": {
+    "8": {
+      "test_color": "#00A8FF",
+      "dashboard_color": "#7C3AED",
+      "floating_button_color": "#EC383B",
+      "assistant_voice_id": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech_OneCore\\Voices\\Tokens\\MSTTS_V110_enUS_ZiraM",
+      "assistant_voice_gender": "female",
+      "assistant_voice_tone": "friendly",
+      "assistant_voice_rate": "165",
+      "assistant_voice_volume": "1.0",
+      "assistant_voice_provider": "onecore"
+    },
+    "9991": {
+      "assistant_voice_id": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_EN-US_DAVID_11.0",
+      "assistant_voice_gender": "male",
+      "assistant_voice_tone": "calm",
+      "assistant_voice_rate": "130",
+      "assistant_voice_volume": "0.9",
+      "assistant_voice_provider": "sapi5"
+    },
+    "9992": {
+      "assistant_voice_id": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_EN-GB_HAZEL_11.0",
+      "assistant_voice_gender": "female",
+      "assistant_voice_tone": "friendly",
+      "assistant_voice_rate": "165",
+      "assistant_voice_volume": "1.0",
+      "assistant_voice_provider": "sapi5"
+    },
+    "9": {
+      "assistant_voice_id": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_EN-US_DAVID_11.0",
+      "assistant_voice_gender": "male",
+      "assistant_voice_tone": "calm",
+      "assistant_voice_rate": "130",
+      "assistant_voice_volume": "0.9",
+      "assistant_voice_provider": "sapi5"
+    }
   }
 }

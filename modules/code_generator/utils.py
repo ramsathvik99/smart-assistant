@@ -107,3 +107,147 @@ def save_file_smart(command: str, content: str, extension: str) -> str:
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
     return filepath
+
+
+def validate_code_syntax(code: str, language: str = "python") -> dict:
+    """
+    Validate code syntax without executing it.
+    Uses ast.parse for Python and delimiter balancing for other languages.
+    """
+    lang = (language or "python").lower().strip()
+
+    if lang in ("python", "py"):
+        import ast
+        try:
+            ast.parse(code)
+            return {
+                "valid": True,
+                "language": "python",
+                "message": "Python syntax is valid."
+            }
+        except SyntaxError as e:
+            return {
+                "valid": False,
+                "language": "python",
+                "line": e.lineno,
+                "offset": e.offset,
+                "error": e.msg,
+                "text": e.text.strip() if e.text else "",
+                "message": f"Python SyntaxError at line {e.lineno}: {e.msg}."
+            }
+
+    elif lang in ("json",):
+        import json
+        try:
+            json.loads(code)
+            return {"valid": True, "language": "json", "message": "JSON is valid."}
+        except json.JSONDecodeError as e:
+            return {
+                "valid": False,
+                "language": "json",
+                "line": e.lineno,
+                "col": e.colno,
+                "error": str(e),
+                "message": f"Invalid JSON at line {e.lineno}, col {e.colno}: {e.msg}."
+            }
+
+    else:
+        # Bracket and delimiter balancing check
+        stack = []
+        pairs = {')': '(', '}': '{', ']': '['}
+        line_num = 1
+        for i, char in enumerate(code):
+            if char == '\n':
+                line_num += 1
+            elif char in "({[":
+                stack.append((char, line_num))
+            elif char in ")}]":
+                if not stack or stack[-1][0] != pairs[char]:
+                    return {
+                        "valid": False,
+                        "language": lang,
+                        "line": line_num,
+                        "message": f"Mismatched closing bracket '{char}' at line {line_num}."
+                    }
+                stack.pop()
+
+        if stack:
+            unclosed, u_line = stack[-1]
+            return {
+                "valid": False,
+                "language": lang,
+                "line": u_line,
+                "message": f"Unclosed '{unclosed}' opened at line {u_line}."
+            }
+
+        return {
+            "valid": True,
+            "language": lang,
+            "message": f"{language.capitalize()} syntax appears balanced."
+        }
+
+
+def explain_code_structure(code: str, language: str = "python") -> dict:
+    """
+    Analyzes code to extract structural elements: classes, functions, imports, and metrics.
+    """
+    lang = (language or "python").lower().strip()
+    if lang in ("python", "py"):
+        import ast
+        try:
+            tree = None
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                if "\n" not in code:
+                    s_norm = re.sub(r'\b(def\s+)', r'\n    \1', code)
+                    s_norm = re.sub(r'\b(return\s+)', r'\n        \1', s_norm)
+                    try:
+                        tree = ast.parse(s_norm)
+                    except SyntaxError:
+                        pass
+
+            if tree is not None:
+                funcs = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+                classes = [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+                imports = []
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        imports.extend(alias.name for alias in node.names)
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        imports.append(node.module)
+            else:
+                classes = re.findall(r'\bclass\s+([A-Za-z_]\w*)', code)
+                funcs = re.findall(r'\bdef\s+([A-Za-z_]\w*)', code)
+                imports = re.findall(r'\b(?:import|from)\s+([A-Za-z_]\w*)', code)
+
+            total_lines = len(code.splitlines())
+            speech = (
+                f"Code has {total_lines} lines, {len(classes)} class(es) ({', '.join(classes[:3])}), "
+                f"and {len(funcs)} function(s) ({', '.join(funcs[:3])})."
+            )
+
+            return {
+                "success": True,
+                "status": "success",
+                "total_lines": total_lines,
+                "classes": classes,
+                "functions": funcs,
+                "imports": list(set(imports)),
+                "message": speech
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "status": "error",
+                "message": f"Cannot analyze code structure: {e}"
+            }
+
+    total_lines = len(code.splitlines())
+    return {
+        "success": True,
+        "status": "success",
+        "total_lines": total_lines,
+        "message": f"{language.capitalize()} snippet has {total_lines} lines."
+    }
+

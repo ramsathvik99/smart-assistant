@@ -1,3 +1,8 @@
+# ════════════════════════════════════════════════════════════════════════
+# RETIRED — This file is NOT the active production UI.
+# Production: modules/ui/login_window.py (PyQt6)
+# This file is preserved for historical reference only.
+# ════════════════════════════════════════════════════════════════════════
 import tkinter as tk
 from tkinter import messagebox
 import traceback

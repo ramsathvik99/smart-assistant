@@ -1,0 +1,55 @@
+{
+  "user_id": 501,
+  "devices": {
+    "android_pixel8pro_36f653b7": {
+      "device_id": "android_pixel8pro_36f653b7",
+      "user_id": 501,
+      "name": "Pixel 8 Pro",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": true,
+      "battery": null,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T15:26:57.273209+00:00",
+      "last_seen": "2026-09-22T15:26:57.273235+00:00",
+      "secret_hash": "70875babad12605ca7c077eef9d40996482f24c6a32aa6e5164b085f6453ed9f",
+      "revoked": false,
+      "metadata": {}
+    },
+    "android_pixel8pro_a25b92fc": {
+      "device_id": "android_pixel8pro_a25b92fc",
+      "user_id": 501,
+      "name": "Pixel 8 Pro",
+      "platform": "android",
+      "os_version": "",
+      "agent_version": "",
+      "ip": "",
+      "online": true,
+      "battery": null,
+      "charging": false,
+      "capabilities": [
+        "battery",
+        "flashlight",
+        "launch_app",
+        "open_url",
+        "volume"
+      ],
+      "permissions": [],
+      "paired_at": "2026-09-22T15:27:31.184082+00:00",
+      "last_seen": "2026-09-22T15:27:31.184110+00:00",
+      "secret_hash": "896a9328ead12e7f6946528d18b96ce250e0d14874f9d4f50ad2cd376e7f9c30",
+      "revoked": false,
+      "metadata": {}
+    }
+  }
+}

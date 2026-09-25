@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from core.chatbrain import call_openai, call_huggingface
+from extensions.ai_utils import call_openai, call_huggingface
 from .special_days_service import get_special_days_service
 
 class CalendarIntelligenceEngine:

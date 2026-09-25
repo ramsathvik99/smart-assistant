@@ -22,29 +22,214 @@ except Exception as _cm_err:
 # Set by assistant.process_input() at the start of every interaction.
 current_user_command: str = ""
 
-# Tkinter root reference for thread-safe GUI updates
+# Qt/Tkinter root reference — kept for backward-compat signature only
+# With PyQt6 UI, the floating_ref is a _TkBridgeAdapter that handles
+# thread-safety internally via QTimer.singleShot.
 _tk_root = None
 
 def set_root(root):
     global _tk_root
-    _tk_root = root
+    _tk_root = root  # no-op in PyQt6 mode; kept for API compatibility
 
 # Floating button reference (set from main.py)
 floating_ref = None
 
+# ── Per-user voice identity state ────────────────────────────────────────────
+# These are set once at login via apply_voice_profile() and read on every
+# pyttsx3 call.  Thread-safe: written only from the main thread at login/settings-save,
+# read only from the TTS worker thread which calls _speak_pyttsx3().
+_voice_id:     str | None = None   # SAPI5 voice id string; None = pyttsx3 default
+_voice_rate:   int        = 155    # words-per-minute
+_voice_volume: float      = 1.0   # 0.0 – 1.0
+
+
+def enumerate_voices() -> list[dict]:
+    """
+    Return a list of all real installed voices on this Windows system
+    (covering both SAPI5 and OneCore voice tokens).
+    Each entry: {id, name, gender, language, provider}
+    Safe to call from any thread.
+    """
+    import winreg
+    import locale
+
+    def _lcid_to_locale(val):
+        if not val:
+            return "English (United States)"
+        s = str(val).strip()
+        lang_map = {
+            "409": "English (United States)",
+            "809": "English (United Kingdom)",
+            "1009": "English (Canada)",
+            "1809": "English (Ireland)",
+            "4009": "English (India)",
+            "en-AU": "English (Australia)",
+            "en-US": "English (United States)",
+            "en-GB": "English (United Kingdom)",
+            "en-CA": "English (Canada)",
+            "en-IN": "English (India)",
+            "en-IE": "English (Ireland)",
+        }
+        if s in lang_map:
+            return lang_map[s]
+        try:
+            code_int = int(s, 16) if not s.isdigit() else int(s)
+            return locale.windows_locale.get(code_int, s).replace("_", " ")
+        except Exception:
+            return s
+
+    results = []
+    seen_ids = set()
+    registry_paths = [
+        (r"SOFTWARE\Microsoft\Speech\Voices\Tokens", "sapi5"),
+        (r"SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens", "onecore")
+    ]
+
+    for reg_path, provider in registry_paths:
+        try:
+            root_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
+            subkeys_count = winreg.QueryInfoKey(root_key)[0]
+            for i in range(subkeys_count):
+                token_name = winreg.EnumKey(root_key, i)
+                full_id = f"HKEY_LOCAL_MACHINE\\{reg_path}\\{token_name}"
+                if full_id in seen_ids:
+                    continue
+                seen_ids.add(full_id)
+
+                try:
+                    skey = winreg.OpenKey(root_key, token_name)
+                    try:
+                        desc, _ = winreg.QueryValueEx(skey, "")
+                    except Exception:
+                        desc = token_name
+
+                    gender = "unknown"
+                    lang_str = "English (United States)"
+                    try:
+                        attr_key = winreg.OpenKey(skey, "Attributes")
+                        try:
+                            g_val, _ = winreg.QueryValueEx(attr_key, "Gender")
+                            if g_val and str(g_val).lower() in ("male", "female"):
+                                gender = str(g_val).lower()
+                        except Exception:
+                            pass
+                        try:
+                            l_val, _ = winreg.QueryValueEx(attr_key, "Language")
+                            lang_str = _lcid_to_locale(l_val)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                    if gender == "unknown":
+                        name_lower = desc.lower()
+                        if any(w in name_lower for w in ("zira", "hazel", "linda", "catherine", "susan", "heera", "female")):
+                            gender = "female"
+                        elif any(w in name_lower for w in ("david", "mark", "george", "richard", "ravi", "james", "sean", "male")):
+                            gender = "male"
+
+                    results.append({
+                        "id": full_id,
+                        "name": desc,
+                        "gender": gender,
+                        "language": lang_str,
+                        "provider": provider
+                    })
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[TTS] Error reading {reg_path}: {e}")
+
+    if not results:
+        # Fallback to pyttsx3 default enumeration if registry search yielded nothing
+        try:
+            import pyttsx3
+            eng = pyttsx3.init()
+            raw = eng.getProperty("voices") or []
+            for v in raw:
+                results.append({
+                    "id": getattr(v, "id", ""),
+                    "name": getattr(v, "name", ""),
+                    "gender": "male" if "david" in getattr(v, "name", "").lower() else "female",
+                    "language": "English (United States)",
+                    "provider": "sapi5"
+                })
+            eng.stop()
+        except Exception:
+            pass
+
+    print("[VOICE DISCOVERY] Provider: sapi5")
+    print(f"[VOICE DISCOVERY] Found {len(results)} voices")
+    for v in results:
+        print(f"[VOICE DISCOVERY] Voice:\n    name={v.get('name')}\n    id={v.get('id')}\n    languages={v.get('language')}")
+
+    return results
+
+
+def apply_voice_profile(voice_id: str | None, rate: int = 155, volume: float = 1.0):
+    """
+    Set the per-user voice identity that all subsequent pyttsx3 calls will use.
+    Call this once at login and again whenever the user saves new settings.
+    Thread-safe: only call from the main/UI thread.
+    """
+    global _voice_id, _voice_rate, _voice_volume
+    _voice_id     = voice_id
+    _voice_rate   = max(80, min(300, int(rate)))
+    _voice_volume = max(0.0, min(1.0, float(volume)))
+    if voice_id:
+        print(f"[VOICE] Applying voice: {voice_id}")
+    print(f"[TTS] Voice profile applied — id={voice_id!r}, rate={_voice_rate}, volume={_voice_volume}")
+
+
+def preview_voice(voice_id: str, rate: int = 155, volume: float = 1.0, text: str = "Hello. This is a preview of my voice.") -> bool:
+    """
+    Speak a short preview sample using THAT SPECIFIC voice token immediately.
+    Logs [VOICE] Previewing voice: <voice_id>
+    """
+    print(f"[VOICE] Previewing voice: {voice_id}")
+    return _speak_pyttsx3(text, voice_id=voice_id, rate=rate, volume=volume)
+
+# Speech listener callbacks (e.g. for chat feed updates)
+_speech_callbacks = []
+_speech_callbacks_lock = threading.Lock()
+
+def register_speech_callback(cb):
+    """Register a callback invoked with the spoken text when TTS speaks."""
+    with _speech_callbacks_lock:
+        if cb not in _speech_callbacks:
+            _speech_callbacks.append(cb)
+
+def unregister_speech_callback(cb):
+    """Unregister a previously registered speech callback."""
+    with _speech_callbacks_lock:
+        if cb in _speech_callbacks:
+            _speech_callbacks.remove(cb)
+
+def _notify_speech_callbacks(text: str):
+    with _speech_callbacks_lock:
+        cbs = list(_speech_callbacks)
+    for cb in cbs:
+        try:
+            cb(text)
+        except Exception as e:
+            print(f"[TTS Callback Error] {e}")
+
 def _start_animation():
-    global floating_ref, _tk_root
+    """Notify the floating launcher that TTS started. Works with both
+    the old Tkinter FloatingButton and the new PyQt6 _TkBridgeAdapter."""
+    global floating_ref
     try:
-        if floating_ref and _tk_root:
-            _tk_root.after_idle(floating_ref.start_anim)
+        if floating_ref:
+            floating_ref.start_anim()
     except Exception as e:
         print(f"[TTS Animation Error] Failed to start animation: {e}")
 
 def _stop_animation():
-    global floating_ref, _tk_root
+    """Notify the floating launcher that TTS stopped."""
+    global floating_ref
     try:
-        if floating_ref and _tk_root:
-            _tk_root.after_idle(floating_ref.stop_anim)
+        if floating_ref:
+            floating_ref.stop_anim()
     except Exception as e:
         print(f"[TTS Animation Error] Failed to stop animation: {e}")
 
@@ -73,6 +258,7 @@ def _tts_worker():
 
         _start_animation()
         _tts_active.set()         # mark TTS as speaking
+        _notify_speech_callbacks(text)
 
         try:
             success = False
@@ -93,6 +279,13 @@ def _tts_worker():
             _tts_active.clear()   # mark TTS as idle
             _stop_animation()
             _tts_queue.task_done()
+            try:
+                from legacy.sst import get_echo_guard
+                _eg = get_echo_guard()
+                if _eg is not None:
+                    _eg.reset()
+            except Exception:
+                pass
 
 
 # TTS worker thread — started on demand
@@ -140,32 +333,59 @@ def wait_for_silence(timeout: float = 15.0) -> bool:
 
 
 # ----------------------------------------------------
-# Internal pyttsx3 (English voice)
+# Internal Windows SAPI / pyttsx3 (English voice)
 # Returns True on success, False on failure.
 # ----------------------------------------------------
-def _speak_pyttsx3(text: str) -> bool:
+def _speak_pyttsx3(text: str, voice_id: str | None = None, rate: int | None = None, volume: float | None = None) -> bool:
+    """
+    Synthesise speech using Windows SAPI / pyttsx3 with the specified or current per-user voice profile.
+    Supports both SAPI5 and OneCore voice tokens.
+    """
+    effective_vid = voice_id if voice_id is not None else _voice_id
+    effective_rate = rate if rate is not None else _voice_rate
+    effective_vol = volume if volume is not None else _voice_volume
+
+    # Try native Windows SAPI SpVoice first (supports SAPI5 and OneCore tokens flawlessly)
     try:
         import pythoncom
         pythoncom.CoInitialize()
+        import comtypes.client
 
+        sp = comtypes.client.CreateObject("SAPI.SpVoice")
+        if effective_vid:
+            try:
+                token = comtypes.client.CreateObject("SAPI.SpObjectToken")
+                token.SetId(effective_vid)
+                sp.Voice = token
+            except Exception as e_tok:
+                print(f"[TTS] Saved voice_id {effective_vid!r} not available ({e_tok}) — using engine default")
+
+        # Convert WPM (80-300, baseline 155) to SAPI Rate (-10 to +10)
+        sapi_rate = max(-10, min(10, int(round((effective_rate - 155) / 12.0))))
+        sp.Rate = sapi_rate
+        sp.Volume = max(0, min(100, int(round(effective_vol * 100))))
+
+        sp.Speak(text)
+        return True
+    except Exception as sapi_err:
+        print(f"[TTS SAPI Notice] Fallback to pyttsx3: {sapi_err}")
+
+    # Fallback to standard pyttsx3
+    try:
+        import pythoncom
+        pythoncom.CoInitialize()
         engine = pyttsx3.init()
-
-        voices = engine.getProperty("voices")
-        if voices:
-            selected = voices[0].id
-            for v in voices:
-                if "zira" in v.name.lower() or "female" in v.name.lower():
-                    selected = v.id
-            engine.setProperty("voice", selected)
-
-        engine.setProperty("rate", 135)
-        engine.setProperty("volume", 1.0)
-
+        if effective_vid:
+            try:
+                engine.setProperty("voice", effective_vid)
+            except Exception:
+                pass
+        engine.setProperty("rate", effective_rate)
+        engine.setProperty("volume", effective_vol)
         engine.say(text)
         engine.runAndWait()
         engine.stop()
         return True
-
     except Exception as e:
         print(f"[TTS pyttsx3 Error] {e}")
         return False
@@ -224,8 +444,8 @@ def speak(text, lang_hint='en', block=False):
     if not text.strip():
         return
 
-    # Silence raw code output
-    if "def " in text or "class " in text or "import " in text or "{" in text:
+    # Silence raw fenced code blocks
+    if text.strip().startswith("```") and "```" in text.strip()[3:]:
         text = "I've created the code file for you."
 
     # Use per-user configured name for console label; never fall back to "Nova"
@@ -259,3 +479,18 @@ def speak(text, lang_hint='en', block=False):
 def wait_until_spoken():
     """Block until all currently queued TTS messages have been spoken."""
     _tts_queue.join()
+
+
+def stop_speaking():
+    """Drain TTS queue and stop current speech synthesis."""
+    try:
+        while not _tts_queue.empty():
+            try:
+                _tts_queue.get_nowait()
+                _tts_queue.task_done()
+            except Exception:
+                break
+        _tts_active.clear()
+        _stop_animation()
+    except Exception as e:
+        print(f"[TTS] Error stopping speech: {e}")

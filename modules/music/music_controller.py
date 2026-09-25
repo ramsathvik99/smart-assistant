@@ -204,5 +204,132 @@ class MusicController:
             return f"Playing previous ({self.current_index+1}/{len(self.music_queue)})."
         return "Beginning of queue."
 
+    def toggle_play_pause(self):
+        """Dispatches global Windows Media Play/Pause key (Spotify, YouTube, Media players)."""
+        try:
+            import ctypes
+            VK_MEDIA_PLAY_PAUSE = 0xB3
+            KEYEVENTF_KEYUP = 0x0002
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0)
+            self.is_playing = not self.is_playing
+            return "Toggled playback (Play/Pause)."
+        except Exception as e:
+            return f"Failed to toggle playback: {e}"
+
+    def media_next(self):
+        """Dispatches global Windows Media Next Track key."""
+        try:
+            import ctypes
+            VK_MEDIA_NEXT_TRACK = 0xB0
+            KEYEVENTF_KEYUP = 0x0002
+            ctypes.windll.user32.keybd_event(VK_MEDIA_NEXT_TRACK, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_MEDIA_NEXT_TRACK, 0, KEYEVENTF_KEYUP, 0)
+            return "Skipped to next track."
+        except Exception as e:
+            return f"Failed to skip track: {e}"
+
+    def media_previous(self):
+        """Dispatches global Windows Media Previous Track key."""
+        try:
+            import ctypes
+            VK_MEDIA_PREV_TRACK = 0xB1
+            KEYEVENTF_KEYUP = 0x0002
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PREV_TRACK, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_MEDIA_PREV_TRACK, 0, KEYEVENTF_KEYUP, 0)
+            return "Returned to previous track."
+        except Exception as e:
+            return f"Failed to return to previous track: {e}"
+
+    def media_stop(self):
+        """Dispatches global Windows Media Stop key."""
+        try:
+            import ctypes
+            VK_MEDIA_STOP = 0xB2
+            KEYEVENTF_KEYUP = 0x0002
+            ctypes.windll.user32.keybd_event(VK_MEDIA_STOP, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_MEDIA_STOP, 0, KEYEVENTF_KEYUP, 0)
+            self.is_playing = False
+            return "Stopped media playback."
+        except Exception as e:
+            return f"Failed to stop playback: {e}"
+
+    def volume_up(self, steps: int = 5):
+        """Dispatches Windows master volume up key events."""
+        try:
+            import ctypes
+            VK_VOLUME_UP = 0xAF
+            KEYEVENTF_KEYUP = 0x0002
+            for _ in range(max(1, min(25, steps))):
+                ctypes.windll.user32.keybd_event(VK_VOLUME_UP, 0, 0, 0)
+                ctypes.windll.user32.keybd_event(VK_VOLUME_UP, 0, KEYEVENTF_KEYUP, 0)
+            return f"Turned volume up by {steps} steps."
+        except Exception as e:
+            return f"Failed to turn volume up: {e}"
+
+    def volume_down(self, steps: int = 5):
+        """Dispatches Windows master volume down key events."""
+        try:
+            import ctypes
+            VK_VOLUME_DOWN = 0xAE
+            KEYEVENTF_KEYUP = 0x0002
+            for _ in range(max(1, min(25, steps))):
+                ctypes.windll.user32.keybd_event(VK_VOLUME_DOWN, 0, 0, 0)
+                ctypes.windll.user32.keybd_event(VK_VOLUME_DOWN, 0, KEYEVENTF_KEYUP, 0)
+            return f"Turned volume down by {steps} steps."
+        except Exception as e:
+            return f"Failed to turn volume down: {e}"
+
+    def volume_mute(self):
+        """Dispatches Windows master volume mute toggle."""
+        try:
+            import ctypes
+            VK_VOLUME_MUTE = 0xAD
+            KEYEVENTF_KEYUP = 0x0002
+            ctypes.windll.user32.keybd_event(VK_VOLUME_MUTE, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_VOLUME_MUTE, 0, KEYEVENTF_KEYUP, 0)
+            return "Toggled volume mute."
+        except Exception as e:
+            return f"Failed to toggle mute: {e}"
+
+    def get_queue_status(self):
+        """Get the current queue length, active index, and playing state."""
+        total = len(self.music_queue)
+        curr = self.current_index + 1 if total > 0 else 0
+        state = "Playing" if self.is_playing else "Paused/Stopped"
+        if total == 0:
+            msg = "The music queue is currently empty."
+        else:
+            msg = f"Queue status: Track {curr} of {total} ({state})."
+        return {
+            "status": "success",
+            "total_tracks": total,
+            "queue_length": total,
+            "current_track": curr,
+            "is_playing": self.is_playing,
+            "message": msg
+        }
+
+_default_music_controller = MusicController()
+
 def get_controller():
-    return MusicController()
+    return _default_music_controller
+
+def get_queue_status():
+    return _default_music_controller.get_queue_status()
+
+def media_stop():
+    msg = _default_music_controller.media_stop()
+    return {"status": "success", "message": msg}
+
+def volume_up(steps: int = 5):
+    msg = _default_music_controller.volume_up(steps)
+    return {"status": "success", "message": msg}
+
+def volume_down(steps: int = 5):
+    msg = _default_music_controller.volume_down(steps)
+    return {"status": "success", "message": msg}
+
+def volume_mute():
+    msg = _default_music_controller.volume_mute()
+    return {"status": "success", "message": msg}

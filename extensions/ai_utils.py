@@ -38,3 +38,29 @@ def ask_llm(prompt: str) -> str:
         
     except Exception as e:
         return f"❌ Error calling LLM: {str(e)}"
+
+# ── Centralized Provider Functions (Delegates to LLMEngine) ──
+_shared_engine = None
+
+def _get_engine():
+    global _shared_engine
+    if _shared_engine is None:
+        from .llm_engine import LLMEngine
+        _shared_engine = LLMEngine()
+    return _shared_engine
+
+def call_openai(prompt, context="", system_prompt=None, temperature=0.7, max_tokens=500):
+    return _get_engine().get_completion(prompt=prompt, context=context, system_prompt=system_prompt, temperature=temperature, max_tokens=max_tokens)
+
+def call_gemini(prompt, context="", system_prompt=None, temperature=0.7, max_tokens=500):
+    return _get_engine().get_completion(prompt=prompt, context=context, system_prompt=system_prompt, temperature=temperature, max_tokens=max_tokens)
+
+def call_groq(prompt, context="", system_prompt=None, temperature=0.7, max_tokens=500):
+    return _get_engine().get_completion(prompt=prompt, context=context, system_prompt=system_prompt, temperature=temperature, max_tokens=max_tokens)
+
+def call_huggingface(prompt, context="", system_prompt=None, temperature=0.7, max_tokens=500):
+    return _get_engine().get_completion(prompt=prompt, context=context, system_prompt=system_prompt, temperature=temperature, max_tokens=max_tokens)
+
+def call_deepseek(prompt, context="", system_prompt=None, temperature=0.7, max_tokens=500):
+    return _get_engine().get_completion(prompt=prompt, context=context, system_prompt=system_prompt, temperature=temperature, max_tokens=max_tokens)
+

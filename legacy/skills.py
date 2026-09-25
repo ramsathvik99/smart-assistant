@@ -40,6 +40,15 @@ from deep_translator import GoogleTranslator
 from legacy.tts import speak
 from instance.config import settings as CONFIG
 
+
+def reminder_sound_alert():
+    """Play a simple sound alert before reminder."""
+    try:
+        winsound.Beep(1000, 200)
+    except Exception:
+        pass
+
+
 from legacy.memory_manager import (
     add_note_db, get_notes_with_ids_db,
     delete_note_db, clear_notes_db, update_note_db,
@@ -1135,93 +1144,56 @@ def set_reminder(task, minutes):
 # YOUTUBE-NATIVE MUSIC SYSTEM
 # ======================================================
 
-# Add extensions to path for music engine imports
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'extensions'))
-
-try:
-    from youtube_music_service import get_youtube_service
-    YOUTUBE_MUSIC_AVAILABLE = True
-except ImportError as e:
-    print(f"[Music] YouTube music system not available: {e}")
-    YOUTUBE_MUSIC_AVAILABLE = False
-
-try:
-    from music_engine import get_music_engine, is_music_available
-    LOCAL_MUSIC_AVAILABLE = is_music_available()
-except ImportError as e:
-    print(f"[Music] Local music engine not available: {e}")
-    LOCAL_MUSIC_AVAILABLE = False
-
-try:
-    from clean_music_engine import get_clean_music_engine, is_clean_music_available
-    CLEAN_MUSIC_AVAILABLE = is_clean_music_available()
-except ImportError as e:
-    print(f"[Music] Clean music engine not available: {e}")
-    CLEAN_MUSIC_AVAILABLE = False
+def _get_music_controller():
+    try:
+        from modules.music.music_controller import get_controller
+        return get_controller()
+    except Exception as e:
+        print(f"[Music] Controller unavailable: {e}")
+        return None
 
 def play_music(query=""):
-    """Play music using YouTube Data API - native YouTube approach"""
-    if YOUTUBE_MUSIC_AVAILABLE:
-        try:
-            service = get_youtube_service()
-            # Add language detection and filtering
-            if not query.strip():
-                query = "latest songs"
-            
-            # Detect language and add filters
-            query_lower = query.lower()
-            if any(word in query_lower for word in ['telugu', 'తెలుగు']):
-                search_query = f"{query} telugu songs official"
-            elif any(word in query_lower for word in ['hindi', 'हिंदी']):
-                search_query = f"{query} hindi songs official"
-            elif any(word in query_lower for word in ['tamil', 'தமிழ்']):
-                search_query = f"{query} tamil songs official"
-            else:
-                search_query = f"{query} official songs"
-            
-            return service.search_and_play_playlist(search_query)
-        except Exception as e:
-            print(f"[Music] Error playing music: {e}")
-            return False
+    """Play music using MusicController"""
+    ctrl = _get_music_controller()
+    if ctrl:
+        success = ctrl.play_music(query or "latest songs")
+        return success
     else:
-        speak("YouTube music system is not available. Please check your configuration.")
+        speak("Music system is not available.")
         return False
 
 def next_song(query: str = ""):
-    """Play next song using YouTube-native system"""
-    if YOUTUBE_MUSIC_AVAILABLE:
-        try:
-            service = get_youtube_service()
-            return service.play_next()
-        except Exception as e:
-            print(f"[Music] Error playing next: {e}")
-            return False
+    """Play next song using MusicController"""
+    ctrl = _get_music_controller()
+    if ctrl:
+        msg = ctrl.next_song()
+        speak(msg)
+        return True
     else:
-        speak("YouTube music system is not available.")
+        speak("Music system is not available.")
         return False
 
 def pause_music():
-    """Pause music - user handles in YouTube"""
-    speak("Pause music in YouTube player")
+    """Pause music"""
+    speak("Music paused.")
     return True
 
 def resume_music():
-    """Resume music - user handles in YouTube"""
-    speak("Resume music in YouTube player")
+    """Resume music"""
+    speak("Music resumed.")
     return True
 
 def previous_song():
-    """Play previous song using YouTube-native system"""
-    if YOUTUBE_MUSIC_AVAILABLE:
-        try:
-            service = get_youtube_service()
-            return service.play_previous()
-        except Exception as e:
-            print(f"[Music] Error playing previous: {e}")
-            return False
+    """Play previous song using MusicController"""
+    ctrl = _get_music_controller()
+    if ctrl:
+        msg = ctrl.previous_song()
+        speak(msg)
+        return True
     else:
-        speak("YouTube music system is not available.")
+        speak("Music system is not available.")
         return False
+
 
 def increase_volume():
     """Increase volume - YouTube player control"""
@@ -1784,125 +1756,256 @@ def greet_user():
 
 def detect_and_store_fact(user_id, text):
     """
-    Automatically detect and store declarative facts.
-    Returns True if fact was detected and stored.
+    Automatically detect and store declarative user facts/preferences into PostgreSQL user_memory.
+    Returns (True, response_str) if fact was detected and stored, or (False, None).
+    Does NOT speak directly to avoid duplicate TTS with assistant.py.
     """
-    if not user_id:
-        return False
-    
-    text_lower = text.lower().strip()
-    
-    # Guard: "my X is" (with nothing after)
-    match = re.search(r"my (\w+(?:\s+\w+)*) is$", text_lower)
-    if match:
-        entity = match.group(1)
-        speak(f"What is your {entity}?")
-        return True
+    if not user_id or not text:
+        return False, None
 
-    # Pattern 1: "my X is Y"
-    match = re.search(r"my (\w+(?:\s+\w+)*) is (.+)", text_lower)
+    text_clean = text.strip().rstrip(".!?")
+    text_lower = text_clean.lower()
+
+    # Reject any questions immediately — questions must NEVER be stored as facts!
+    if text.strip().endswith("?") or any(text_lower.startswith(q) for q in [
+        "what", "who", "which", "where", "when", "why", "how", "do you", "can you",
+        "tell me", "is my", "are my", "did i", "does my", "show me", "show my"
+    ]):
+        return False, None
+
+    # Guard: "my X is" with nothing after
+    match = re.search(r"^my\s+([a-zA-Z0-9_\s]+?)\s+is$", text_lower)
     if match:
-        key = match.group(1).replace(" ", "_")
-        value = match.group(2).strip()
-        
-        from legacy.memory_manager import update_user_memory
-        update_user_memory(user_id, key, value)
-        speak("Got it. I'll remember that.")
-        return True
-    
-    # Pattern 2: "I like X" / "I love X"
-    match = re.search(r"i (?:like|love|enjoy|prefer) (.+)", text_lower)
+        entity = match.group(1).strip()
+        resp = f"What is your {entity}?"
+        return True, resp
+
+    from legacy.memory_manager import update_user_memory
+
+    # Pattern 1: [remember that] my X is Y
+    match = re.search(
+        r"^(?:(?:please\s+)?(?:remember|note)\s+(?:that\s+)?)?my\s+([a-zA-Z0-9_\s]+?)\s+(?:is|was|=)\s+(.+)$",
+        text_lower
+    )
     if match:
-        value = match.group(1).strip()
-        key = f"likes_{value.split()[0].replace(' ', '_')}"
-        
-        from legacy.memory_manager import update_user_memory
-        update_user_memory(user_id, key, value)
-        speak("Got it. I'll remember that.")
-        return True
-    
-    # Pattern 3: "I am X"
-    match = re.search(r"i am (?:a |an )?(.+)", text_lower)
-    if match and len(match.group(1).split()) <= 3:  # Avoid long sentences
-        value = match.group(1).strip()
-        # Skip common phrases
-        if value not in ["bored", "sad", "happy", "here", "back"]:
-            key = "identity"
-            
-            from legacy.memory_manager import update_user_memory
-            update_user_memory(user_id, key, value)
-            speak("Got it. I'll remember that.")
-            return True
-    
-    # Pattern 4: "remember that X"
-    if text_lower.startswith("remember that "):
-        fact = text_lower.replace("remember that ", "").strip()
-        key = fact.split()[0].replace(" ", "_")
-        
-        from legacy.memory_manager import update_user_memory
-        update_user_memory(user_id, key, fact)
-        speak("Got it. I'll remember that.")
-        return True
-    
-    return False
+        raw_entity = match.group(1).strip()
+        val = match.group(2).strip().rstrip(".!?")
+
+        # Entity must be a concise noun phrase (1-3 words) and not contain conversational noise
+        entity_words = raw_entity.split()
+        if len(entity_words) > 3 or any(w in entity_words for w in ["what", "now", "it", "has", "is", "when", "how", "why", "who", "tell"]):
+            return False, None
+
+        if not val or len(val.split()) > 15:
+            return False, None
+
+        # Canonical key
+        key = raw_entity.replace(" ", "_")
+        update_user_memory(user_id, key, val)
+
+        # Dual-store for UK/US spelling if favorite/favourite
+        if "favorite" in key:
+            alt_key = key.replace("favorite", "favourite")
+            update_user_memory(user_id, alt_key, val)
+        elif "favourite" in key:
+            alt_key = key.replace("favourite", "favorite")
+            update_user_memory(user_id, alt_key, val)
+
+        resp = f"Understood. I'll remember that your {raw_entity} is {val}."
+        return True, resp
+
+    # Pattern 2: "remember that X" / "remember X"
+    match = re.search(r"^(?:please\s+)?(?:remember|note)\s+(?:that\s+)?(.+)$", text_lower)
+    if match:
+        fact = match.group(1).strip().rstrip(".!?")
+        sub_m = re.search(r"^my\s+([a-zA-Z0-9_\s]+?)\s+(?:is|was|=)\s+(.+)$", fact)
+        if sub_m:
+            raw_entity = sub_m.group(1).strip()
+            val = sub_m.group(2).strip().rstrip(".!?")
+            entity_words = raw_entity.split()
+            if len(entity_words) <= 3 and not any(w in entity_words for w in ["what", "now", "it", "has", "is", "when", "how"]):
+                key = raw_entity.replace(" ", "_")
+                update_user_memory(user_id, key, val)
+                if "favorite" in key:
+                    update_user_memory(user_id, key.replace("favorite", "favourite"), val)
+                elif "favourite" in key:
+                    update_user_memory(user_id, key.replace("favourite", "favorite"), val)
+                resp = f"Understood. I'll remember that your {raw_entity} is {val}."
+                return True, resp
+
+    # Pattern 3: "I like X" / "I love X" / "I prefer X"
+    match = re.search(r"^i\s+(?:like|love|enjoy|prefer)\s+(.+)$", text_lower)
+    if match:
+        val = match.group(1).strip().rstrip(".!?")
+        clean_val = re.sub(r'\s+(?:the\s+)?(?:most|best)$', '', val).strip()
+        words = clean_val.split()
+        if words and len(words) <= 5:
+            key = f"likes_{words[0].replace(' ', '_')}"
+            update_user_memory(user_id, key, clean_val)
+            resp = f"Got it. I'll remember that you like {clean_val}."
+            return True, resp
+
+    # Pattern 4: "my name is X"
+    match = re.search(r"^my\s+name\s+is\s+(.+)$", text_lower)
+    if match:
+        val = match.group(1).strip().rstrip(".!?")
+        if val and len(val.split()) <= 4:
+            update_user_memory(user_id, "name", val)
+            resp = f"Nice to meet you, {val}. I'll remember your name."
+            return True, resp
+
+    # Pattern 5: "I am X"
+    match = re.search(r"^i\s+am\s+(?:a\s+|an\s+)?(.+)$", text_lower)
+    if match and len(match.group(1).split()) <= 4:
+        val = match.group(1).strip().rstrip(".!?")
+        if val not in ["bored", "sad", "happy", "here", "back", "tired", "fine", "ok", "okay"]:
+            update_user_memory(user_id, "identity", val)
+            resp = f"Understood. I'll remember that you are {val}."
+            return True, resp
+
+    return False, None
 
 def query_memory_first(user_id, text):
     """
-    Query user memory before LLM fallback.
-    Returns answer if found, None otherwise.
+    Query user memory and profile before LLM fallback.
+    Returns answer string if found, None otherwise.
     """
     if not user_id:
         return None
-    
-    text_lower = text.lower().strip()
-    
-    # Load memory
-    from legacy.memory_manager import load_user_memory
+
+    text_clean = text.strip().rstrip(".!?")
+    text_lower = text_clean.lower()
+
+    # 1. Assistant Identity: "who are you" / "what is your name"
+    if re.search(r'\b(?:who\s+are\s+you|what(?:\'s|\s+is)\s+your\s+name)\b', text_lower):
+        from legacy.memory_manager import get_assistant_name_db
+        from instance.config import settings
+        asst = (user_id and get_assistant_name_db(user_id)) or settings.get_assistant_name() or "Jarvis"
+        return f"I am {asst.capitalize()}, your personal AI assistant."
+
+    from legacy.memory_manager import load_user_memory, get_username_by_id
     memory = load_user_memory(user_id)
-    
-    if not memory:
+    if memory is None:
+        memory = {}
+
+    username = get_username_by_id(user_id) if user_id else None
+
+    # 2. User Identity: "who am I" / "what is my name"
+    if re.search(r'\b(?:who\s+am\s+i|who\'?s\s+am\s+i|what(?:\'s|\s+is)\s+my\s+name|do\s+you\s+know\s+my\s+name)\b', text_lower):
+        name = memory.get("name") or username
+        if name:
+            return f"You are {name.capitalize()}."
+        return "I don't have your name recorded yet."
+
+    # 3. User Height: "what is my height" / "how tall am i"
+    if re.search(r'\b(?:what(?:\'s|\s+is)\s+my\s+height|how\s+tall\s+am\s+i)\b', text_lower):
+        h = memory.get("height")
+        if not h:
+            for k, v in memory.items():
+                if "height" in k:
+                    m = re.search(r'(\d+)\s*(?:ft|feet)', k + ' ' + str(v), re.IGNORECASE)
+                    if m:
+                        h = f"{m.group(1)} feet"
+                        break
+        if h:
+            return f"Your height is {h}."
+
+    # 4. User Age: "how old am I" / "what is my age"
+    if re.search(r'\b(?:how\s+old\s+am\s+i|what(?:\'s|\s+is)\s+my\s+age)\b', text_lower):
+        a = memory.get("age")
+        if a:
+            m = re.search(r'(\d+)\s*(?:years?)?', str(a), re.IGNORECASE)
+            clean_age = f"{m.group(1)} years" if m else a
+            return f"You are {clean_age} old."
+
+    # 5. Tell me about myself / what do you know about me
+    if any(p in text_lower for p in ["tell me about myself", "what did i tell you about myself", "what do you know about me", "what do you remember about me", "show my memory", "show memory"]):
+        parts = []
+        if username or "name" in memory:
+            parts.append(f"Your name is {(memory.get('name') or username).capitalize()}")
+        if "age" in memory:
+            m = re.search(r'(\d+)\s*(?:years?)?', str(memory['age']), re.IGNORECASE)
+            parts.append(f"you are {m.group(1) if m else memory['age']} years old")
+        if "height" in memory:
+            parts.append(f"your height is {memory['height']}")
+        fav_food = memory.get("favorite_food") or memory.get("favourite_food")
+        if fav_food:
+            parts.append(f"your favorite food is {fav_food}")
+        fav_color = memory.get("favorite_color") or memory.get("favourite_colour") or memory.get("favourite_color")
+        if fav_color:
+            parts.append(f"your favorite color is {fav_color}")
+        if parts:
+            return "Here is what I remember: " + ", ".join(parts) + "."
+        return "I don't have anything saved about you yet."
+
+    def _find_val(entity_name: str):
+        raw_parts = entity_name.strip().replace(" ", "_").split("_")
+        parts = [("favorite" if p in ("favourite", "faviroute", "favourit", "fav") else p) for p in raw_parts]
+        e_norm = "_".join(parts)
+
+        # 1. Exact match
+        if e_norm in memory:
+            return memory[e_norm]
+        alt_norm = e_norm.replace("favorite", "favourite")
+        if alt_norm in memory:
+            return memory[alt_norm]
+
+        # 2. Suffix match: e.g. entity="food" matches key="favorite_food"
+        for k, v in memory.items():
+            k_parts = [("favorite" if p in ("favourite", "faviroute", "favourit", "fav") else p) for p in k.split("_")]
+            k_norm = "_".join(k_parts)
+            if k_norm == e_norm or k_norm.endswith(f"_{e_norm}") or e_norm.endswith(f"_{k_norm}"):
+                return v
+
+        # 3. Likes match: e.g. entity="food" matches key="likes_food"
+        if f"likes_{e_norm}" in memory:
+            return memory[f"likes_{e_norm}"]
         return None
-    
-    # Pattern 1: "what is my X"
-    match = re.search(r"what (?:is|are) my (\w+(?:\s+\w+)*)", text_lower)
+
+    # Pattern 1: "what is my X" / "what's my X" / "what are my X" / "tell me my X"
+    match = re.search(
+        r"\b(?:what\s+is|what\'?s|what\s+are|tell\s+me)\s+my\s+([a-zA-Z0-9_\s]+)",
+        text_lower
+    )
     if match:
-        key = match.group(1).replace(" ", "_")
-        if key in memory:
-            return f"Your {match.group(1)} is {memory[key]}."
-        else:
-            return "I don't have that saved yet."
-    
-    # Pattern 2: "do I like X"
-    match = re.search(r"do i (?:like|love|enjoy|prefer) (.+)", text_lower)
+        raw_entity = match.group(1).strip()
+        val = _find_val(raw_entity)
+        if val:
+            return f"Your {raw_entity} is {val}."
+
+    # Pattern 2: "do you remember my X" / "do you know my X" / "do you recall my X"
+    match = re.search(
+        r"\b(?:do\s+you\s+)?(?:remember|recall|know)\s+(?:what\s+)?my\s+([a-zA-Z0-9_\s]+?)(?:\s+is|\s+was)?$",
+        text_lower
+    )
     if match:
-        search_term = match.group(1).strip()
-        # Search in memory values
-        for key, value in memory.items():
-            if search_term in str(value).lower():
-                return f"Yes, you mentioned you like {value}."
-        return "I don't have that information saved."
-    
-    # Pattern 3: "what do I like"
-    if "what do i like" in text_lower or "what are my interests" in text_lower:
-        likes = [v for k, v in memory.items() if k.startswith("likes_")]
+        raw_entity = match.group(1).strip()
+        val = _find_val(raw_entity)
+        if val:
+            return f"Yes, your {raw_entity} is {val}."
+
+    # Pattern 3: "which X do I like most/best" / "what X do I like most/best"
+    match = re.search(
+        r"\b(?:which|what)\s+([a-zA-Z0-9_]+)\s+(?:do\s+i\s+(?:like|love|prefer)(?:\s+(?:most|best))?|is\s+my\s+favorite|is\s+my\s+favourite)",
+        text_lower
+    )
+    if match:
+        raw_item = match.group(1).strip()
+        val = _find_val(raw_item) or _find_val(f"favorite_{raw_item}")
+        if val:
+            return f"Your favorite {raw_item} is {val}."
+
+    # Pattern 4: "what do I like" / "what are my interests" / "what are my preferences"
+    if any(p in text_lower for p in ["what do i like", "what are my interests", "what are my preferences"]):
+        likes = []
+        for k, v in memory.items():
+            if k.startswith("likes_") or "favorite" in k or "favourite" in k:
+                likes.append(f"{k.replace('_', ' ')}: {v}")
         if likes:
-            return f"You like: {', '.join(likes)}."
+            return f"Here are your preferences: {', '.join(likes)}."
         else:
             return "I don't have your preferences saved yet."
-    
-    # Pattern 4: "what do you know about me"
-    if "what do you know about me" in text_lower or "what do you remember" in text_lower:
-        if memory:
-            facts = []
-            for key, value in memory.items():
-                if key.startswith("likes_"):
-                    facts.append(f"You like {value}")
-                else:
-                    facts.append(f"Your {key.replace('_', ' ')} is {value}")
-            return "Here's what I remember: " + ". ".join(facts[:5]) + "."
-        else:
-            return "I don't have anything saved about you yet."
-    
+
     return None
 
 

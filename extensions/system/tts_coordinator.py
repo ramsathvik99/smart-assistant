@@ -293,3 +293,8 @@ def is_speaking() -> bool:
 def wait_until_spoken(timeout: float = 30.0) -> None:
     """Block until all queued TTS has been spoken."""
     get_tts_coordinator().wait_until_spoken(timeout=timeout)
+
+
+# Canonical singleton reference
+tts_coordinator = get_tts_coordinator()
+

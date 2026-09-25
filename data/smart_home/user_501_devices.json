@@ -1,0 +1,23 @@
+{
+  "user_id": 501,
+  "accounts": {},
+  "devices": {
+    "lamp_u_a": {
+      "device_id": "lamp_u_a",
+      "user_id": 501,
+      "provider_key": "hue",
+      "external_id": "lamp_u_a",
+      "name": "Secret Lamp",
+      "manufacturer": "Hue",
+      "room": "Living Room",
+      "device_type": "generic",
+      "image_key": "device",
+      "is_on": false,
+      "traits": {},
+      "online": true,
+      "created_at": 1790090759.9342592,
+      "updated_at": 1790090851.1823094
+    }
+  },
+  "updated_at": 1790090851.1828823
+}
