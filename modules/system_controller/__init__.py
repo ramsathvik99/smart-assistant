@@ -19,9 +19,10 @@ from .file_manager import (
     safe_delete_file,
     inspect_zip_archive,
     extract_zip_archive,
-    extract_text_content
+    extract_text_content,
+    profile_file_content
 )
-from .app_launcher import launch_application
+from .app_launcher import launch_application, discover_installed_games, launch_game
 from .action_executor import execute_action, SystemActionExecutor, get_action_history, clear_action_log
 from .system_controller import (
     get_battery_status,
@@ -59,6 +60,15 @@ from .system_controller import (
     list_all_processes,
     get_uptime,
     get_network_speed,
+    toggle_dark_mode,
+    connect_to_wifi,
+    set_display_resolution,
+    initiate_system_power,
+    get_gpu_telemetry,
+    get_current_wallpaper,
+    set_wallpaper,
+    get_desktop_statistics,
+    get_system_telemetry_summary,
 )
 from .desktop_organizer import organize_directory, scan_unorganized_files
 
@@ -81,7 +91,10 @@ __all__ = [
     'inspect_zip_archive',
     'extract_zip_archive',
     'extract_text_content',
+    'profile_file_content',
     'launch_application',
+    'discover_installed_games',
+    'launch_game',
     'execute_action',
     'SystemActionExecutor',
     'get_action_history',
@@ -120,7 +133,17 @@ __all__ = [
     'list_all_processes',
     'get_uptime',
     'get_network_speed',
+    'toggle_dark_mode',
+    'connect_to_wifi',
+    'set_display_resolution',
+    'initiate_system_power',
+    'get_gpu_telemetry',
+    'get_current_wallpaper',
+    'set_wallpaper',
+    'get_desktop_statistics',
+    'get_system_telemetry_summary',
     'organize_directory',
     'scan_unorganized_files'
 ]
+
 

@@ -52,6 +52,11 @@ def _make_tray_icon() -> QIcon:
     return QIcon(px)
 
 
+class UIBridge(QObject):
+    visual_event_sig = pyqtSignal(object)
+    speech_spoken_sig = pyqtSignal(str)
+
+
 class AssistantApp(QObject):
     """
     Main coordinator class for the Smart Assistant PyQt6 UI.
@@ -60,10 +65,13 @@ class AssistantApp(QObject):
 
     def __init__(self):
         super().__init__()
+        self._bridge = UIBridge()
+        self._bridge.visual_event_sig.connect(self._handle_visual_event)
+        self._bridge.speech_spoken_sig.connect(self._handle_speech_spoken)
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
         self._app.setQuitOnLastWindowClosed(False)
-        self._app.setApplicationDisplayName("Smart Assistant")
+        self._app.setApplicationDisplayName("Trevon Labs")
         self._app.setStyleSheet(APP_STYLESHEET)
 
         # Load window icon if available
@@ -87,6 +95,31 @@ class AssistantApp(QObject):
         self._username:    str  | None = None
         self._assistant_name: str = "Assistant"
 
+    # ── Thread-safe Event Bridge Slots ────────────────────────────────────────
+    @pyqtSlot(object)
+    def _handle_visual_event(self, vr_data):
+        if vr_data is None:
+            if self._launcher:
+                self._launcher.dismiss_visual_response()
+        else:
+            try:
+                from core.visual_response import VisualResponse
+                if isinstance(vr_data, VisualResponse):
+                    vr = vr_data
+                elif isinstance(vr_data, dict):
+                    vr = VisualResponse.from_dict(vr_data)
+                else:
+                    return
+                if self._launcher:
+                    self._launcher.show_visual_response(vr)
+            except Exception as e:
+                print(f"[UI] Error rendering visual response: {e}")
+
+    @pyqtSlot(str)
+    def _handle_speech_spoken(self, text: str):
+        if text and text.strip() and self._win:
+            self._win.add_assistant_message(text)
+
     # ── Startup ───────────────────────────────────────────────────────────────
     def run(self):
         """Entry point — show login then start event loop."""
@@ -99,36 +132,38 @@ class AssistantApp(QObject):
         self._login_win.show()
 
     # ── Post-login ────────────────────────────────────────────────────────────
-    @pyqtSlot(int, str)
-    def _on_login_complete(self, user_id: int, username: str):
-        self._user_id  = user_id
-        self._username = username
+    @pyqtSlot(object, str, str)
+    def _on_login_complete(self, user_id: object, username: str, session_mode: str = "account"):
+        self._user_id  = int(user_id)
+        self._username = username or "user"
+        self._session_mode = "account"
+
+        from instance.config import settings
 
         # 1. Synchronize session state and identity
         try:
             from legacy.auth_helpers import login_success
-            login_success(user_id, username)
+            login_success(self._user_id, username)
         except Exception as e:
             print(f"[AUTH] Error recording login success: {e}")
 
         # 2. Retrieve user-specific assistant name
         try:
             from legacy.memory_manager import get_assistant_name_db
-            asst_name = get_assistant_name_db(user_id)
+            asst_name = get_assistant_name_db(self._user_id)
             if asst_name:
                 self._assistant_name = asst_name
             else:
-                from instance.config import settings
-                self._assistant_name = getattr(settings, 'CURRENT_ASSISTANT_NAME', None) or username
+                self._assistant_name = getattr(settings, 'CURRENT_ASSISTANT_NAME', None) or "Trevon"
         except Exception:
-            self._assistant_name = username
+            self._assistant_name = "Trevon"
 
-        print(f"[APP] User authenticated: {username} (ID: {user_id}) | Assistant: {self._assistant_name}")
+        print(f"[APP] User authenticated: {username} (ID: {self._user_id}) | Assistant: {self._assistant_name}")
 
         # Register user with canonical AssistantCore (Single Source of Truth)
         try:
             from core.assistant_core import assistant_core
-            assistant_core.set_authenticated_user(user_id, username, self._assistant_name)
+            assistant_core.set_authenticated_user(self._user_id, self._username, self._assistant_name)
         except Exception as e:
             print(f"[APP] Core registration notice: {e}")
 
@@ -136,12 +171,11 @@ class AssistantApp(QObject):
         self._build_ui()
 
         # 3a. Load and apply user-specific color personalization
-        self._apply_user_colors(user_id)
-
+        self._apply_user_colors(self._user_id)
         # 3b. Load and apply per-user voice identity (TTS engine + Settings panel)
-        self._apply_user_voice(user_id)
+        self._apply_user_voice(self._user_id)
 
-        # 4. Start backend services (Reminders with user_id, Proactive system, optional Dashboard)
+        # 4. Start backend services (Reminders, Proactive system, optional Dashboard)
         self._start_backend_services()
 
         # 5. Speak canonical greeting, then start continuous audio stream
@@ -257,7 +291,7 @@ class AssistantApp(QObject):
         """Start backend services (reminders, proactive interaction, optional web dashboard)."""
         print("[UI] Starting backend services...")
 
-        # 1. Reminder Scheduler for this authenticated user
+        # 1. Reminder Scheduler for this user
         try:
             from extensions.reminder_engine.reminder_scheduler import initialize_scheduler
             from extensions.database_manager import DatabaseManager
@@ -271,23 +305,24 @@ class AssistantApp(QObject):
                 except Exception:
                     pass
 
-            class SimplePoolWrapper:
-                def __init__(self, connection_func):
-                    self.get_connection = connection_func
-                def getconn(self):
-                    return self.get_connection()
-                def putconn(self, conn):
-                    try: conn.close()
-                    except: pass
+            if not getattr(self, '_is_temporary', False) and self._user_id:
+                class SimplePoolWrapper:
+                    def __init__(self, connection_func):
+                        self.get_connection = connection_func
+                    def getconn(self):
+                        return self.get_connection()
+                    def putconn(self, conn):
+                        try: conn.close()
+                        except: pass
 
-            db_manager = DatabaseManager(SimplePoolWrapper(get_connection))
-            self._reminder_scheduler = initialize_scheduler(
-                tts_callback=speak,
-                sound_callback=_reminder_sound_alert,
-                db_manager=db_manager,
-                user_id=self._user_id
-            )
-            print(f"[REMINDER ENGINE] Initialized successfully with database persistence for user {self._user_id}")
+                db_manager = DatabaseManager(SimplePoolWrapper(get_connection))
+                self._reminder_scheduler = initialize_scheduler(
+                    tts_callback=speak,
+                    sound_callback=_reminder_sound_alert,
+                    db_manager=db_manager,
+                    user_id=self._user_id
+                )
+                print(f"[REMINDER ENGINE] Initialized successfully with database persistence for user {self._user_id}")
         except Exception as e:
             print(f"[UI] Reminder scheduler error: {e}")
 
@@ -309,8 +344,7 @@ class AssistantApp(QObject):
     def _speak_greeting(self):
         """Perform canonical post-login greeting and start continuous audio listening."""
         user = self._username or "there"
-        asst = self._assistant_name or "Assistant"
-
+        asst = self._assistant_name or "Trevon"
         greeting = f"Welcome back {user}. {asst} is ready when you are."
         print(f"[GREETING] {greeting}")
 
@@ -402,9 +436,7 @@ class AssistantApp(QObject):
             import legacy.tts as tts_mod
             def _on_speech_spoken(text: str):
                 if text and text.strip():
-                    QTimer.singleShot(0, lambda t=text: (
-                        self._win.add_assistant_message(t) if self._win else None
-                    ))
+                    self._bridge.speech_spoken_sig.emit(text)
             tts_mod.register_speech_callback(_on_speech_spoken)
             self._speech_callback = _on_speech_spoken
             print("[UI] Registered native TTS speech listener for chat feed")
@@ -422,14 +454,7 @@ class AssistantApp(QObject):
 
             # Register Ephemeral Visual Response Surface listener
             def _on_visual_event(vr_data):
-                if vr_data is None:
-                    if self._launcher:
-                        self._launcher.dismiss_visual_response()
-                else:
-                    from core.visual_response import VisualResponse
-                    vr = VisualResponse.from_dict(vr_data)
-                    if self._launcher:
-                        QTimer.singleShot(0, lambda v=vr: self._launcher.show_visual_response(v) if self._launcher else None)
+                self._bridge.visual_event_sig.emit(vr_data)
 
             assistant_core.register_visual_listener(_on_visual_event)
             self._visual_event_listener = _on_visual_event
@@ -579,10 +604,204 @@ class AssistantApp(QObject):
         if not self._win:
             return
 
-        # ── Double-Click Quick Actions ──
-        if action == "talk":
+        # ── Quick Actions HUD ──
+        if action in ("talk", "voice"):
             self._win.show_on_chat()
             self._toasts.show("Listening for your command…", "info", 2000)
+        elif action == "play_video":
+            from PyQt6.QtWidgets import QInputDialog
+            query, ok = QInputDialog.getText(
+                self._win or self._launcher,
+                "Play / Search Video",
+                "Enter video title, artist, or YouTube URL:"
+            )
+            if ok and query.strip():
+                try:
+                    from modules.music.music_controller import MusicController
+                    controller = MusicController()
+                    res = controller.search_and_play(query.strip())
+                    self._toasts.show(f"Playing: {query.strip()}", "info", 3000)
+                    from core.visual_response import VisualResponse
+                    vr = VisualResponse.for_text(
+                        f"Now playing: '{query.strip()}'.\n{res}",
+                        title="🎬 Video & Audio Playback"
+                    )
+                    if self._launcher:
+                        self._launcher.show_visual_response(vr)
+                except Exception as e:
+                    self._toasts.show(f"Video play notice: {e}", "warning", 3000)
+        elif action == "summarize_video":
+            from PyQt6.QtWidgets import QInputDialog
+            query, ok = QInputDialog.getText(
+                self._win or self._launcher,
+                "Summarize YouTube Video",
+                "Enter YouTube link or video title to summarize:"
+            )
+            if ok and query.strip():
+                self._toasts.show("Fetching video transcript & summarizing...", "info", 3000)
+                try:
+                    from modules.music.youtube_transcript import summarize_youtube_video
+                    res = summarize_youtube_video(query.strip())
+                    from core.visual_response import VisualResponse
+                    msg = res.get("message", "Summary complete.")
+                    vr = VisualResponse.for_text(msg, title="📝 Video Summary & Insights")
+                    if self._launcher:
+                        self._launcher.show_visual_response(vr)
+                except Exception as e:
+                    self._toasts.show(f"Summarize error: {e}", "warning", 3000)
+        elif action == "capture_screen":
+            try:
+                from skills.window_management.window_context import capture_active_window_screenshot
+                path = capture_active_window_screenshot()
+                if path:
+                    self._toasts.show("Active window screenshot captured", "info", 2500)
+                    from core.visual_response import VisualResponse
+                    vr = VisualResponse.for_file_path(
+                        path,
+                        title="📸 Screen Capture",
+                        description="Active window screenshot captured and saved."
+                    )
+                    if self._launcher:
+                        self._launcher.show_visual_response(vr)
+                else:
+                    self._toasts.show("Failed to capture active window", "warning", 2500)
+            except Exception as e:
+                self._toasts.show(f"Screen capture notice: {e}", "warning", 2500)
+        elif action == "media_play_pause":
+            try:
+                from modules.music.music_controller import MusicController
+                controller = MusicController()
+                msg = controller.toggle_play_pause()
+                self._toasts.show(msg, "info", 2000)
+            except Exception as e:
+                self._toasts.show(f"Media toggle error: {e}", "warning", 2000)
+        elif action == "media_next":
+            try:
+                from modules.music.music_controller import MusicController
+                controller = MusicController()
+                msg = controller.media_next()
+                self._toasts.show(msg, "info", 2000)
+            except Exception as e:
+                self._toasts.show(f"Media skip error: {e}", "warning", 2000)
+        elif action == "send_file":
+            from PyQt6.QtWidgets import QFileDialog
+            file_path, _ = QFileDialog.getOpenFileName(
+                self._win or self._launcher,
+                "Select File to Send / Upload"
+            )
+            if file_path:
+                from skills.device_management.file_transfer import save_user_uploaded_file
+                import os
+                try:
+                    with open(file_path, "rb") as f:
+                        content = f.read()
+                    target_uid = self._user_id or 1
+                    res = save_user_uploaded_file(content, os.path.basename(file_path), user_id=target_uid)
+                    if res.get("success"):
+                        self._toasts.show(f"File uploaded: {res.get('filename')}", "info", 3000)
+                        from core.visual_response import VisualResponse
+                        vr = VisualResponse.for_file_path(
+                            res.get("file_path"),
+                            title="File Uploaded Successfully",
+                            description=f"File {res.get('filename')} ({res.get('size_bytes')} bytes) safely stored in user space."
+                        )
+                        if self._launcher:
+                            self._launcher.show_visual_response(vr)
+                    else:
+                        self._toasts.show(f"Upload failed: {res.get('error')}", "warning", 3000)
+                except Exception as e:
+                    self._toasts.show(f"File transfer error: {e}", "warning", 3000)
+        elif action == "devices":
+            try:
+                from skills.device_management.device_controller import get_device_controller
+                controller = get_device_controller()
+                target_uid = self._user_id or 1
+                res = controller.list_devices(user_id=target_uid)
+                self._toasts.show(res.get("message", "Devices loaded"), "info", 3000)
+                from core.visual_response import VisualResponse
+                dev_list = res.get("devices", [])
+                if dev_list:
+                    headers = ["Device Name", "Platform", "Battery", "Status"]
+                    rows = [
+                        [
+                            d.get("name", "Phone"),
+                            d.get("platform", "Android"),
+                            f"{d.get('battery')}%" if d.get("battery") is not None else "N/A",
+                            "Online" if d.get("online") else "Offline",
+                        ]
+                        for d in dev_list
+                    ]
+                    vr = VisualResponse.for_table(headers, rows, title="Connected Devices", description="Paired mobile devices in your account.")
+                else:
+                    vr = VisualResponse.for_text("No mobile devices paired yet. Click 'Pair Device' in Quick Actions to connect your phone.", title="Connected Devices")
+                if self._launcher:
+                    self._launcher.show_visual_response(vr)
+            except Exception as e:
+                self._toasts.show(f"Devices notice: {e}", "warning", 3000)
+        elif action == "pair_device":
+            try:
+                from skills.device_management.device_controller import get_device_controller
+                controller = get_device_controller()
+                target_uid = self._user_id or 1
+                res = controller.pair_device(user_id=target_uid)
+                if res.get("success"):
+                    from core.visual_response import VisualResponse
+                    code = res.get("code")
+                    ip = res.get("gateway_host")
+                    port = res.get("gateway_port")
+                    vr = VisualResponse.for_pairing_code(
+                        code=code,
+                        description=f"Gateway: {ip}:{port} • Enter this 6-digit code in Assistant Connect on your phone (valid 5 min)."
+                    )
+                    if self._launcher:
+                        self._launcher.show_visual_response(vr)
+                    self._toasts.show(f"Pairing code: {code}", "info", 4000)
+                else:
+                    self._toasts.show(f"Pairing notice: {res.get('message')}", "warning", 3000)
+            except Exception as e:
+                self._toasts.show(f"Pair device notice: {e}", "warning", 3000)
+        elif action in ("device_status", "phone_status"):
+            try:
+                from skills.device_management.device_controller import get_device_controller
+                controller = get_device_controller()
+                target_uid = self._user_id or 1
+                res = controller.get_connection_status(user_id=target_uid)
+                self._toasts.show(res.get("message", "Device status checked"), "info", 3000)
+                from core.visual_response import VisualResponse
+                dev_info = res.get("device")
+                if dev_info:
+                    headers = ["Property", "Value"]
+                    rows = [
+                        ["Device Name", dev_info.get("name", "Phone")],
+                        ["Platform", dev_info.get("platform", "Android")],
+                        ["Battery", f"{dev_info.get('battery')}%" if dev_info.get('battery') is not None else "Unknown"],
+                        ["Charging", "Yes" if dev_info.get("charging") else "No"],
+                        ["Connection State", "Connected & Online" if res.get("connected") else ("Online" if res.get("online") else "Offline")],
+                        ["Last Seen", dev_info.get("last_seen", "N/A")],
+                    ]
+                    vr = VisualResponse.for_table(headers, rows, title="Device Status", description=f"Connection diagnostics for {dev_info.get('name', 'Phone')}.")
+                else:
+                    vr = VisualResponse.for_text(res.get("message", "No paired device found."), title="Device Status")
+                if self._launcher:
+                    self._launcher.show_visual_response(vr)
+            except Exception as e:
+                self._toasts.show(f"Device status notice: {e}", "warning", 3000)
+        elif action in ("show_again", "recent_result", "show_recent"):
+            try:
+                target_uid = self._user_id or 1
+                from extensions.dialogue_state_manager import get_dialogue_manager
+                dm = get_dialogue_manager(user_id=target_uid)
+                cached_dict = dm.get_last_visual_response(allow_expired=True)
+                if cached_dict:
+                    from core.visual_response import VisualResponse
+                    vr = VisualResponse.from_dict(cached_dict)
+                    if self._launcher:
+                        self._launcher.show_visual_response(vr)
+                    self._toasts.show("Displaying recent visual response", "info", 2000)
+                else:
+                    self._toasts.show("No recent visual response in cache.", "info", 2000)
+            except Exception as e:
+                self._toasts.show(f"Visual response notice: {e}", "warning", 2500)
         elif action == "type_request":
             self._win.show_on_chat()
             if hasattr(self._win, '_chat_page') and hasattr(self._win._chat_page, 'cmd_bar'):
@@ -612,9 +831,10 @@ class AssistantApp(QObject):
                 print(f"[UI] Stop speaking error: {e}")
             self._propagate_state("idle")
             self._toasts.show("Audio output silenced.", "info", 1500)
-        elif action == "system_status" or action == "telemetry":
+        elif action in ("system_status", "status", "telemetry"):
             self._win.select_tab(4)
             self._win.show_animated()
+
 
         # ── Right-Click Control Center Actions & Dashboard ──
         elif action in ("dashboard", "show"):
@@ -674,7 +894,7 @@ class AssistantApp(QObject):
             confirmed = True
             if self._win:
                 confirmed = self._win.request_confirmation(
-                    title="Exit Smart Assistant",
+                    title="Exit Trevon Labs",
                     message="Are you sure you want to shut down the assistant and all services?",
                     is_destructive=True
                 )
@@ -763,8 +983,8 @@ class AssistantApp(QObject):
             self._show_main_window()
 
     def logout(self):
-        """Logout the current user and return to the login window."""
-        print("[APP] Logging out current user...")
+        """Logout the current user and return to entry window."""
+        print(f"[APP] Logging out user {self._username}...")
 
         # Stop speech listener
         try:
@@ -837,7 +1057,7 @@ class AssistantApp(QObject):
 
         try:
             from core.assistant_core import assistant_core
-            assistant_core.set_authenticated_user(0, "guest", "Assistant")
+            assistant_core.set_authenticated_user(None, "user", "Trevon")
         except Exception:
             pass
 

@@ -64,10 +64,22 @@ class ReminderScheduler:
         """
         if not reminder_id:
             reminder_id = str(uuid.uuid4())
+        reminder_id = str(reminder_id)
         
         trigger_time = time.time() + delay_seconds
         
         with self._lock:
+            existing = next((r for r in self.reminders if str(r["id"]) == reminder_id), None)
+            if existing:
+                existing["text"] = text
+                existing["trigger_time"] = trigger_time
+                existing["delay_seconds"] = delay_seconds
+                existing["user_id"] = user_id
+                existing["triggered"] = False
+                trigger_datetime = datetime.datetime.fromtimestamp(trigger_time)
+                print(f"[REMINDER ENGINE] Updated existing scheduled reminder {reminder_id}: '{text}' at {trigger_datetime.strftime('%H:%M:%S')} for user {user_id}")
+                return reminder_id
+
             self.reminders.append({
                 "id": reminder_id,
                 "text": text,
@@ -251,8 +263,9 @@ class ReminderScheduler:
     
     def reload_for_user(self, user_id):
         """Reload reminders for a specific user (call when user session changes)."""
-        if self.db_manager and user_id:
-            # Clear current in-memory reminders
+        self.user_id = user_id
+        if self.db_manager and user_id is not None:
+            # Clear current in-memory reminders for isolation
             with self._lock:
                 self.reminders = []
             
@@ -270,7 +283,7 @@ def get_scheduler() -> Optional[ReminderScheduler]:
 
 def initialize_scheduler(tts_callback: Optional[Callable] = None, sound_callback: Optional[Callable] = None, db_manager=None, user_id=None) -> ReminderScheduler:
     """
-    Initialize the global reminder scheduler.
+    Initialize the global reminder scheduler (Idempotent singleton).
     
     Args:
         tts_callback: Function to call for TTS output
@@ -283,14 +296,31 @@ def initialize_scheduler(tts_callback: Optional[Callable] = None, sound_callback
     """
     global _global_scheduler
     
-    # Stop existing scheduler if running
+    # If a scheduler is already running, reuse it and avoid stopping/restarting threads
+    if _global_scheduler is not None and _global_scheduler.running:
+        if tts_callback and not _global_scheduler.tts_callback:
+            _global_scheduler.tts_callback = tts_callback
+        if sound_callback and not _global_scheduler.sound_callback:
+            _global_scheduler.sound_callback = sound_callback
+        if db_manager and not _global_scheduler.db_manager:
+            _global_scheduler.db_manager = db_manager
+        if db_manager and user_id is not None:
+            if _global_scheduler.user_id != user_id:
+                _global_scheduler.reload_for_user(user_id)
+            else:
+                existing_user_reminders = [r for r in _global_scheduler.reminders if r.get("user_id") == user_id]
+                if not existing_user_reminders:
+                    _load_reminders_from_database(_global_scheduler, db_manager, user_id)
+        return _global_scheduler
+
+    # Stop existing scheduler if running but flagged
     if _global_scheduler:
         _global_scheduler.stop()
     
-    _global_scheduler = ReminderScheduler(tts_callback, sound_callback, db_manager)
+    _global_scheduler = ReminderScheduler(tts_callback, sound_callback, db_manager, user_id=user_id)
     
     # Load pending reminders from database if db_manager and user_id are available
-    if db_manager and user_id:
+    if db_manager and user_id is not None:
         _load_reminders_from_database(_global_scheduler, db_manager, user_id)
     
     return _global_scheduler
@@ -319,8 +349,12 @@ def _load_reminders_from_database(scheduler: ReminderScheduler, db_manager, user
             if due_at > now:
                 delay_seconds = (due_at - now).total_seconds()
                 reminder_user_id = reminder.get("user_id", user_id)
-                scheduler.add_reminder(reminder["task_text"], int(delay_seconds), str(reminder["id"]), reminder_user_id)
-                print(f"[REMINDER ENGINE] Loaded reminder from database for user {reminder_user_id}: '{reminder['task_text']}' at {due_at}")
+                rem_id_str = str(reminder["id"])
+                with scheduler._lock:
+                    already_present = any(str(r["id"]) == rem_id_str for r in scheduler.reminders)
+                if not already_present:
+                    scheduler.add_reminder(reminder["task_text"], int(delay_seconds), rem_id_str, reminder_user_id)
+                    print(f"[REMINDER ENGINE] Loaded reminder from database for user {reminder_user_id}: '{reminder['task_text']}' at {due_at}")
         
         print(f"[REMINDER ENGINE] Loaded {len(pending_reminders)} reminders from database for user {user_id}")
     except Exception as e:

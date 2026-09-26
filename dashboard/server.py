@@ -345,7 +345,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 with open(index_path, "r", encoding="utf-8") as f:
                     self._send_html(f.read())
             else:
-                self._send_html("<h1>Smart Assistant Dashboard</h1><p>Dashboard UI ready.</p>")
+                self._send_html("<h1>Trevon Labs Dashboard</h1><p>Dashboard UI ready.</p>")
             return
 
         self._send_json({"error": "Not Found", "path": path}, 404)
@@ -758,13 +758,13 @@ def get_dashboard_url() -> str:
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Smart Assistant Decoupled Web Dashboard")
+    parser = argparse.ArgumentParser(description="Trevon Labs Decoupled Web Dashboard")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port to bind (default: {DEFAULT_PORT})")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host interface (default: 0.0.0.0)")
     args = parser.parse_args()
 
     print("============================================================")
-    print("STARTING SMART ASSISTANT WEB DASHBOARD (ALL CAPABILITIES CONNECTED)")
+    print("STARTING TREVON LABS WEB DASHBOARD (ALL CAPABILITIES CONNECTED)")
     print("============================================================")
     uctx = assistant_core.get_user_context()
     print(f"Active User Context: {uctx.get('username')} (ID: {uctx.get('user_id')}) | Assistant: {uctx.get('assistant_name')}")

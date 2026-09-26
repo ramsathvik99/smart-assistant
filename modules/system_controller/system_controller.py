@@ -1193,3 +1193,372 @@ def get_network_speed() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"[SYSTEM] Failed to measure network speed: {e}")
         return {"success": False, "message": f"Could not measure network speed: {e}"}
+
+
+def toggle_dark_mode(enable: Optional[bool] = None) -> Dict[str, Any]:
+    """
+    Toggle or set system theme mode (Dark Mode / Light Mode).
+    Modifies Windows Personalize registry keys or uses OS preferences.
+    """
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        
+        # Read current state
+        current_dark = False
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
+                val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                current_dark = (val == 0)
+        except Exception:
+            current_dark = False
+
+        target_dark = not current_dark if enable is None else bool(enable)
+        target_val = 0 if target_dark else 1
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "AppsUseLightTheme", 0, winreg.REG_DWORD, target_val)
+            winreg.SetValueEx(key, "SystemUsesLightTheme", 0, winreg.REG_DWORD, target_val)
+
+        state_str = "Dark Mode" if target_dark else "Light Mode"
+        return {
+            "success": True,
+            "status": "success",
+            "dark_mode": target_dark,
+            "theme": "dark" if target_dark else "light",
+            "message": f"System appearance switched to {state_str}."
+        }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to toggle dark mode: {e}")
+        return {"success": False, "status": "error", "message": f"Could not toggle dark mode: {e}"}
+
+
+def connect_to_wifi(ssid: str, password: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Connect to a specified Wi-Fi network SSID.
+    """
+    try:
+        import subprocess
+        clean_ssid = ssid.strip().strip('"\'')
+        
+        # Try connecting with netsh
+        cmd = ["netsh", "wlan", "connect", f"name={clean_ssid}"]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        
+        if res.returncode == 0 or "successfully" in res.stdout.lower() or "completed" in res.stdout.lower():
+            return {
+                "success": True,
+                "status": "success",
+                "ssid": clean_ssid,
+                "message": f"Connection request to Wi-Fi network '{clean_ssid}' sent successfully."
+            }
+        else:
+            return {
+                "success": False,
+                "status": "error",
+                "ssid": clean_ssid,
+                "message": f"Could not connect to Wi-Fi network '{clean_ssid}': {res.stdout.strip() or res.stderr.strip()}"
+            }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to connect to Wi-Fi: {e}")
+        return {"success": False, "status": "error", "message": f"Wi-Fi connection error: {e}"}
+
+
+def set_display_resolution(width: int, height: int) -> Dict[str, Any]:
+    """
+    Set primary monitor display resolution on Windows.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        
+        class DEVMODEW(ctypes.Structure):
+            _fields_ = [
+                ('dmDeviceName', wintypes.WCHAR * 32),
+                ('dmSpecVersion', wintypes.WORD),
+                ('dmDriverVersion', wintypes.WORD),
+                ('dmSize', wintypes.WORD),
+                ('dmDriverExtra', wintypes.WORD),
+                ('dmFields', wintypes.DWORD),
+                ('dmPositionX', wintypes.LONG),
+                ('dmPositionY', wintypes.LONG),
+                ('dmDisplayOrientation', wintypes.DWORD),
+                ('dmDisplayFixedOutput', wintypes.DWORD),
+                ('dmColor', wintypes.SHORT),
+                ('dmDuplex', wintypes.SHORT),
+                ('dmYResolution', wintypes.SHORT),
+                ('dmTTOption', wintypes.SHORT),
+                ('dmCollate', wintypes.SHORT),
+                ('dmFormName', wintypes.WCHAR * 32),
+                ('dmLogPixels', wintypes.WORD),
+                ('dmBitsPerPel', wintypes.DWORD),
+                ('dmPelsWidth', wintypes.DWORD),
+                ('dmPelsHeight', wintypes.DWORD),
+                ('dmDisplayFlags', wintypes.DWORD),
+                ('dmDisplayFrequency', wintypes.DWORD),
+                ('dmICMMethod', wintypes.DWORD),
+                ('dmICMIntent', wintypes.DWORD),
+                ('dmMediaType', wintypes.DWORD),
+                ('dmDitherType', wintypes.DWORD),
+                ('dmReserved1', wintypes.DWORD),
+                ('dmReserved2', wintypes.DWORD),
+                ('dmPanningWidth', wintypes.DWORD),
+                ('dmPanningHeight', wintypes.DWORD),
+            ]
+
+        DM_PELSWIDTH = 0x00080000
+        DM_PELSHEIGHT = 0x00100000
+        CDS_UPDATEREGISTRY = 0x00000001
+        DISP_CHANGE_SUCCESSFUL = 0
+
+        dm = DEVMODEW()
+        dm.dmSize = ctypes.sizeof(DEVMODEW)
+        dm.dmPelsWidth = int(width)
+        dm.dmPelsHeight = int(height)
+        dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT
+
+        res = ctypes.windll.user32.ChangeDisplaySettingsW(ctypes.byref(dm), CDS_UPDATEREGISTRY)
+        if res == DISP_CHANGE_SUCCESSFUL:
+            return {
+                "success": True,
+                "status": "success",
+                "width": int(width),
+                "height": int(height),
+                "message": f"Display resolution successfully changed to {width}x{height}."
+            }
+        else:
+            return {
+                "success": False,
+                "status": "error",
+                "code": res,
+                "message": f"Display resolution change to {width}x{height} was rejected by system (code: {res})."
+            }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to set display resolution: {e}")
+        return {"success": False, "status": "error", "message": f"Could not set resolution: {e}"}
+
+
+def initiate_system_power(action: str, delay_seconds: int = 0) -> Dict[str, Any]:
+    """
+    Perform safe power management action: lock, sleep, hibernate, shutdown, restart, abort.
+    """
+    act = action.lower().strip()
+    try:
+        import subprocess
+        import ctypes
+        
+        if act == "lock":
+            ctypes.windll.user32.LockWorkStation()
+            return {"success": True, "status": "success", "action": "lock", "message": "Workstation locked."}
+        
+        elif act == "sleep":
+            subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"], check=False)
+            return {"success": True, "status": "success", "action": "sleep", "message": "System entering sleep mode."}
+            
+        elif act == "hibernate":
+            subprocess.run(["shutdown", "/h"], check=False)
+            return {"success": True, "status": "success", "action": "hibernate", "message": "System hibernating."}
+            
+        elif act in ("shutdown", "poweroff"):
+            sec = max(0, int(delay_seconds))
+            subprocess.run(["shutdown", "/s", "/t", str(sec)], check=False)
+            msg = f"System shutdown scheduled in {sec} seconds." if sec > 0 else "System shutting down now."
+            return {"success": True, "status": "success", "action": "shutdown", "delay": sec, "message": msg}
+            
+        elif act in ("restart", "reboot"):
+            sec = max(0, int(delay_seconds))
+            subprocess.run(["shutdown", "/r", "/t", str(sec)], check=False)
+            msg = f"System restart scheduled in {sec} seconds." if sec > 0 else "System restarting now."
+            return {"success": True, "status": "success", "action": "restart", "delay": sec, "message": msg}
+            
+        elif act in ("abort", "cancel"):
+            subprocess.run(["shutdown", "/a"], check=False)
+            return {"success": True, "status": "success", "action": "abort", "message": "Scheduled shutdown/restart cancelled."}
+            
+        else:
+            return {"success": False, "status": "error", "message": f"Unknown power action '{action}'."}
+    except Exception as e:
+        logger.error(f"[SYSTEM] Power action failed: {e}")
+        return {"success": False, "status": "error", "message": f"System power action failed: {e}"}
+
+
+def get_gpu_telemetry() -> Dict[str, Any]:
+    """
+    Get GPU utilization, memory usage, and temperature via NVML / nvidia-smi / WMI.
+    """
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        device_count = pynvml.nvmlDeviceGetCount()
+        gpus = []
+        for i in range(device_count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode('utf-8')
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            gpus.append({
+                "index": i,
+                "name": name,
+                "gpu_util_percent": util.gpu,
+                "memory_util_percent": util.memory,
+                "memory_used_mb": round(mem.used / (1024 * 1024), 1),
+                "memory_total_mb": round(mem.total / (1024 * 1024), 1),
+                "temperature_c": temp
+            })
+        if gpus:
+            msg = f"GPU: {gpus[0]['name']} at {gpus[0]['gpu_util_percent']}% load, {gpus[0]['temperature_c']}°C, {gpus[0]['memory_used_mb']}MB VRAM used."
+            return {"success": True, "available": True, "gpus": gpus, "message": msg}
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+        res = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            lines = res.stdout.strip().splitlines()
+            gpus = []
+            for idx, line in enumerate(lines):
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 5:
+                    gpus.append({
+                        "index": idx,
+                        "name": parts[0],
+                        "gpu_util_percent": float(parts[1]),
+                        "memory_used_mb": float(parts[2]),
+                        "memory_total_mb": float(parts[3]),
+                        "temperature_c": float(parts[4])
+                    })
+            if gpus:
+                msg = f"GPU: {gpus[0]['name']} at {gpus[0]['gpu_util_percent']}% load, {gpus[0]['temperature_c']}°C."
+                return {"success": True, "available": True, "gpus": gpus, "message": msg}
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "available": False,
+        "gpus": [],
+        "message": "No dedicated NVIDIA GPU telemetry available (integrated graphics or drivers not active)."
+    }
+
+
+def get_current_wallpaper() -> Dict[str, Any]:
+    """
+    Get the path of the currently active desktop wallpaper on Windows.
+    """
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop")
+        wallpaper_path, _ = winreg.QueryValueEx(key, "Wallpaper")
+        winreg.CloseKey(key)
+        return {
+            "success": True,
+            "status": "success",
+            "wallpaper_path": wallpaper_path,
+            "message": f"Current wallpaper: {wallpaper_path}"
+        }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to read current wallpaper: {e}")
+        return {"success": False, "status": "error", "message": f"Could not retrieve wallpaper: {e}"}
+
+
+def set_wallpaper(image_path: str) -> Dict[str, Any]:
+    """
+    Set desktop wallpaper to the specified image path on Windows.
+    """
+    try:
+        abs_path = os.path.abspath(image_path)
+        if not os.path.exists(abs_path):
+            return {"success": False, "status": "error", "message": f"Wallpaper file not found: {abs_path}"}
+        
+        SPI_SETDESKWALLPAPER = 20
+        SPIF_UPDATEINIFILE = 0x01
+        SPIF_SENDCHANGE = 0x02
+        flags = SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
+        
+        res = ctypes.windll.user32.SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, abs_path, flags)
+        if res:
+            return {
+                "success": True,
+                "status": "success",
+                "wallpaper_path": abs_path,
+                "message": f"Wallpaper successfully updated to {os.path.basename(abs_path)}."
+            }
+        else:
+            return {
+                "success": False,
+                "status": "error",
+                "message": "System rejected wallpaper update."
+            }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to set wallpaper: {e}")
+        return {"success": False, "status": "error", "message": f"Could not set wallpaper: {e}"}
+
+
+def get_desktop_statistics() -> Dict[str, Any]:
+    """
+    Analyze files, folders, shortcuts, and space on the user's Desktop.
+    """
+    try:
+        from pathlib import Path
+        desktop = Path.home() / "Desktop"
+        if not desktop.exists():
+            return {"success": False, "status": "error", "message": "Desktop directory not found."}
+            
+        items = list(desktop.iterdir())
+        files = [i for i in items if i.is_file()]
+        dirs = [i for i in items if i.is_dir()]
+        shortcuts = [i for i in files if i.suffix.lower() in ('.lnk', '.url')]
+        
+        total_size = sum(f.stat().st_size for f in files)
+        size_mb = round(total_size / (1024 * 1024), 2)
+        
+        return {
+            "success": True,
+            "status": "success",
+            "desktop_path": str(desktop),
+            "total_items": len(items),
+            "file_count": len(files),
+            "folder_count": len(dirs),
+            "shortcut_count": len(shortcuts),
+            "total_size_mb": size_mb,
+            "message": f"Desktop contains {len(items)} items ({len(files)} files, {len(dirs)} folders, {len(shortcuts)} shortcuts, {size_mb} MB total)."
+        }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to get desktop statistics: {e}")
+        return {"success": False, "status": "error", "message": f"Could not analyze desktop: {e}"}
+
+
+def get_system_telemetry_summary() -> Dict[str, Any]:
+    """
+    Get combined CPU, RAM, and GPU telemetry in a single authoritative local operation.
+    """
+    cpu = get_cpu_metrics()
+    ram = get_ram_metrics()
+    gpu = get_gpu_telemetry()
+
+    cpu_pct = cpu.get("overall_percent", 0.0)
+    ram_pct = ram.get("percent", 0.0)
+    ram_used = ram.get("used_gb", 0.0)
+    ram_tot = ram.get("total_gb", 0.0)
+    gpu_msg = gpu.get("message", "No dedicated GPU telemetry available.")
+
+    msg = f"System telemetry: CPU is at {cpu_pct:.1f}%. RAM is at {ram_pct:.1f}% ({ram_used:.1f}GB of {ram_tot:.1f}GB used). {gpu_msg}"
+    return {
+        "success": True,
+        "status": "success",
+        "cpu": cpu,
+        "ram": ram,
+        "gpu": gpu,
+        "overall_percent": cpu_pct,
+        "message": msg
+    }
+
+
+

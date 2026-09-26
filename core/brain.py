@@ -228,9 +228,31 @@ def brain_process(user_input: str, user_id: str = "default") -> Dict[str, Any]:
             dialogue_mgr.current_state.pending_goal_resumption = None
 
     # ------------------------------------------------------------------
-    # Step 1.5 — USER INTERRUPTION / CANCELLATION (Requirement 9)
+    # Step 1.48 — CONVERSATIONAL PAUSE / HOLD (Barge-in short utterance)
     # ------------------------------------------------------------------
-    if routing_input == "cancel current goal" or clean_low in ("stop", "cancel that", "cancel", "abort", "no, don't do that", "don't do that", "stop it", "stop."):
+    if routing_input == "pause current goal" or clean_low in ("wait", "wait...", "wait!", "hold on", "hang on", "wait a second", "wait a sec", "wait a minute", "pause"):
+        active_g = dialogue_mgr.current_state.current_goal or {}
+        dialogue_mgr.current_state.goal_status = "WAITING_FOR_USER"
+        dialogue_mgr.current_state.pending_goal_continuation = active_g or {"request": user_input}
+        pause_msg = "I've paused. What would you like to change?"
+        dialogue_mgr.record_response(pause_msg)
+        return {
+            "status": "success",
+            "intent": "GOAL_MANAGEMENT",
+            "goal_status": "WAITING_FOR_USER",
+            "response": pause_msg,
+            "handled": True
+        }
+
+    # ------------------------------------------------------------------
+    # Step 1.5 — USER INTERRUPTION / CANCELLATION (Requirement 9 & 12)
+    # ------------------------------------------------------------------
+    if routing_input == "cancel current goal" or clean_low in (
+        "stop", "cancel that", "cancel", "abort", "no, don't do that",
+        "don't do that", "stop it", "stop.", "never mind", "forget it",
+        "don't send it", "actually, don't send it", "no, don't send it",
+        "don't send", "cancel it"
+    ):
         active_g = dialogue_mgr.current_state.current_goal
         gid = str((active_g.get("id") if active_g else None) or (active_g.get("goal_id") if active_g else None) or uuid.uuid4())[:8]
         dialogue_mgr.current_state.pending_goal_continuation = None
@@ -600,6 +622,9 @@ def brain_process(user_input: str, user_id: str = "default") -> Dict[str, Any]:
     result["goal_outcome"] = outcome.to_dict()
 
     return result
+
+
+brain_route_and_execute = brain_process
 
 
 # ---------------------------------------------------------------------------

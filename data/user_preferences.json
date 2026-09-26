@@ -83,10 +83,10 @@
       "test_color": "#00A8FF",
       "dashboard_color": "#7C3AED",
       "floating_button_color": "#EC383B",
-      "assistant_voice_id": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech_OneCore\\Voices\\Tokens\\MSTTS_V110_enUS_ZiraM",
+      "assistant_voice_id": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech_OneCore\\Voices\\Tokens\\MSTTS_V110_enGB_SusanM",
       "assistant_voice_gender": "female",
-      "assistant_voice_tone": "friendly",
-      "assistant_voice_rate": "165",
+      "assistant_voice_tone": "professional",
+      "assistant_voice_rate": "155",
       "assistant_voice_volume": "1.0",
       "assistant_voice_provider": "onecore"
     },

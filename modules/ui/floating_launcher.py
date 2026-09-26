@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QRect, QRectF, pyqtSignal, QPropertyAnimation,
-    QEasingCurve, QPointF
+    QEasingCurve, QPointF, QEvent
 )
 from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QRadialGradient, QLinearGradient,
@@ -28,15 +28,16 @@ from modules.ui.design_system import (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. DOUBLE-CLICK: QUICK ACTIONS HUD PANEL (Context-Aware / Action-Oriented)
+# 1. QUICK ACTIONS HUD PANEL (Anchored to Pulse Ring)
 # ─────────────────────────────────────────────────────────────────────────────
 class QuickActionsPanel(QWidget):
     """
     Compact, action-oriented Quick Action HUD.
-    Answers: 'What do I want to DO right now?'
-    Dynamically adapts actions based on real Assistant state (idle, speaking, executing).
+    Anchored to the floating Pulse Ring.
+    Exposes real, verified production capabilities (Voice, Send File, Devices, Pair Device, Status, Memory, Settings).
     """
     action_triggered = pyqtSignal(str)
+
 
     def __init__(self, assistant_name: str = "Assistant", parent=None):
         super().__init__(parent)
@@ -173,36 +174,55 @@ class QuickActionsPanel(QWidget):
             # Priority action: Stop speech
             actions = [
                 ("🛑 Stop Speaking", "stop_speaking", True),
-                ("💬 View Response", "recent_conversation", False),
-                ("📋 Task Monitor", "current_task", False),
-                ("📊 System Health", "system_status", False),
+                ("🎙 Voice Command", "talk", False),
+                ("🎬 Search & Play Video", "play_video", False),
+                ("📝 Summarize Video", "summarize_video", False),
+                ("📸 Screen Capture", "capture_screen", False),
+                ("📁 Send File", "send_file", False),
+                ("📱 Devices", "devices", False),
+                ("🔗 Pair Device", "pair_device", False),
+                ("📶 Device Status", "device_status", False),
+                ("🔄 Show Recent Result", "show_again", False),
+                ("🧠 Memory", "memory", False),
+                ("📊 Status", "system_status", False),
             ]
         elif state in ("executing", "processing", "planning"):
             # Priority action: Stop task
             actions = [
                 ("⏹ Stop / Cancel Task", "stop_cancel", True),
-                ("📋 Inspect Active Task", "current_task", False),
-                ("🎤 Voice Interruption", "talk", False),
-                ("📊 System Health", "system_status", False),
+                ("🎙 Voice Command", "talk", False),
+                ("🎬 Search & Play Video", "play_video", False),
+                ("📝 Summarize Video", "summarize_video", False),
+                ("📸 Screen Capture", "capture_screen", False),
+                ("📁 Send File", "send_file", False),
+                ("📱 Devices", "devices", False),
+                ("🔗 Pair Device", "pair_device", False),
+                ("📶 Device Status", "device_status", False),
+                ("🔄 Show Recent Result", "show_again", False),
+                ("🧠 Memory", "memory", False),
+                ("📊 Status", "system_status", False),
             ]
         else:
-            # Idle / normal interaction set (compact & focused)
+            # Idle / standard Quick Actions set
             actions = [
-                ("🗔 Open Dashboard", "dashboard", False),
-                ("🎤 Talk to Assistant", "talk", False),
-                ("⌨ Type a Request", "type_request", False),
-                ("⏰ Remind Me", "reminders", False),
-                ("💬 Recent Conversation", "recent_conversation", False),
-                ("🧠 Search Memory", "memory", False),
-                ("📋 Task Monitor", "current_task", False),
-                ("📊 System Health", "system_status", False),
+                ("🎙 Voice Command", "talk", False),
+                ("🎬 Search & Play Video", "play_video", False),
+                ("📝 Summarize Video", "summarize_video", False),
+                ("📸 Screen Capture", "capture_screen", False),
+                ("📁 Send File", "send_file", False),
+                ("📱 Devices", "devices", False),
+                ("🔗 Pair Device", "pair_device", False),
+                ("📶 Device Status", "device_status", False),
+                ("🔄 Show Recent Result", "show_again", False),
+                ("🧠 Memory", "memory", False),
+                ("📊 Status", "system_status", False),
             ]
 
         for label, act, is_urgent in actions:
             btn = QPushButton(label)
-            btn.setFixedHeight(36)
+            btn.setFixedHeight(30)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setFont(QFont(F.PRIMARY, 10, QFont.Weight.Medium))
+            btn.setFont(QFont(F.PRIMARY, 9, QFont.Weight.Medium))
             if is_urgent:
                 btn.setStyleSheet(f"""
                     QPushButton {{
@@ -210,7 +230,7 @@ class QuickActionsPanel(QWidget):
                         color: #ff5252;
                         border: 1px solid rgba(255, 71, 87, 0.45);
                         border-radius: {Radius.SM}px;
-                        padding: 6px 12px;
+                        padding: 4px 10px;
                         text-align: left;
                         font-weight: 700;
                     }}
@@ -229,7 +249,7 @@ class QuickActionsPanel(QWidget):
                         color: {C.TEXT};
                         border: 1px solid rgba(255, 255, 255, 0.07);
                         border-radius: {Radius.SM}px;
-                        padding: 6px 12px;
+                        padding: 4px 10px;
                         text-align: left;
                     }}
                     QPushButton:hover {{
@@ -243,9 +263,40 @@ class QuickActionsPanel(QWidget):
 
         self.adjustSize()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        app = QApplication.instance()
+        if app:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event):
+        if self.isVisible() and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.NonClientAreaMouseButtonPress):
+            global_pos = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
+            if not self.geometry().contains(global_pos):
+                self.hide()
+                return False
+        return super().eventFilter(obj, event)
+
     def _on_action(self, act: str):
         self.hide()
         self.action_triggered.emit(act)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -335,20 +386,22 @@ class AssistantControlCenterPanel(QWidget):
         self._add_action_btn("🔄 Restart Assistant", "restart")
         self._add_action_btn("⏻ Exit Assistant", "quit", is_destructive=True)
 
-        # ── Section 2: AUDIO & INPUT CONTROLS ──
-        self._add_section_header("AUDIO & INPUT CONTROLS")
+        # ── Section 2: AUDIO & MEDIA CONTROLS ──
+        self._add_section_header("AUDIO & MEDIA CONTROLS")
         self._mic_btn = self._add_action_btn("🎙 Continuous Listening", "toggle_listening")
+        self._add_action_btn("⏯ Play / Pause Media", "media_play_pause")
+        self._add_action_btn("⏭ Next Track", "media_next")
         self._add_action_btn("🔇 Silence Audio Output", "mute_tts")
         self._add_action_btn("🔄 Re-calibrate Microphone", "reset_mic")
 
-        # ── Section 3: OPERATOR & SESSION ──
-        self._add_section_header("OPERATOR & SESSION")
-        self._operator_badge = QLabel(f"👤 Operator: {self._username}")
+        # ── Section 3: ACCOUNT & SESSION ──
+        self._add_section_header("ACCOUNT & SESSION")
+        self._operator_badge = QLabel(f"👤 Account: {self._username}")
         self._operator_badge.setFont(F.mono(9))
         self._operator_badge.setStyleSheet("color: #8da4b5; padding: 4px 8px; background: rgba(255, 255, 255, 0.03); border-radius: 4px;")
         self._layout.addWidget(self._operator_badge)
 
-        self._callsign_badge = QLabel(f"✦ Callsign: {self._assistant_name}")
+        self._callsign_badge = QLabel(f"✦ Assistant: {self._assistant_name}")
         self._callsign_badge.setFont(F.mono(9))
         self._callsign_badge.setStyleSheet("color: #00d4ff; padding: 4px 8px; background: rgba(0, 212, 255, 0.06); border-radius: 4px;")
         self._layout.addWidget(self._callsign_badge)
@@ -364,10 +417,10 @@ class AssistantControlCenterPanel(QWidget):
         root.addWidget(card)
 
     def set_assistant_name(self, name: str):
-        """Update callsign and identity badge in control center."""
-        self._assistant_name = name or "Assistant"
+        """Update assistant name and identity badge in control center."""
+        self._assistant_name = name or "Trevon"
         if hasattr(self, '_callsign_badge') and self._callsign_badge:
-            self._callsign_badge.setText(f"✦ Callsign: {self._assistant_name}")
+            self._callsign_badge.setText(f"✦ Assistant: {self._assistant_name}")
 
     def _add_section_header(self, text: str):
         lbl = QLabel(text)
@@ -418,13 +471,13 @@ class AssistantControlCenterPanel(QWidget):
     def update_context(self, assistant_name: str, username: str, is_listening: bool = True):
         self._assistant_name = assistant_name
         self._username = username
-        self._operator_badge.setText(f"👤 Operator: {self._username}")
-        self._callsign_badge.setText(f"✦ Callsign: {self._assistant_name}")
+        self._operator_badge.setText(f"👤 Account: {self._username}")
+        self._callsign_badge.setText(f"✦ Assistant: {self._assistant_name}")
         mic_status = "Active" if is_listening else "Muted"
         self._mic_btn.setText(f"🎙 Continuous Listening [{mic_status}]")
 
     def set_accent_color(self, hex_color: str):
-        """Re-theme the Control Center panel (border, shadow, titles, callsign badge, button hovers)."""
+        """Re-theme the Control Center panel (border, shadow, titles, assistant badge, button hovers)."""
         acc = ensure_visible_accent(str(hex_color).strip())
         r, g, b = hex_to_rgb(acc)
         # Card border + shadow
@@ -449,7 +502,7 @@ class AssistantControlCenterPanel(QWidget):
             ss = lbl.styleSheet()
             if 'letter-spacing: 0.8px' in ss and 'margin-top: 4px' in ss:
                 lbl.setStyleSheet(f"color: {acc}; font-weight: 700; letter-spacing: 0.8px; margin-top: 4px; background: transparent;")
-        # Callsign badge
+        # Assistant identity badge
         if hasattr(self, '_callsign_badge'):
             self._callsign_badge.setStyleSheet(f"color: {acc}; padding: 4px 8px; background: rgba({r}, {g}, {b}, 0.06); border-radius: 4px;")
         # Non-destructive action button hovers
@@ -472,9 +525,40 @@ class AssistantControlCenterPanel(QWidget):
                     }}
                 """)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        app = QApplication.instance()
+        if app:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event):
+        if self.isVisible() and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.NonClientAreaMouseButtonPress):
+            global_pos = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
+            if not self.geometry().contains(global_pos):
+                self.hide()
+                return False
+        return super().eventFilter(obj, event)
+
     def _on_action(self, act: str):
         self.hide()
         self.action_triggered.emit(act)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -520,9 +604,9 @@ class FloatingLauncher(QWidget):
 
         # State
         self._state = "idle"
-        self._assistant_name = "Jarvis"
-        self._username = "Operator"
-        self._initial_letter = "F"
+        self._assistant_name = "Trevon"
+        self._username = "User"
+        self._initial_letter = "T"
         self._hovered = False
         self._dragging = False
         self._drag_start_pos = QPoint()
@@ -560,9 +644,9 @@ class FloatingLauncher(QWidget):
         self.move(screen.width() - 110, screen.height() - 140)
 
     def set_assistant_name(self, name: str):
-        """Update assistant identity while maintaining the centered 'F' for the Pulse Ring design."""
-        self._assistant_name = name or "Assistant"
-        self._initial_letter = "F"
+        """Update assistant identity while maintaining the centered initial."""
+        self._assistant_name = name or "Trevon"
+        self._initial_letter = self._assistant_name[0].upper() if self._assistant_name else "T"
         self.setToolTip(f"{self._assistant_name} (Click: Focus | Double-click: Quick Actions | Right-click: Controls)")
         if hasattr(self, '_quick_hud') and self._quick_hud:
             self._quick_hud.set_assistant_name(self._assistant_name)
@@ -572,8 +656,10 @@ class FloatingLauncher(QWidget):
 
     def set_user_context(self, username: str, assistant_name: str):
         """Update user session info for control center."""
-        self._username = username or "Operator"
+        self._username = username or "User"
         self.set_assistant_name(assistant_name)
+        if hasattr(self, '_control_center') and self._control_center:
+            self._control_center.update_context(self._assistant_name, self._username)
 
     def set_accent_color(self, hex_color: str):
         """
@@ -786,6 +872,7 @@ class FloatingLauncher(QWidget):
         self._toggle_quick_hud()
 
     def _toggle_quick_hud(self):
+        """Toggle compact Quick Actions HUD anchored to the Pulse Ring."""
         if self._control_center.isVisible():
             self._control_center.hide()
 
@@ -794,7 +881,6 @@ class FloatingLauncher(QWidget):
         else:
             self._quick_hud.update_context(self._state, self._assistant_name)
             screen = QApplication.primaryScreen().availableGeometry()
-            # Try placing to the left of the button; if too close to screen left, place to right
             hud_x = self.x() - self._quick_hud.width() - 10
             if hud_x < screen.left() + 10:
                 hud_x = self.x() + self.width() + 10
@@ -802,7 +888,6 @@ class FloatingLauncher(QWidget):
                 hud_x = screen.right() - self._quick_hud.width() - 10
             hud_x = max(screen.left() + 10, hud_x)
 
-            # Center vertically with button and clamp to screen
             hud_y = self.y() + (self.height() - self._quick_hud.height()) // 2
             hud_y = min(max(screen.top() + 10, hud_y), screen.bottom() - self._quick_hud.height() - 10)
 
@@ -810,39 +895,46 @@ class FloatingLauncher(QWidget):
             self._quick_hud.show()
             self._quick_hud.raise_()
 
-    # ── Right-Click: Assistant Control Center ──────────────────────────────────
-    def contextMenuEvent(self, event):
-        """Right click confirmed -> Open structured Assistant Control Center."""
+    def _toggle_control_center(self):
+        """Toggle structured Assistant Control Center panel anchored to the Pulse Ring."""
         if self._quick_hud.isVisible():
             self._quick_hud.hide()
 
-        # Check real continuous listening status
-        is_listening = True
-        try:
-            from legacy.sst import is_continuous_audio_running
-            is_listening = is_continuous_audio_running()
-        except Exception:
-            pass
+        if self._control_center.isVisible():
+            self._control_center.hide()
+        else:
+            is_listening = True
+            try:
+                from legacy.sst import is_continuous_audio_running
+                is_listening = is_continuous_audio_running()
+            except Exception:
+                pass
 
-        self._control_center.update_context(self._assistant_name, self._username, is_listening)
+            self._control_center.update_context(self._assistant_name, self._username, is_listening)
 
-        # Position smartly adjacent to badge anywhere on screen
-        screen = QApplication.primaryScreen().availableGeometry()
-        cc_x = self.x() - self._control_center.width() - 10
-        if cc_x < screen.left() + 10:
-            cc_x = self.x() + self.width() + 10
-        if cc_x + self._control_center.width() > screen.right() - 10:
-            cc_x = screen.right() - self._control_center.width() - 10
-        cc_x = max(screen.left() + 10, cc_x)
+            screen = QApplication.primaryScreen().availableGeometry()
+            cc_x = self.x() - self._control_center.width() - 10
+            if cc_x < screen.left() + 10:
+                cc_x = self.x() + self.width() + 10
+            if cc_x + self._control_center.width() > screen.right() - 10:
+                cc_x = screen.right() - self._control_center.width() - 10
+            cc_x = max(screen.left() + 10, cc_x)
 
-        cc_y = self.y() + (self.height() - self._control_center.height()) // 2
-        cc_y = min(max(screen.top() + 10, cc_y), screen.bottom() - self._control_center.height() - 10)
+            cc_y = self.y() + (self.height() - self._control_center.height()) // 2
+            cc_y = min(max(screen.top() + 10, cc_y), screen.bottom() - self._control_center.height() - 10)
 
-        self._control_center.move(cc_x, cc_y)
-        self._control_center.show()
-        self._control_center.raise_()
+            self._control_center.move(cc_x, cc_y)
+            self._control_center.show()
+            self._control_center.raise_()
+
+    # ── Right-Click: Structured Assistant Control Center ─────────────────────
+    def contextMenuEvent(self, event):
+        """Right click confirmed -> Open structured Assistant Control Center anchored to Pulse Ring."""
+        self._toggle_control_center()
+
 
     def _constrain_to_screen(self):
+
         """
         Keep floating button comfortably within visible screen bounds while
         letting it rest at ANY custom position across the screen chosen by the user.

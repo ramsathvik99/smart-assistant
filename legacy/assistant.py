@@ -12,7 +12,12 @@ from legacy.sst import listen
 
 # Use TTS Coordinator instead of direct speak()
 try:
-    from extensions.system.tts_coordinator import speak, TTSPriority
+    from extensions.system.tts_coordinator import speak, TTSPriority, initialize_tts_coordinator
+    try:
+        from legacy.tts import speak as _legacy_speak
+        initialize_tts_coordinator(_legacy_speak)
+    except Exception as _tts_init_err:
+        pass
 except ImportError:
     # Fallback to direct speak if coordinator not available
     from legacy.tts import speak
@@ -88,7 +93,7 @@ def get_memory_for_personality() -> List[str] | None:
 
 # Initialize Reminder Engine
 try:
-    from extensions.reminder_engine import initialize_scheduler
+    from extensions.reminder_engine import initialize_scheduler, get_scheduler
     from extensions.database_manager import DatabaseManager
     from legacy.memory_manager import get_connection
     from instance.config import settings
@@ -130,12 +135,14 @@ try:
 
     # Use the coordinator's speak() (already imported at module top).
     # It will route through the priority queue to legacy.tts.speak().
-    reminder_scheduler = initialize_scheduler(
-        tts_callback=speak,
-        sound_callback=reminder_sound_alert,
-        db_manager=db_manager,
-        user_id=user_id
-    )
+    reminder_scheduler = get_scheduler()
+    if reminder_scheduler is None:
+        reminder_scheduler = initialize_scheduler(
+            tts_callback=speak,
+            sound_callback=reminder_sound_alert,
+            db_manager=db_manager,
+            user_id=user_id
+        )
     print(f"[REMINDER ENGINE] Initialized successfully with database persistence for user {user_id}")
 except ImportError as e:
     print(f"[REMINDER ENGINE] Import failed: {e}")
@@ -285,7 +292,11 @@ def process_input(text, user_id=None):
     if not text or not text.strip():
         return
 
-    print(f"[ASSISTANT DEBUG] Command: {text}")
+    try:
+        print(f"[ASSISTANT DEBUG] Command: {text}")
+    except Exception:
+        safe_text = str(text).encode("ascii", errors="backslashreplace").decode("ascii")
+        print(f"[ASSISTANT DEBUG] Command: {safe_text}")
 
     # Forward to Brain (PHASE 6: multi-intent + dialogue state + goal planner)
     # Falls back transparently to unified_command_router for single-intent commands.
@@ -319,7 +330,7 @@ def process_input(text, user_id=None):
                 # Store in conversational memory
                 try:
                     from extensions.conversational_memory import store_interaction
-                    store_interaction(text, response)
+                    store_interaction(text, response, user_id=effective_uid)
                 except Exception as e:
                     print(f"[MEMORY ERROR] {e}")
             return response
@@ -331,7 +342,7 @@ def process_input(text, user_id=None):
             # Store in conversational memory
             try:
                 from extensions.conversational_memory import store_interaction
-                store_interaction(text, response)
+                store_interaction(text, response, user_id=effective_uid)
             except Exception as e:
                 print(f"[MEMORY ERROR] {e}")
 

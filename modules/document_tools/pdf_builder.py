@@ -313,7 +313,9 @@ def get_pdf_info(filepath: str) -> Dict[str, Any]:
             "status": "success",
             "filepath": filepath,
             "filename": os.path.basename(filepath),
+            "pages": len(reader.pages),
             "num_pages": len(reader.pages),
+            "page_count": len(reader.pages),
             "size_kb": size_kb,
             "title": meta.get("/Title") or os.path.basename(filepath),
             "author": meta.get("/Author") or "Unknown",
@@ -327,9 +329,10 @@ def get_pdf_info(filepath: str) -> Dict[str, Any]:
 
 def split_pdf(
     filepath: str,
-    start_page: int,
-    end_page: int,
-    output_filename: Optional[str] = None
+    start_page: int = 1,
+    end_page: Optional[int] = None,
+    output_filename: Optional[str] = None,
+    pages: Optional[List[int]] = None
 ) -> Dict[str, Any]:
     """
     Extract a range of pages (1-indexed) into a new PDF document.
@@ -342,11 +345,17 @@ def split_pdf(
         reader = pypdf.PdfReader(filepath)
         total_pages = len(reader.pages)
 
+        if pages:
+            start_page = min(pages)
+            end_page = max(pages)
+        elif end_page is None:
+            end_page = start_page
+
         # Validate range
         start_idx = max(0, start_page - 1)
         end_idx = min(total_pages, end_page)
 
-        if start_idx >= end_idx or start_idx >= total_pages:
+        if start_idx >= total_pages or start_idx > end_idx:
             return {
                 "success": False, 
                 "status": "error",
@@ -380,6 +389,7 @@ def split_pdf(
             "status": "success",
             "filepath": target_path,
             "filename": os.path.basename(target_path),
+            "files": [target_path],
             "pages_extracted": extracted_count,
             "message": f"Extracted {extracted_count} pages ({start_page}-{end_page}) into '{os.path.basename(target_path)}'."
         }
@@ -393,7 +403,7 @@ def merge_pdfs(file_paths: List[str], output_filename: Optional[str] = None) -> 
     """
     try:
         import pypdf
-        merger = pypdf.PdfMerger()
+        merger = pypdf.PdfWriter()
         valid_count = 0
         for p in file_paths:
             if os.path.exists(p):

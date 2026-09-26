@@ -127,20 +127,14 @@ class RAGResponseGenerator:
         # Base personality — uses per-user configured assistant name; never hardcodes "NOVA"
         try:
             from instance.config import settings as _cfg
-            _asst_name = _cfg.get_assistant_name()
+            _asst_name = _cfg.get_assistant_name() or "Trevon"
         except Exception:
-            _asst_name = None
+            _asst_name = "Trevon"
 
-        if _asst_name:
-            base_personality = (
-                f"You are {_asst_name}, a highly intelligent, professional, and JARVIS-like AI assistant.\n"
-                "Maintain a calm, efficient, confident, and slightly formal tone.\n"
-            )
-        else:
-            base_personality = (
-                "You are a highly intelligent, professional, and JARVIS-like AI assistant.\n"
-                "Maintain a calm, efficient, confident, and slightly formal tone.\n"
-            )
+        base_personality = (
+            f"You are {_asst_name}, a highly intelligent, professional AI assistant developed by Trevon Labs.\n"
+            "Maintain a calm, efficient, confident, and professional tone.\n"
+        )
 
         # Intent-specific guidance
         if intent in ["dynamic_fact_query", "real_time_info", "web_search"]:
@@ -216,6 +210,8 @@ class RAGResponseGenerator:
         try:
             print(f"[PIPELINE - GENERATION] Calling LLM with intent: {intent} (has_ground_truth={has_ground_truth})")
             response = self.llm.get_completion(prompt=query, system_prompt=full_system_prompt)
+            if not response:
+                return "I apologize, but I am currently unable to reach my language model services. Please check your connection or try again in a moment."
             return response
         except Exception as e:
             print(f"[RAG GENERATOR ERROR] {e}")

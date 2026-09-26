@@ -43,6 +43,11 @@ class LLMEngine:
         self.hf_keys = CONFIG.get("HF_API_KEYS", [CONFIG.get("HF_API_KEY", "")])
         self.hf_model = CONFIG.get("HF_MODEL_ID", "mistralai/Mistral-7B-Instruct-v0.2")
 
+        self.ollama_base = CONFIG.get("OLLAMA_API_BASE", "http://localhost:11434")
+        self.ollama_model = CONFIG.get("OLLAMA_MODEL", "llama3.2:latest")
+        self.ollama_enabled = CONFIG.get("OLLAMA_ENABLED", True)
+        self.ollama_timeout = CONFIG.get("OLLAMA_TIMEOUT", 10)
+
         # Backward compatibility attributes (use first available key)
         self.openai_key = self.openai_keys[0] if self.openai_keys else ""
         self.groq_key = self.groq_keys[0] if self.groq_keys else ""
@@ -125,6 +130,7 @@ class LLMEngine:
                 elif res.status_code == 404 or "model_not_found" in res.text or "does not exist" in res.text:
                     print(f"[LLM] Provider=Groq Key slot {key_index} Model={model} not found (HTTP 404). Marking model unavailable.")
                     _UNAVAILABLE_MODELS.add(model_tag)
+                    break
                 elif res.status_code == 429:
                     print(f"[LLM] Provider=Groq Key slot {key_index} rate limited (HTTP 429). Trying next key.")
                     _UNAVAILABLE_KEYS.add(key_tag)
@@ -171,6 +177,7 @@ class LLMEngine:
                 elif res.status_code == 404 or "not found" in res.text.lower():
                     print(f"[LLM] Provider=Gemini Key slot {key_index} Model={model} not found (HTTP 404). Marking model unavailable.")
                     _UNAVAILABLE_MODELS.add(model_tag)
+                    break
                 elif res.status_code == 429:
                     print(f"[LLM] Provider=Gemini Key slot {key_index} rate limit / quota exceeded (HTTP 429). Trying next key.")
                     _UNAVAILABLE_KEYS.add(key_tag)
@@ -216,6 +223,7 @@ class LLMEngine:
                 elif res.status_code == 404:
                     print(f"[LLM] Provider=DeepSeek Key slot {key_index} Model={model} not found (HTTP 404). Marking model unavailable.")
                     _UNAVAILABLE_MODELS.add(model_tag)
+                    break
                 elif res.status_code == 429:
                     print(f"[LLM] Provider=DeepSeek Key slot {key_index} rate limited (HTTP 429). Trying next key.")
                     _UNAVAILABLE_KEYS.add(key_tag)
@@ -256,6 +264,7 @@ class LLMEngine:
                 elif res.status_code == 404 or res.status_code == 400:
                     print(f"[LLM] Provider=HuggingFace Key slot {key_index} Model={model} unavailable (HTTP {res.status_code}). Marking model unavailable.")
                     _UNAVAILABLE_MODELS.add(model_tag)
+                    break
                 elif res.status_code == 429:
                     print(f"[LLM] Provider=HuggingFace Key slot {key_index} rate limited (HTTP 429). Trying next key.")
                     _UNAVAILABLE_KEYS.add(key_tag)
@@ -266,6 +275,42 @@ class LLMEngine:
                     print(f"[LLM] Provider=HuggingFace Key slot {key_index} HTTP {res.status_code} error. Trying next key.")
             except Exception as e:
                 print(f"[LLM] Provider=HuggingFace Key slot {key_index} exception: {type(e).__name__}. Trying next key.")
+        return None
+
+    def _call_ollama(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int) -> Optional[str]:
+        if "ollama" in _UNAVAILABLE_PROVIDERS or not self.ollama_enabled:
+            return None
+        model_tag = f"ollama:{model}"
+        if model_tag in _UNAVAILABLE_MODELS:
+            return None
+
+        try:
+            url = f"{self.ollama_base.rstrip('/')}/api/chat"
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_tokens
+                }
+            }
+            res = requests.post(url, json=payload, timeout=self.ollama_timeout)
+            if res.status_code == 200:
+                data = res.json()
+                if "message" in data and "content" in data["message"]:
+                    return data["message"]["content"]
+            elif res.status_code == 404 or "not found" in res.text.lower():
+                print(f"[LLM] Provider=Ollama Model={model} not found (HTTP 404). Marking model unavailable.")
+                _UNAVAILABLE_MODELS.add(model_tag)
+            else:
+                print(f"[LLM] Provider=Ollama HTTP {res.status_code} error.")
+        except requests.exceptions.Timeout:
+            print(f"[LLM] Provider=Ollama request timed out after {self.ollama_timeout}s. Marking provider unavailable.")
+            _UNAVAILABLE_PROVIDERS.add("ollama")
+        except Exception as e:
+            print(f"[LLM] Provider=Ollama connection exception: {type(e).__name__}. Marking provider unavailable.")
+            _UNAVAILABLE_PROVIDERS.add("ollama")
         return None
 
     def get_completion(
@@ -280,7 +325,7 @@ class LLMEngine:
     ) -> Optional[str]:
         """
         Execute completion with strict multi-tier fallback:
-        OpenAI (multiple keys) -> Groq (multiple keys + model sequence) -> Gemini (multiple keys) -> DeepSeek (multiple keys) -> HuggingFace (multiple keys).
+        OpenAI (multiple keys) -> Groq (multiple keys + model sequence) -> Gemini (multiple keys) -> DeepSeek (multiple keys) -> HuggingFace (multiple keys) -> Ollama (Local).
         """
         if not prompt or not str(prompt).strip():
             return None
@@ -295,11 +340,11 @@ class LLMEngine:
 
             if _asst_name:
                 identity_line = (
-                    f"You are {_asst_name}, an intelligent assistant with a calm, professional presence similar to JARVIS. "
+                    f"You are {_asst_name}, an intelligent assistant developed by Trevon Labs with a calm, professional, and capable presence. "
                 )
             else:
                 identity_line = (
-                    "You are an intelligent assistant with a calm, professional presence similar to JARVIS. "
+                    "You are Trevon, an intelligent assistant developed by Trevon Labs with a calm, professional, and capable presence. "
                 )
 
             system_prompt = (
@@ -385,6 +430,12 @@ class LLMEngine:
             if resp:
                 return resp
 
+        # 6. Fallback: Ollama (Local)
+        if self.ollama_enabled and "ollama" not in _UNAVAILABLE_PROVIDERS:
+            resp = self._call_ollama(messages, self.ollama_model, temperature, max_tokens)
+            if resp:
+                return resp
+
         print("[LLM] All configured providers and fallback keys failed.")
         return None
 
@@ -451,6 +502,7 @@ class LLMEngine:
         "WEATHER_QUERY",
         "MEMORY_QUERY",
         "RAG_SEARCH",
+        "VISUAL_SURFACE",
         "GENERAL_CONVERSATION",
         "NEEDS_CLARIFICATION",
     ]
@@ -477,7 +529,7 @@ class LLMEngine:
         "  EMAIL              — send/read/check/reply email\n"
         "  NOTES              — take a note, jot down\n"
         "  REMINDERS          — set a reminder, alert me, remind me\n"
-        "  CALCULATOR         — arithmetic, math calculation\n"
+        "  CALCULATOR         — arithmetic, math calculation (e.g. 'calculate 25 * 8', 'what is 12 + 37'). NEVER for generating or listing numbers\n"
         "  CODE_GENERATION    — write/build/create code, programs, scripts\n"
         "  TRANSLATION        — translate text to another language\n"
         "  TIME_QUERY         — asking what time it is\n"
@@ -485,6 +537,7 @@ class LLMEngine:
         "  WEATHER_QUERY      — asking about weather, temperature, forecast, umbrella\n"
         "  MEMORY_QUERY       — asking what the assistant remembers about the user\n"
         "  RAG_SEARCH         — factual questions, who/what/where/why/how (knowledge)\n"
+        "  VISUAL_SURFACE     — requests to show, display, or generate numbers, lists, pairing codes, results, or data ('show me 10 numbers', 'generate 5 random numbers', 'show that again')\n"
         "  GENERAL_CONVERSATION — greetings, small talk, vague statements\n"
         "  NEEDS_CLARIFICATION — the utterance is ambiguous and cannot be safely resolved\n\n"
         "FILE_OPERATIONS entity guidance:\n"

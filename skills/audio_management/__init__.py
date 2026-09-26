@@ -7,6 +7,7 @@ from .echo_guard import EchoGuard
 from .hotkey import PushToTalk, DEFAULT_CHORD, chord_label, set_ptt_enabled, toggle_ptt, is_ptt_enabled
 from .sound_effects import SoundManager, get_sound_manager
 from .audio_controller import AudioController, get_audio_controller
+from .confirmation_gate import ConfirmationGate, get_confirmation_gate, confirmation_gate
 
 __all__ = [
     "list_devices",
@@ -25,4 +26,8 @@ __all__ = [
     "get_sound_manager",
     "AudioController",
     "get_audio_controller",
+    "ConfirmationGate",
+    "get_confirmation_gate",
+    "confirmation_gate",
 ]
+

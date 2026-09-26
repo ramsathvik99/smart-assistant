@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Any, Callable, Optional
 
 from .device_models import DeviceRecord, ProtocolTypes, build_message, new_request_id
@@ -32,9 +33,14 @@ class RemoteDeviceDispatcher:
     def register_connection(self, device_id: str, send_callback: Callable[[dict], Any]) -> None:
         """Register an active connection handler for a device."""
         with self._lock:
+            try:
+                loop = asyncio.get_running_loop()
+                conn_time = loop.time()
+            except RuntimeError:
+                conn_time = time.time()
             self._connections[device_id] = {
                 "send": send_callback,
-                "connected_at": asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0,
+                "connected_at": conn_time,
             }
             logger.info(f"Registered connection for device {device_id}")
 

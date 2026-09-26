@@ -239,11 +239,14 @@ def _stop_animation():
 # ----------------------------------------------------
 _tts_queue = queue.Queue()
 
-# Threading primitives
-_worker_lock = threading.Lock()   # prevents double-start race on _ensure_tts_worker
-_tts_active  = threading.Event()  # set while the worker is actually synthesizing speech
-# _tts_active is clear() when idle, set() when a phrase is playing.
-# sst.py can call wait_for_silence() to block until TTS finishes.
+# Threading primitives & barge-in state
+_worker_lock      = threading.Lock()   # prevents double-start race on _ensure_tts_worker
+_tts_active       = threading.Event()  # set while the worker is actually synthesizing speech
+_tts_interrupted  = threading.Event()  # set when barge-in or stop is requested
+_tts_state_lock   = threading.Lock()
+_active_sp_voice  = None               # active COM SpVoice object for instant purge
+_active_tts_text  = ""                 # text currently being spoken
+_last_interrupted_speech = None        # {'text': ..., 'timestamp': ...}
 
 
 def _tts_worker():
@@ -256,26 +259,36 @@ def _tts_worker():
             _tts_queue.task_done()
             break
 
+        _tts_interrupted.clear()
+        with _tts_state_lock:
+            global _active_tts_text
+            _active_tts_text = text
+
         _start_animation()
         _tts_active.set()         # mark TTS as speaking
         _notify_speech_callbacks(text)
 
         try:
             success = False
+            if _tts_interrupted.is_set():
+                continue
+
             if lang_hint == 'en':
                 success = _speak_pyttsx3(text)
-                if not success:
+                if not success and not _tts_interrupted.is_set():
                     # pyttsx3 failed — fall back to gTTS for English
                     print("[TTS] pyttsx3 failed; trying gTTS fallback for English")
                     success = _speak_gtts(text, 'en')
             else:
                 success = _speak_gtts(text, lang_hint)
-                if not success:
+                if not success and not _tts_interrupted.is_set():
                     print(f"[TTS] gTTS failed for lang={lang_hint}")
 
-            if not success:
+            if not success and not _tts_interrupted.is_set():
                 print(f"[TTS] Both synthesis engines failed for text: {text[:60]!r}")
         finally:
+            with _tts_state_lock:
+                _active_tts_text = ""
             _tts_active.clear()   # mark TTS as idle
             _stop_animation()
             _tts_queue.task_done()
@@ -340,7 +353,9 @@ def _speak_pyttsx3(text: str, voice_id: str | None = None, rate: int | None = No
     """
     Synthesise speech using Windows SAPI / pyttsx3 with the specified or current per-user voice profile.
     Supports both SAPI5 and OneCore voice tokens.
+    Supports instantaneous barge-in cancellation via SAPI purge flags.
     """
+    global _active_sp_voice
     effective_vid = voice_id if voice_id is not None else _voice_id
     effective_rate = rate if rate is not None else _voice_rate
     effective_vol = volume if volume is not None else _voice_volume
@@ -350,6 +365,7 @@ def _speak_pyttsx3(text: str, voice_id: str | None = None, rate: int | None = No
         import pythoncom
         pythoncom.CoInitialize()
         import comtypes.client
+        import numpy as np
 
         sp = comtypes.client.CreateObject("SAPI.SpVoice")
         if effective_vid:
@@ -365,10 +381,65 @@ def _speak_pyttsx3(text: str, voice_id: str | None = None, rate: int | None = No
         sp.Rate = sapi_rate
         sp.Volume = max(0, min(100, int(round(effective_vol * 100))))
 
-        sp.Speak(text)
-        return True
+        with _tts_state_lock:
+            _active_sp_voice = sp
+
+        # Seed EchoGuard with audio reference so Trevon's voice is not mistaken for user speech
+        try:
+            from legacy.sst import get_echo_guard
+            eg = get_echo_guard()
+            if eg is not None:
+                try:
+                    mem_sp = comtypes.client.CreateObject("SAPI.SpVoice")
+                    if effective_vid:
+                        try:
+                            token_mem = comtypes.client.CreateObject("SAPI.SpObjectToken")
+                            token_mem.SetId(effective_vid)
+                            mem_sp.Voice = token_mem
+                        except Exception:
+                            pass
+                    mem_stream = comtypes.client.CreateObject("SAPI.SpMemoryStream")
+                    mem_sp.AudioOutputStream = mem_stream
+                    mem_sp.Rate = sapi_rate
+                    mem_sp.Volume = max(0, min(100, int(round(effective_vol * 100))))
+                    mem_sp.Speak(text)
+                    raw_data = bytes(mem_stream.GetData())
+                    if raw_data:
+                        pcm_arr = np.frombuffer(raw_data, dtype=np.int16)
+                        sr = 22050
+                        chunk_size = 2048
+                        t_now = time.monotonic()
+                        for i in range(0, len(pcm_arr), chunk_size):
+                            sub = pcm_arr[i:i + chunk_size]
+                            sub_rms = float(np.sqrt(np.mean(sub.astype(np.float32) ** 2)))
+                            sub_lvl = min(1.0, max(0.01, sub_rms / 32768.0))
+                            offset_s = i / float(sr)
+                            eg.note_output(sub, sr, sub_lvl, when=t_now + offset_s)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Speak asynchronously (flag 1 = SVSFlagsAsync) so we can monitor for barge-in
+        sp.Speak(text, 1)
+
+        # Loop until finished or interrupted
+        while not sp.WaitUntilDone(30):
+            if _tts_interrupted.is_set():
+                try:
+                    # Instant purge (3 = SVSFlagsAsync | SVSFPurgeBeforeSpeak)
+                    sp.Speak("", 3)
+                except Exception:
+                    pass
+                return False
+
+        return not _tts_interrupted.is_set()
     except Exception as sapi_err:
         print(f"[TTS SAPI Notice] Fallback to pyttsx3: {sapi_err}")
+    finally:
+        with _tts_state_lock:
+            if _active_sp_voice is sp:
+                _active_sp_voice = None
 
     # Fallback to standard pyttsx3
     try:
@@ -426,7 +497,7 @@ def _speak_gtts(text: str, lang: str) -> bool:
 # Public speak() — queues the request only.
 # Does NOT perform synthesis directly.
 # ----------------------------------------------------
-def speak(text, lang_hint='en', block=False):
+def speak(text, lang_hint='en', block=False, user_id=None):
     """Speak text with TTS — starts worker thread if needed.
 
     This function queues the text and returns immediately unless
@@ -455,18 +526,18 @@ def speak(text, lang_hint='en', block=False):
         _asst_label = "Assistant"
     print(f"{_asst_label}: {text}")
 
-    # Log to messages table
-    user_id = CONFIG.get("CURRENT_USER_ID")
-    if user_id:
+    # Log to messages table if explicit user_id is provided
+    target_uid = user_id or CONFIG.get("CURRENT_USER_ID")
+    if target_uid and user_id is not None:
         try:
-            add_history(user_id, "assistant", text)
+            add_history(target_uid, "assistant", text)
         except Exception as e:
             print(f"[DB LOG ERROR] {e}")
 
     # Log to conversational memory
     if _conv_memory_ok and current_user_command.strip():
         try:
-            _store_interaction(current_user_command, text)
+            _store_interaction(current_user_command, text, user_id=user_id)
         except Exception as _cm_log_err:
             print(f"[CONV_MEMORY LOG ERROR] {_cm_log_err}")
 
@@ -481,16 +552,59 @@ def wait_until_spoken():
     _tts_queue.join()
 
 
-def stop_speaking():
-    """Drain TTS queue and stop current speech synthesis."""
+def stop_speaking(interrupted: bool = False):
+    """Drain TTS queue and stop current speech synthesis immediately."""
+    global _last_interrupted_speech, _active_sp_voice
     try:
+        _tts_interrupted.set()
+        with _tts_state_lock:
+            if interrupted and _active_tts_text:
+                _last_interrupted_speech = {
+                    "text": _active_tts_text,
+                    "timestamp": time.time(),
+                }
+                print(f"[TTS BARGE-IN] Interrupted while speaking: {_active_tts_text[:60]!r}")
+            if _active_sp_voice is not None:
+                try:
+                    # SVSFlagsAsync | SVSFPurgeBeforeSpeak (3) purges active hardware buffer
+                    _active_sp_voice.Speak("", 3)
+                except Exception:
+                    pass
+                _active_sp_voice = None
+
         while not _tts_queue.empty():
             try:
                 _tts_queue.get_nowait()
                 _tts_queue.task_done()
             except Exception:
                 break
+
         _tts_active.clear()
         _stop_animation()
+        try:
+            from legacy.sst import get_echo_guard
+            _eg = get_echo_guard()
+            if _eg is not None:
+                _eg.reset()
+        except Exception:
+            pass
     except Exception as e:
         print(f"[TTS] Error stopping speech: {e}")
+
+
+def get_last_interrupted_speech() -> dict | None:
+    """Return details of the last interrupted speech, if any."""
+    global _last_interrupted_speech
+    return _last_interrupted_speech
+
+
+def clear_interrupted_speech() -> None:
+    """Clear the interrupted speech record."""
+    global _last_interrupted_speech
+    _last_interrupted_speech = None
+
+
+def is_interrupted() -> bool:
+    """Return True if TTS was interrupted."""
+    return _tts_interrupted.is_set()
+

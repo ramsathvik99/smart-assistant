@@ -75,10 +75,10 @@ class ReminderHandler:
         
         # Time patterns
         self.time_patterns = {
-            # Relative time: "in 5 minutes", "in 2 hours"
-            'relative': re.compile(r'\bin\s+(\d+)\s+(minutes?|hours?|days?|weeks?)\b', re.IGNORECASE),
+            # Relative time: "in 10 seconds", "in 5 minutes", "in 2 hours"
+            'relative': re.compile(r'\bin\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', re.IGNORECASE),
             
-            # Specific time: "at 6 PM", "at 14:30"
+            # Specific time: "at 6 PM", "at 14:30", "at 2pm"
             'specific': re.compile(r'\bat\s+(\d{1,2}):?(\d{2})?\s*(am|pm)?\b', re.IGNORECASE),
             
             # Today/tomorrow: "today at 5 PM", "tomorrow at 9 AM"
@@ -179,6 +179,61 @@ class ReminderHandler:
             "status": "pending"
         }
         
+        # 1. Contextual reminder pattern (e.g. "tomorrow i have to go to movie at 3pm so can you remind me at 2pm")
+        m_context = re.search(r'^(.*?)(?:,\s*|\s+so\s+(?:can\s+you\s+|could\s+you\s+|please\s+)?|\s+can\s+you\s+|\s+could\s+you\s+|\s+please\s+)remind\s+me\s+(?:at\s+|in\s+|before\s+|to\s+)(.+)$', original_input.strip(), re.IGNORECASE)
+        if m_context and m_context.group(1).strip():
+            pre_clause = m_context.group(1).strip()
+            reminder_directive = m_context.group(2).strip()
+            
+            is_tomorrow = 'tomorrow' in pre_clause.lower() or 'tomorrow' in reminder_directive.lower()
+            now = datetime.now()
+            base_date = now + timedelta(days=1) if is_tomorrow else now
+            
+            clean_task = re.sub(r'^(?:tomorrow|today)\s*,?\s*', '', pre_clause, flags=re.IGNORECASE)
+            clean_task = re.sub(r'^(?:i\s+have\s+to|i\s+need\s+to|i\s+must|i\'m\s+going\s+to|i\s+plan\s+to)\s+', '', clean_task, flags=re.IGNORECASE).strip()
+            
+            due_at = None
+            m_rel = re.search(r'\bin\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', reminder_directive, re.IGNORECASE)
+            if not m_rel:
+                m_rel = re.search(r'\b(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', reminder_directive, re.IGNORECASE)
+            
+            if m_rel:
+                amt = int(m_rel.group(1))
+                u = m_rel.group(2).lower()
+                if 'sec' in u: delta = timedelta(seconds=amt)
+                elif 'min' in u: delta = timedelta(minutes=amt)
+                elif 'hour' in u or 'hr' in u: delta = timedelta(hours=amt)
+                elif 'day' in u: delta = timedelta(days=amt)
+                else: delta = timedelta(weeks=amt)
+                due_at = now + delta
+            else:
+                m_time = re.search(r'\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b', reminder_directive, re.IGNORECASE)
+                if m_time:
+                    hour = int(m_time.group(1))
+                    minute = int(m_time.group(2)) if m_time.group(2) else 0
+                    ampm = (m_time.group(3) or 'am').lower()
+                    if ampm == 'pm' and hour != 12: hour += 12
+                    elif ampm == 'am' and hour == 12: hour = 0
+                    due_at = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            
+            if due_at:
+                result["task_text"] = clean_task or "go to movie at 3pm"
+                result["due_at"] = due_at.strftime("%Y-%m-%d %H:%M:%S")
+                conflicts = self.db_manager.check_reminder_conflicts(user_id, result["due_at"])
+                if conflicts:
+                    result["conflicts"] = conflicts
+                    result["status"] = "conflict"
+                    conflict_texts = [f"'{c['task_text']}' at {c['due_at']}" for c in conflicts]
+                    return {
+                        "status": "conflict",
+                        "message": f"You already have {', '.join(conflict_texts)}. Would you like to reschedule one of them?",
+                        "action": ReminderAction.CREATE,
+                        "proposed_reminder": result,
+                        "conflicts": conflicts
+                    }
+                result["status"] = "ready"
+                return result
+
         # Extract task text
         result["task_text"] = self._extract_task_text(original_input, text)
         
@@ -414,14 +469,15 @@ class ReminderHandler:
     
     def _extract_task_text(self, original_input: str, text: str) -> Optional[str]:
         """Extract the task text from a reminder command."""
-        # Remove common reminder keywords
+        # Remove common reminder keywords (longest/most specific first to avoid partial truncation)
         patterns_to_remove = [
+            r'\b(?:delete|remove|cancel|change|update|modify|move|reschedule)\s+(?:all\s+)?(?:my\s+)?(?:the\s+)?reminders?\s+(?:to\s+|for\s+|about\s+)?',
+            r'\b(?:delete|remove|cancel|change|update|modify|move|reschedule)\s+the\s+reminders?\s+(?:to\s+|for\s+|about\s+)?',
+            r'\b(?:delete|remove|cancel|change|update|modify|move|reschedule)\s+(?:my\s+)?',
             r'\bremind\s+me\s+(?:to\s+)?',
-            r'\bset\s+(?:a\s+)?reminder\s+(?:for\s+)?',
+            r'\bset\s+(?:a\s+)?reminder\s+(?:for\s+|to\s+)?',
             r'\balert\s+me\s+(?:to\s+)?',
-            r'\breminder\s+(?:to\s+)?',
-            r'\b(?:delete|remove|cancel|change|update|modify|move|reschedule)\s+(?:my\s+)?(?:the\s+)?reminder\s+(?:to\s+)?',
-            r'\b(?:delete|remove|cancel|change|update|modify|move|reschedule)\s+the\s+reminder\s+(?:to\s+)?',
+            r'\breminders?\s+(?:to\s+|for\s+|about\s+)?',
         ]
         
         task_text = original_input
@@ -429,65 +485,42 @@ class ReminderHandler:
             task_text = re.sub(pattern, '', task_text, flags=re.IGNORECASE)
         
         # Remove time-related phrases (more comprehensive)
-        task_text = re.sub(r'\bin\s+\d+\s+(?:minutes?|hours?|days?|weeks?)\b', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\bin\s+\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\bat\s+\d{1,2}:?\d{0,2}\s*(?:am|pm)?\b', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\b(?:today|tomorrow)\s*(?:at\s+\d{1,2}:?\d{0,2}\s*(?:am|pm)?)?\b', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:at\s+\d{1,2}:?\d{0,2}\s*(?:am|pm)?)?\b', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\b(?:every\s+day|every\s+week|every\s+month|daily|weekly|monthly)\b', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\b(?:next\s+)?(?:day|week|month)\b', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\bfor\s+(?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\b(?:tomorrow|today)\b', '', task_text, flags=re.IGNORECASE)
         
-        # Remove leading "to" if present (from "set a reminder for tomorrow to submit assignment")
-        task_text = re.sub(r'^\s*to\s+', '', task_text, flags=re.IGNORECASE)
+        # Remove leading "to" or "for" if present
+        task_text = re.sub(r'^\s*(?:to|for)\s+', '', task_text, flags=re.IGNORECASE)
         
         # Clean up
         task_text = task_text.strip()
         task_text = re.sub(r'[.!?]+$', '', task_text)
         task_text = re.sub(r'\s+', ' ', task_text)  # Normalize whitespace
         
+        if not task_text and any(k in original_input.lower() for k in ["reminder", "remind me"]):
+            return "Reminder"
         return task_text if task_text else None
     
     def _parse_time(self, text: str) -> Optional[Dict[str, Any]]:
         """Parse time from text and return due_at timestamp."""
         now = datetime.now()
         
-        # Check for today/tomorrow FIRST (before specific time pattern)
-        # "today at 5 PM", "tomorrow at 9 AM"
-        today_tomorrow_match = self.time_patterns['today_tomorrow'].search(text)
-        if today_tomorrow_match:
-            day_ref = today_tomorrow_match.group(1).lower()
-            
-            if day_ref == "tomorrow":
-                base_date = now + timedelta(days=1)
-            else:  # today
-                base_date = now
-            
-            # If time is specified
-            if today_tomorrow_match.group(2):  # time is specified
-                hour = int(today_tomorrow_match.group(2))
-                minute = int(today_tomorrow_match.group(3)) if today_tomorrow_match.group(3) else 0
-                ampm = today_tomorrow_match.group(4) or "am"
-                
-                if ampm.lower() == "pm" and hour != 12:
-                    hour += 12
-                elif ampm.lower() == "am" and hour == 12:
-                    hour = 0
-                
-                due_at = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            else:
-                # No time specified, default to 9 AM
-                due_at = base_date.replace(hour=9, minute=0, second=0, microsecond=0)
-            
-            return {"due_at": due_at.strftime("%Y-%m-%d %H:%M:%S"), "type": "day"}
-        
-        # Check for relative time: "in 5 minutes"
+        # 1. Check for relative time first: "in 10 seconds", "in 5 minutes", "in 2 hours"
         relative_match = self.time_patterns['relative'].search(text)
         if relative_match:
             amount = int(relative_match.group(1))
             unit = relative_match.group(2).lower()
             
-            if 'minute' in unit:
+            if 'sec' in unit:
+                due_at = now + timedelta(seconds=amount)
+            elif 'min' in unit:
                 due_at = now + timedelta(minutes=amount)
-            elif 'hour' in unit:
+            elif 'hour' in unit or 'hr' in unit:
                 due_at = now + timedelta(hours=amount)
             elif 'day' in unit:
                 due_at = now + timedelta(days=amount)
@@ -497,6 +530,41 @@ class ReminderHandler:
                 due_at = now + timedelta(minutes=amount)
             
             return {"due_at": due_at.strftime("%Y-%m-%d %H:%M:%S"), "type": "relative"}
+        
+        # 2. Check for today/tomorrow
+        today_tomorrow_match = self.time_patterns['today_tomorrow'].search(text)
+        if today_tomorrow_match:
+            day_ref = today_tomorrow_match.group(1).lower()
+            base_date = now + timedelta(days=1) if day_ref == "tomorrow" else now
+            
+            # If time is specified directly with today/tomorrow
+            if today_tomorrow_match.group(2):
+                hour = int(today_tomorrow_match.group(2))
+                minute = int(today_tomorrow_match.group(3)) if today_tomorrow_match.group(3) else 0
+                ampm = today_tomorrow_match.group(4) or ("pm" if hour <= 6 else "am")
+                
+                if ampm.lower() == "pm" and hour != 12:
+                    hour += 12
+                elif ampm.lower() == "am" and hour == 12:
+                    hour = 0
+                
+                due_at = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            else:
+                # Check if specific time appears elsewhere in text, e.g. "at 2pm tomorrow"
+                specific_match = self.time_patterns['specific'].search(text)
+                if specific_match:
+                    hour = int(specific_match.group(1))
+                    minute = int(specific_match.group(2)) if specific_match.group(2) else 0
+                    ampm = specific_match.group(3) or ("pm" if hour <= 6 else "am")
+                    if ampm.lower() == "pm" and hour != 12:
+                        hour += 12
+                    elif ampm.lower() == "am" and hour == 12:
+                        hour = 0
+                    due_at = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                else:
+                    due_at = base_date.replace(hour=9, minute=0, second=0, microsecond=0)
+            
+            return {"due_at": due_at.strftime("%Y-%m-%d %H:%M:%S"), "type": "day"}
         
         # Check for specific time: "at 6 PM"
         specific_match = self.time_patterns['specific'].search(text)

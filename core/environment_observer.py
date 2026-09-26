@@ -118,6 +118,13 @@ def select_relevant_categories(
     if any(w in text for w in ["read clipboard", "check clipboard", "analyze clipboard", "inspect clipboard", "what is on clipboard", "what's in my clipboard", "what is in my clipboard"]):
         categories.add("clipboard")
 
+    # Personal, informational, reminder or conversational intents do NOT observe or verify OS desktop windows
+    if intent in (
+        "REMINDERS", "DAILY_BRIEFING", "NOTES", "GENERAL_CONVERSATION",
+        "RAG_SEARCH", "TIME_QUERY", "DATE_QUERY", "CALCULATOR", "TRANSLATION", "RECOMMENDATION", "LEARNING", "UNDO"
+    ):
+        return categories
+
     # Fallback default if nothing matched
     if not categories:
         categories.add("window")

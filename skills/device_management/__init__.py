@@ -12,6 +12,9 @@ from .device_models import DeviceRecord, PairingOffer, ProtocolTypes
 from .device_pairing import DevicePairingManager, get_pairing_manager
 from .device_registry import DeviceRegistry, get_device_registry
 
+from .file_transfer import save_user_uploaded_file, get_user_file_path, list_user_files
+from .phone_audio import PhoneAudioStreamReceiver, get_phone_audio_receiver
+
 __all__ = [
     "DeviceGatewayConfig",
     "DeviceRecord",
@@ -27,4 +30,10 @@ __all__ = [
     "get_device_dispatcher",
     "DeviceController",
     "get_device_controller",
+    "save_user_uploaded_file",
+    "get_user_file_path",
+    "list_user_files",
+    "PhoneAudioStreamReceiver",
+    "get_phone_audio_receiver",
 ]
+

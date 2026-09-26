@@ -108,16 +108,17 @@ def summarize_youtube_video(url_or_query: str) -> Dict[str, Any]:
     # Summarize with LLMEngine
     summary = None
     try:
-        from core.llm_engine import LLMEngine
+        from extensions.llm_engine import LLMEngine
         engine = LLMEngine()
         prompt = (
             f"Here is the transcript of a YouTube video:\n\n{truncated_transcript}\n\n"
             "Please provide a clear, concise summary in 3-4 bullet points capturing the main ideas "
             "and key takeaways of the video."
         )
-        summary = engine.generate_response(prompt)
+        summary = engine.get_completion(prompt)
     except Exception as e:
         logger.warning(f"[YOUTUBE] LLM summarization error: {e}")
+
 
     if not summary:
         # Fallback heuristic summary

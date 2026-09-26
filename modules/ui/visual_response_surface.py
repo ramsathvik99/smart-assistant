@@ -48,7 +48,7 @@ class VisualResponsePanel(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setFixedWidth(380)
 
         self._custom_hex = C.ACC
@@ -206,6 +206,10 @@ class VisualResponsePanel(QWidget):
         val = response.primary_value or ""
         self._primary_lbl.setText(val)
 
+        if response.response_type != VisualResponseType.TABLE:
+            self.setFixedWidth(380)
+            self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
         if response.response_type in (
             VisualResponseType.PAIRING_CODE,
             VisualResponseType.VERIFICATION_CODE,
@@ -215,6 +219,14 @@ class VisualResponsePanel(QWidget):
             self._primary_lbl.setStyleSheet(f"color: {self._custom_hex}; font-weight: 800; letter-spacing: 3px; padding: 4px 0;")
             self._primary_lbl.setTextFormat(Qt.TextFormat.PlainText)
             self._scroll_area.setMaximumHeight(54)
+        elif response.response_type == VisualResponseType.TABLE:
+            self._primary_lbl.setFont(QFont("Consolas", 10))
+            self._primary_lbl.setStyleSheet("color: #e2f1f8; padding: 2px 0; font-family: 'Consolas', 'Courier New', monospace;")
+            self._primary_lbl.setTextFormat(Qt.TextFormat.PlainText)
+            self._primary_lbl.setWordWrap(False)
+            self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self._scroll_area.setMaximumHeight(260)
+            self.setFixedWidth(440)
         elif response.response_type == VisualResponseType.IP_ADDRESS:
             self._primary_lbl.setFont(QFont(F.MONO, 20, QFont.Weight.Bold))
             self._primary_lbl.setStyleSheet(f"color: #ffffff; letter-spacing: 1px; padding: 4px 0;")

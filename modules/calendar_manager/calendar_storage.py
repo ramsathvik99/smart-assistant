@@ -23,6 +23,10 @@ class CalendarStorage:
     
     def add_event(self, user_id: int, event: Dict) -> str:
         """Add an event to the calendar."""
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            user_id = 0
         conn = get_connection()
         cur = conn.cursor()
         
@@ -83,6 +87,10 @@ class CalendarStorage:
     
     def get_events(self, user_id: int, event_date: str) -> List[Dict]:
         """Get all events for a specific date."""
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            user_id = 0
         conn = get_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         
@@ -117,6 +125,10 @@ class CalendarStorage:
     
     def get_events_range(self, user_id: int, start_date: str, end_date: str) -> Dict[str, List[Dict]]:
         """Get all events in a date range."""
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            user_id = 0
         conn = get_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         

@@ -134,7 +134,15 @@ class Settings:
 
         self.GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
-        self.GROQ_FALLBACK_MODELS = ["qwen/qwen3.8-27b", "groq/compound", "groq/compound-mini"]
+        self.GROQ_FALLBACK_MODELS = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "allam-2-7b"]
+
+        self.OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+
+        self.OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
+
+        self.OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "true").lower() in ("true", "1", "yes")
+
+        self.OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "10"))
 
         self.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 
@@ -296,8 +304,7 @@ class Settings:
     def get_assistant_name(self):
         """
         Returns the active assistant name for the current session.
-        Priority: CURRENT_ASSISTANT_NAME (per-user DB value) -> query DB via CURRENT_USER_ID -> ASSISTANT_NAME (env) -> None.
-        Never returns a hardcoded 'Nova' default.
+        Priority: CURRENT_ASSISTANT_NAME (per-user DB value) -> query DB via CURRENT_USER_ID -> ASSISTANT_NAME (env) -> 'Trevon'.
         """
         if self.CURRENT_ASSISTANT_NAME:
             return self.CURRENT_ASSISTANT_NAME
@@ -310,7 +317,7 @@ class Settings:
                     return name
             except Exception:
                 pass
-        return self.ASSISTANT_NAME or None
+        return self.ASSISTANT_NAME or "Trevon"
 
 
 
@@ -330,10 +337,73 @@ class Settings:
 
 
 
-    def get(self, key, default=None):
+    def __contains__(self, key):
+        """Allow 'KEY' in CONFIG membership testing."""
+        return hasattr(self, str(key))
 
+    def get(self, key, default=None):
         return getattr(self, key, default)
 
+    def get_str(self, key: str, default: str = "", allowed: list | tuple | None = None) -> str:
+        """Get string setting with optional allowed-value validation."""
+        val = str(getattr(self, key, default) or "").strip()
+        if allowed is not None and val not in allowed:
+            return default
+        return val
+
+    def get_int(self, key: str, default: int = 0, min_val: int | None = None, max_val: int | None = None) -> int:
+        """Get integer setting with optional min/max clamping."""
+        try:
+            val = int(getattr(self, key, default))
+        except (ValueError, TypeError):
+            val = default
+        if min_val is not None:
+            val = max(min_val, val)
+        if max_val is not None:
+            val = min(max_val, val)
+        return val
+
+    def get_float(self, key: str, default: float = 0.0, min_val: float | None = None, max_val: float | None = None) -> float:
+        """Get float setting with optional min/max clamping."""
+        try:
+            val = float(getattr(self, key, default))
+        except (ValueError, TypeError):
+            val = default
+        if min_val is not None:
+            val = max(min_val, val)
+        if max_val is not None:
+            val = min(max_val, val)
+        return val
+
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        """Get boolean setting parsed from string or bool."""
+        raw = getattr(self, key, default)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        return str(raw).lower() in ("true", "1", "yes", "on")
+
+    def get_list(self, key: str, default: list | None = None) -> list:
+        """Get list setting."""
+        val = getattr(self, key, default)
+        if isinstance(val, list):
+            return val
+        if val is None:
+            return default or []
+        return [val]
+
+    def get_namespace(self, namespace: str) -> dict:
+        """Retrieve plugin or domain-specific configuration namespace."""
+        ns_key = f"_NS_{namespace.upper()}"
+        return getattr(self, ns_key, {})
+
+    def set_namespace(self, namespace: str, data: dict) -> None:
+        """Store plugin or domain-specific configuration namespace."""
+        ns_key = f"_NS_{namespace.upper()}"
+        if not hasattr(self, ns_key):
+            setattr(self, ns_key, {})
+        getattr(self, ns_key).update(data)
 
 
 settings = Settings()

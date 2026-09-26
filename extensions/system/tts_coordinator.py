@@ -146,20 +146,24 @@ class TTSCoordinator:
             return
 
         if self.speak_func is None:
-            # Coordinator not yet initialized — fall back to direct TTS.
-            # This can happen when a module imported during startup
-            # calls speak() before initialize_tts_coordinator() runs.
-            logger.warning(
-                "[TTS COORDINATOR] speak_func not yet set — "
-                "falling back to legacy.tts.speak() directly for: %r",
-                text[:60]
-            )
+            # Coordinator not yet initialized — auto-wire canonical legacy.tts.speak
             try:
-                from legacy.tts import speak as _direct_speak
-                _direct_speak(text, lang_hint=lang_hint, block=False)
-            except Exception as exc:
-                logger.error("[TTS COORDINATOR] Direct fallback also failed: %s", exc)
-            return
+                from legacy.tts import speak as _canonical_speak
+                self.initialize(_canonical_speak)
+                self.start()
+                logger.info("[TTS COORDINATOR] Auto-initialized canonical speak_func with legacy.tts.speak")
+            except Exception as e:
+                logger.warning(
+                    "[TTS COORDINATOR] speak_func not yet set and auto-init failed (%s) — "
+                    "falling back to legacy.tts.speak() directly for: %r",
+                    e, text[:60]
+                )
+                try:
+                    from legacy.tts import speak as _direct_speak
+                    _direct_speak(text, lang_hint=lang_hint, block=False)
+                except Exception as exc:
+                    logger.error("[TTS COORDINATOR] Direct fallback also failed: %s", exc)
+                return
 
         request = TTSRequest(text, priority, lang_hint)
         self.queue.put(request)
@@ -194,6 +198,28 @@ class TTSCoordinator:
             return _leg_speaking()
         except Exception:
             return False
+
+    def interrupt_speech(self) -> Optional[dict]:
+        """Immediately interrupt and stop all currently playing and queued TTS.
+        
+        Flushes coordinator priority queue and issues instant hardware purge
+        to the underlying TTS engine.
+        Returns the interrupted speech info dict if available.
+        """
+        # Drain coordinator priority queue
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except Exception:
+                break
+        try:
+            from legacy.tts import stop_speaking, get_last_interrupted_speech
+            stop_speaking(interrupted=True)
+            return get_last_interrupted_speech()
+        except Exception as exc:
+            logger.error("[TTS COORDINATOR] Error during interrupt_speech: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Worker loop
@@ -295,6 +321,12 @@ def wait_until_spoken(timeout: float = 30.0) -> None:
     get_tts_coordinator().wait_until_spoken(timeout=timeout)
 
 
+def interrupt_speech() -> Optional[dict]:
+    """Immediately interrupt and stop all currently playing and queued TTS."""
+    return get_tts_coordinator().interrupt_speech()
+
+
 # Canonical singleton reference
 tts_coordinator = get_tts_coordinator()
+
 

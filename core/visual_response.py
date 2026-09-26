@@ -164,7 +164,13 @@ def contains_sensitive_data(text_or_dict: Union[str, Dict[str, Any]]) -> bool:
     for kw in _SENSITIVE_KEYWORDS:
         if kw in text_low:
             # Exclude false positives like "pairing_code" or "token" when it's device_auth internal
-            if "pairing code" in text_low or "pairing_code" in text_low:
+            if (
+                "pairing code" in text_low 
+                or "pairing_code" in text_low 
+                or "mobile device" in text_low
+                or "pairing_started" in text_low 
+                or "pairing_code_active" in text_low
+            ):
                 continue
             return True
     return False
@@ -174,8 +180,9 @@ def contains_sensitive_data(text_or_dict: Union[str, Dict[str, Any]]) -> bool:
 # EXPLICIT "SHOW ME" & VISUAL PRESENTATION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 _EXPLICIT_SHOW_PATTERNS = [
-    r'^(?:can\s+(?:you|i)\s+|could\s+(?:you|i)\s+|please\s+)?(?:show\s+me|show\s+it|show\s+that|show|display|let\s+me\s+see|put\s+on\s+screen|put\b.*\bon\s+screen)\b',
-    r'^(?:show\s+to\s+me|bring\s+up|pop\s+up|visually\s+show)\b',
+    r'\b(?:show\s+me|show\s+it|show\s+that|display|let\s+me\s+see|put\s+on\s+screen|put\b.*\bon\s+screen)\b',
+    r'\b(?:show\s+to\s+me|bring\s+up|pop\s+up|visually\s+show)\b',
+    r'^(?:can\s+(?:you|i)\s+|could\s+(?:you|i)\s+|please\s+)?show\b',
     r'\b(?:on\s+(?:the\s+)?screen|on\s+my\s+screen|visually|on\s+display)\b',
 ]
 
@@ -296,6 +303,20 @@ def detect_visual_response(
     if contains_sensitive_data(result_dict) or contains_sensitive_data(user_input) or contains_sensitive_data(response_text):
         return None
 
+    # Do not create new visual responses for VISUAL_SURFACE internal messages, cached replays, or refusal notices
+    if (
+        result_dict.get("intent") in ("VISUAL_SURFACE", "Intent.VISUAL_SURFACE", 29)
+        or result_dict.get("reused_cache") is True
+        or any(k in response_text.lower() for k in [
+            "there is no recent information to display",
+            "there is no active pairing code",
+            "i no longer have a current version",
+            "which one would you like me to show",
+            "failed to restore visual response"
+        ])
+    ):
+        return None
+
     explicit_request = is_explicit_visual_request(user_input)
 
     # Trivial / short casual responses do not popup unless explicitly requested
@@ -330,23 +351,69 @@ def detect_visual_response(
 
     # 1. PAIRING CODE (Top Priority)
     code = result_dict.get("code")
+    if not code and response_text:
+        m_code = re.search(r'\b(?:pairing\s+code\s+(?:is\s+)?|code:\s*)([0-9]{6})\b', response_text, re.IGNORECASE)
+        if m_code:
+            code = m_code.group(1).strip()
+
     if code and (
         result_dict.get("status") in ("pairing_started", "pairing_code_active")
         or "pairing" in user_input.lower()
-        or "pairing code" in response_text.lower()
+        or "pairing" in response_text.lower()
+        or "phone" in user_input.lower()
+        or "mobile" in user_input.lower()
+        or "connect" in user_input.lower()
     ):
         code_str = str(code).strip()
-        sec_msg = "Enter this code on your phone."
+
+        # Extract Gateway (Host:Port)
+        gw_host = result_dict.get("gateway_host")
+        gw_port = result_dict.get("gateway_port")
+        if gw_host and gw_port:
+            gateway_val = f"{gw_host}:{gw_port}"
+        elif gw_host:
+            gateway_val = str(gw_host)
+        else:
+            m_gw = re.search(r'(?:gateway\s+(?:is\s+)?(?:available\s+at\s+)?|at\s+)(\d{1,3}(?:\.\d{1,3}){3}:\d+)', response_text, re.IGNORECASE)
+            gateway_val = m_gw.group(1) if m_gw else None
+
+        # Extract Expiry
+        expiry_val = None
         if result_dict.get("expires_at"):
-            sec_msg += " Expires in 5 minutes."
+            exp_raw = str(result_dict["expires_at"])
+            try:
+                from datetime import datetime, timezone
+                exp_dt = datetime.fromisoformat(exp_raw)
+                now_dt = datetime.now(timezone.utc)
+                if exp_dt > now_dt:
+                    rem = int((exp_dt - now_dt).total_seconds())
+                    rem_mins = max(1, rem // 60)
+                    expiry_val = f"{rem_mins} minutes"
+            except Exception:
+                pass
+        if not expiry_val:
+            m_exp = re.search(r'expires\s+in\s+([^\.]+)', response_text, re.IGNORECASE)
+            expiry_val = m_exp.group(1).strip() if m_exp else "5 minutes"
+
+        # Construct structured secondary text exactly matching Section 3:
+        # Gateway:\n192.168.1.11:8765\n\nExpires:\n5 minutes
+        sec_parts = []
+        if gateway_val:
+            sec_parts.append(f"Gateway:\n{gateway_val}")
+        if expiry_val:
+            sec_parts.append(f"Expires:\n{expiry_val}")
+        sec_msg = "\n\n".join(sec_parts) if sec_parts else "Enter this code on your phone."
+
+        title_text = "MOBILE PAIRING" if ("mobile" in user_input.lower() or "mobile" in response_text.lower() or gateway_val) else "PAIRING CODE"
+
         return VisualResponse(
             response_id=resp_id,
             user_id=str(user_id),
             response_type=VisualResponseType.PAIRING_CODE,
-            title="PAIRING CODE",
+            title=title_text,
             primary_value=code_str,
             secondary_text=sec_msg,
-            raw_content={"code": code_str, "status": result_dict.get("status")},
+            raw_content={"code": code_str, "gateway": gateway_val, "expires": expiry_val, "status": result_dict.get("status")},
             actions=[VisualResponseAction(label="Copy", action_type="copy", payload=code_str)],
             created_at=now,
             ttl_seconds=300.0,  # 5 min freshness for pairing code
@@ -358,11 +425,12 @@ def detect_visual_response(
     m_code = re.search(r'\b(?:pairing\s+code\s+(?:is\s+)?|code:\s*)([0-9]{6})\b', response_text, re.IGNORECASE)
     if m_code:
         code_str = m_code.group(1).strip()
+        title_text = "MOBILE PAIRING" if ("mobile" in user_input.lower() or "mobile" in response_text.lower()) else "PAIRING CODE"
         return VisualResponse(
             response_id=resp_id,
             user_id=str(user_id),
             response_type=VisualResponseType.PAIRING_CODE,
-            title="PAIRING CODE",
+            title=title_text,
             primary_value=code_str,
             secondary_text="Enter this code on your phone.",
             raw_content={"code": code_str},
@@ -448,7 +516,7 @@ def detect_visual_response(
         )
 
     # 5. FILE PATH / DOCUMENT CREATION
-    file_path = result_dict.get("file_path") or result_dict.get("path") or result_dict.get("saved_path")
+    file_path = result_dict.get("filepath") or result_dict.get("file_path") or result_dict.get("path") or result_dict.get("saved_path")
     if not file_path:
         # Check if response references a created or exported file path
         m_path = re.search(r'\b([A-Za-z]:\\[^\s<>"\n\r]+|\b[\w\-./\\]+\.(?:docx|pdf|xlsx|pptx|txt|py|csv|json|md))\b', response_text)

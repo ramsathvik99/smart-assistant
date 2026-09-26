@@ -35,8 +35,8 @@ class AssistantCore:
 
         self._state = "idle"
         self._user_id: Optional[int] = None
-        self._username: str = "guest"
-        self._assistant_name: str = "Assistant"
+        self._username: str = "user"
+        self._assistant_name: str = "Trevon"
         self._start_time = time.time()
         self._audio_level: float = 0.0
         self._last_speech: str = ""
@@ -49,19 +49,26 @@ class AssistantCore:
         print("[CORE] Canonical Assistant Core initialized as Single Source of Truth.")
 
     # ── User Context & Strict Isolation ──────────────────────────────────────
-    def set_authenticated_user(self, user_id: int, username: str, assistant_name: str = None):
+    def set_authenticated_user(self, user_id: Optional[int], username: str, assistant_name: str = None):
         """Set active authenticated user context."""
         with self._state_lock:
             self._user_id = user_id
             self._username = username or "user"
             if assistant_name:
                 self._assistant_name = assistant_name
-            else:
+            elif user_id:
                 try:
                     from legacy.memory_manager import get_assistant_name_db
-                    self._assistant_name = get_assistant_name_db(user_id) or "Assistant"
+                    self._assistant_name = get_assistant_name_db(user_id) or "Trevon"
                 except Exception:
-                    self._assistant_name = "Assistant"
+                    self._assistant_name = "Trevon"
+            else:
+                self._assistant_name = "Trevon"
+            try:
+                from instance.config import settings
+                settings.CURRENT_USER_ID = self._user_id
+            except Exception:
+                pass
         print(f"[CORE] Authenticated user registered: {self._username} (ID: {self._user_id}) | Assistant: {self._assistant_name}")
         try:
             from core.proactive_observer import proactive_coordinator
@@ -85,7 +92,7 @@ class AssistantCore:
                         if uname:
                             self._user_id = uid
                             self._username = uname
-                            self._assistant_name = get_assistant_name_db(uid) or "Assistant"
+                            self._assistant_name = get_assistant_name_db(uid) or "Trevon"
                 except Exception:
                     pass
             return {
@@ -96,7 +103,7 @@ class AssistantCore:
             }
 
     def set_assistant_name(self, name: str):
-        """Update assistant name and persist to user preferences."""
+        """Update assistant name and persist to user preferences if authenticated."""
         if not name:
             return
         with self._state_lock:
@@ -199,10 +206,8 @@ class AssistantCore:
     def dismiss_visual_response(self, user_id: Optional[str] = None):
         """Dismiss visual response for the user (or all if user_id is None)."""
         with self._state_lock:
-            if user_id:
+            if user_id is not None:
                 self._active_visual_responses.pop(str(user_id), None)
-            elif self._user_id:
-                self._active_visual_responses.pop(str(self._user_id), None)
             else:
                 self._active_visual_responses.clear()
             listeners = list(self._visual_listeners)

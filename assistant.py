@@ -203,6 +203,7 @@ def start_assistant():
         # Change CWD to legacy directory early
         # This ensures legacy relative paths (config, db, assets) work correctly
         import os
+        legacy_dir = PROJECT_ROOT / "legacy"
         os.chdir(legacy_dir)
         
         # Import consolidated config early to establish shared state

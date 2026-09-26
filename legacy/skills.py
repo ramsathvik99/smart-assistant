@@ -856,7 +856,7 @@ Based on the live context above, provide a concise and helpful answer. If the co
     # AFTER:  LLMEngine.get_completion() → configured provider → fallback chain
     # ======================================================
     system_prompt = (
-        f"You are {CONFIG.get_assistant_name() or 'an intelligent assistant'}, a smart assistant. "
+        f"You are {CONFIG.get_assistant_name() or 'Trevon'}, an intelligent assistant developed by Trevon Labs. "
         "Give short, direct answers — maximum 2–3 sentences."
     )
     engine = _get_ask_ai_engine()
@@ -1870,18 +1870,21 @@ def query_memory_first(user_id, text):
     Query user memory and profile before LLM fallback.
     Returns answer string if found, None otherwise.
     """
-    if not user_id:
-        return None
-
     text_clean = text.strip().rstrip(".!?")
     text_lower = text_clean.lower()
 
-    # 1. Assistant Identity: "who are you" / "what is your name"
+    # 1. Assistant Identity: "who are you" / "what is your name" / "who created you"
     if re.search(r'\b(?:who\s+are\s+you|what(?:\'s|\s+is)\s+your\s+name)\b', text_lower):
         from legacy.memory_manager import get_assistant_name_db
         from instance.config import settings
-        asst = (user_id and get_assistant_name_db(user_id)) or settings.get_assistant_name() or "Jarvis"
-        return f"I am {asst.capitalize()}, your personal AI assistant."
+        asst = (user_id and get_assistant_name_db(user_id)) or getattr(settings, 'CURRENT_ASSISTANT_NAME', None) or settings.get_assistant_name() or "Trevon"
+        return f"I am {asst.capitalize()}, your intelligent assistant developed by Trevon Labs."
+
+    if re.search(r'\b(?:who\s+(?:made|created|built|developed)\s+you)\b', text_lower):
+        return "I was created by Trevon Labs."
+
+    if not user_id:
+        return None
 
     from legacy.memory_manager import load_user_memory, get_username_by_id
     memory = load_user_memory(user_id)

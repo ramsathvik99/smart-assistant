@@ -710,6 +710,9 @@ VAD_ONSET_MIN_POSITIVES = 4
 VAD_SILENCE_END_FRAMES  = 20
 VAD_MIN_SPEECH_FRAMES   = 6
 VAD_MAX_UTTERANCE_FRAMES = 300
+VAD_SPEECH_THRESHOLD    = 1200.0
+VAD_SILENCE_THRESHOLD   = 600.0
+
 
 
 def _continuous_audio_stream_loop():
@@ -812,39 +815,32 @@ def _continuous_audio_stream_loop():
                     except Exception:
                         is_user_speech = True
 
-                # ── TTS protection ────────────────────────────────────────────
-                if _is_tts_speaking():
-                    if vad_state == STATE_SPEAKING:
-                        print("[VAD] TTS active — discarding in-progress utterance")
-                        vad_state           = STATE_LISTENING
-                        onset_ring_bool     = []
-                        onset_ring_chunks   = []
-                        utterance_frames    = []
-                        speech_frame_count  = 0
-                        consecutive_silence = 0
-                    onset_ring_bool   = []
-                    onset_ring_chunks = []
-                    continue
-
+                tts_speaking = _is_tts_speaking()
                 frame_rms = _rms(chunk)
 
                 # Dynamically calculate adaptive thresholds from current noise floor
                 speech_thresh  = max(noise_floor * 2.2, noise_floor + 900.0, 1200.0)
                 silence_thresh = max(noise_floor * 1.35, noise_floor + 300.0, 600.0)
 
+                # During TTS playback, assistant speaker adds acoustic energy to the room;
+                # require elevated energy margin and EchoGuard confirmation to distinguish
+                # genuine user speech from assistant echo.
+                if tts_speaking:
+                    barge_in_thresh = max(speech_thresh, noise_floor * 2.6, 1350.0)
+                    is_speech = (frame_rms >= barge_in_thresh) and is_user_speech
+                else:
+                    is_speech = (frame_rms >= speech_thresh) and is_user_speech
+
                 # ═════════════════════════════════════════════════════════════
                 # STATE: LISTENING
                 # ═════════════════════════════════════════════════════════════
                 if vad_state == STATE_LISTENING:
-                    # Adaptive noise floor tracking during silence
-                    if frame_rms < silence_thresh:
+                    # Adaptive noise floor tracking only during silence when TTS is idle
+                    if not tts_speaking and frame_rms < silence_thresh:
                         if frame_rms < noise_floor:
                             noise_floor = 0.95 * noise_floor + 0.05 * frame_rms
                         else:
                             noise_floor = 0.98 * noise_floor + 0.02 * frame_rms
-
-                    # Speech detection: energy must exceed threshold AND EchoGuard confirms not echo
-                    is_speech = (frame_rms >= speech_thresh) and is_user_speech
 
                     onset_ring_bool.append(is_speech)
                     onset_ring_chunks.append(chunk)
@@ -856,6 +852,19 @@ def _continuous_audio_stream_loop():
 
                     # Onset confirmed via VAD count OR immediate Push-To-Talk activation
                     if _ptt_held or positives >= ONSET_MIN:
+                        # BARGE-IN INTERRUPTION: If TTS was speaking, stop it immediately!
+                        if _is_tts_speaking():
+                            try:
+                                from extensions.system.tts_coordinator import interrupt_speech
+                                interrupt_speech()
+                            except Exception:
+                                try:
+                                    from legacy.tts import stop_speaking
+                                    stop_speaking(interrupted=True)
+                                except Exception:
+                                    pass
+                            print("[BARGE-IN] Genuine user speech detected during assistant playback — stopping TTS immediately!")
+
                         utterance_frames    = list(onset_ring_chunks) if onset_ring_chunks else [chunk]
                         vad_state           = STATE_SPEAKING
                         _ptt_active_in_utterance = _ptt_held
@@ -863,6 +872,7 @@ def _continuous_audio_stream_loop():
                         speech_frame_count  = max(positives, 1)
                         print(f"[VAD] LISTENING -> SPEAKING  "
                               f"{'(PTT active) ' if _ptt_held else ''}"
+                              f"{'(BARGE-IN) ' if tts_speaking else ''}"
                               f"onset={positives}/{ONSET_WIN} frames "
                               f"rms={frame_rms:.0f} (floor={noise_floor:.0f}, thresh={speech_thresh:.0f})")
                         onset_ring_bool   = []
@@ -872,6 +882,14 @@ def _continuous_audio_stream_loop():
                 # STATE: SPEAKING
                 # ═════════════════════════════════════════════════════════════
                 elif vad_state == STATE_SPEAKING:
+                    # Safeguard: ensure TTS is silenced immediately during active speech
+                    if _is_tts_speaking():
+                        try:
+                            from extensions.system.tts_coordinator import interrupt_speech
+                            interrupt_speech()
+                        except Exception:
+                            pass
+
                     utterance_frames.append(chunk)
 
                     # Hysteresis: frame is voiced if above silence threshold
@@ -974,11 +992,17 @@ def _vad_finish_utterance(
 def _process_utterance(audio_data: np.ndarray):
     """Process a complete utterance through STT and intent pipeline."""
     try:
-        # TTS coordination: don't process if TTS is speaking
-        # This prevents self-listening at STT processing time
+        # If TTS is still in flight when utterance finishes, halt it immediately
         if _is_tts_speaking():
-            print("[CONTINUOUS AUDIO] Skipping utterance - TTS is speaking")
-            return
+            try:
+                from extensions.system.tts_coordinator import interrupt_speech
+                interrupt_speech()
+            except Exception:
+                try:
+                    from legacy.tts import stop_speaking
+                    stop_speaking(interrupted=True)
+                except Exception:
+                    pass
         
         # Convert to sr.AudioData format
         audio_bytes = audio_data.tobytes()

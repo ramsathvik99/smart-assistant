@@ -249,11 +249,68 @@ def get_weather(query: str) -> Optional[str]:
         logger.error(f"Error getting weather: {e}")
         return f"Could not retrieve weather information: {str(e)}"
 
+def generate_random_numbers(query: str) -> str:
+    """
+    Generate random numbers locally based on natural language command.
+    Handles counts and ranges such as:
+    - 'tell me some random numbers from 1 to 10'
+    - 'give me 5 random numbers from 1 to 100'
+    - 'generate 10 random numbers'
+    - 'tell me 5 random numbers between 1 and 500'
+    """
+    try:
+        import random
+        text = query.lower().strip()
+
+        # Extract range: "from X to Y" or "between X and Y"
+        min_val = 1
+        max_val = 100
+        m_range = re.search(r'\b(?:from|between)\s+(\d+)\s+(?:to|and)\s+(\d+)\b', text)
+        if m_range:
+            min_val = int(m_range.group(1))
+            max_val = int(m_range.group(2))
+            if min_val > max_val:
+                min_val, max_val = max_val, min_val
+        elif "1 to 10" in text or "1 and 10" in text:
+            min_val, max_val = 1, 10
+        elif "1 to 100" in text or "1 and 100" in text:
+            min_val, max_val = 1, 100
+        elif "1 to 500" in text or "1 and 500" in text:
+            min_val, max_val = 1, 500
+
+        # Extract count
+        count = 5
+        m_count = re.search(r'\b(?:give\s+me|generate|tell\s+me|pick|show\s+me)?\s*(\d+)\s+random\s+numbers?\b', text)
+        if m_count:
+            count = int(m_count.group(1))
+        elif any(k in text for k in ["a random number", "one random number", "single random number"]):
+            count = 1
+        elif "some random numbers" in text:
+            count = 5
+
+        count = max(1, min(100, count))
+
+        # Generate numbers
+        range_size = max_val - min_val + 1
+        if count <= range_size:
+            numbers = random.sample(range(min_val, max_val + 1), count)
+        else:
+            numbers = [random.randint(min_val, max_val) for _ in range(count)]
+
+        nums_str = ", ".join(str(n) for n in numbers)
+        if count == 1:
+            return f"Your random number between {min_val} and {max_val} is {numbers[0]}."
+        return f"Here are {count} random numbers between {min_val} and {max_val}: {nums_str}."
+    except Exception as e:
+        logger.error(f"Error generating random numbers: {e}")
+        return "I was unable to generate random numbers."
+
 # Export functions
 __all__ = [
     'tell_time',
     'tell_date',
     'solve_math',
+    'generate_random_numbers',
     'translate_text',
     'shutdown_system',
     'restart_system',

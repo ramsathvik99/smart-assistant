@@ -136,7 +136,7 @@ class WindowBackground(QWidget):
         self._accent_rgb = (0, 212, 255)
         self._active = False
         self._is_dashboard_active = True
-        self._assistant_name = "JARVIS"
+        self._assistant_name = "Trevon"
 
         # Parallax camera tracking
         self._cam_yaw = 0.0
@@ -230,7 +230,7 @@ class WindowBackground(QWidget):
         self._poll_timer.timeout.connect(self._poll_real_state)
 
     def set_assistant_name(self, name: str):
-        self._assistant_name = (name or "JARVIS").strip()
+        self._assistant_name = (name or "Trevon").strip()
         self.update()
 
     def mouseMoveEvent(self, event):
@@ -550,7 +550,7 @@ class WindowBackground(QWidget):
         p.drawEllipse(QPointF(cx, cy), sphere_r, sphere_r)
 
         # ── 6. 3D EXTRUDED ROTATING ASSISTANT NAME (DYNAMIC) ──────────────
-        name_str = (self._assistant_name or "JARVIS").upper()
+        name_str = (self._assistant_name or "Trevon").upper()
         font_size = max(22, int(44 * scale_fac))
         font = QFont("Montserrat", font_size, QFont.Weight.Black)
         if not font.exactMatch():
@@ -755,7 +755,7 @@ class TitleBar(QFrame):
         lay.addWidget(orb)
 
         # Assistant name (dynamic lowercase)
-        self._name_label = QLabel("jarvis")
+        self._name_label = QLabel("trevon")
         self._name_label.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         self._name_label.setStyleSheet(
             "color: #ffffff; background: transparent; border: none; letter-spacing: 0.5px;")
@@ -820,7 +820,7 @@ class TitleBar(QFrame):
             self.maximize_clicked.emit()
 
     def set_assistant_name(self, name: str):
-        self._name_label.setText((name or "jarvis").lower())
+        self._name_label.setText((name or "trevon").lower())
 
     def set_state(self, state: str):
         labels = {
@@ -1025,7 +1025,7 @@ class DashboardPage(QWidget):
         self.setStyleSheet("background: transparent;")
         self._accent_color = "#00d4ff"
         self._accent_rgb = (0, 212, 255)
-        self._assistant_name = "Jarvis"
+        self._assistant_name = "Trevon"
 
         main_lay = QVBoxLayout(self)
         main_lay.setContentsMargins(0, 0, 0, 0)
@@ -1084,7 +1084,7 @@ class DashboardPage(QWidget):
         self._user_name_lbl.setMaximumWidth(220)
         g_lay.addWidget(self._user_name_lbl)
 
-        self._hero_sub_lbl = QLabel("Jarvis is listening and ready to assist you.")
+        self._hero_sub_lbl = QLabel("Trevon is listening and ready to assist you.")
         self._hero_sub_lbl.setFont(QFont("Segoe UI", 9))
         self._hero_sub_lbl.setStyleSheet("color: #94a3b8; background: transparent;")
         self._hero_sub_lbl.setWordWrap(True)
@@ -1208,7 +1208,7 @@ class DashboardPage(QWidget):
         qc_top.addWidget(self._quote_card_lbl, 1)
         qc_lay.addLayout(qc_top)
 
-        self._quote_author_lbl = QLabel("— Jarvis")
+        self._quote_author_lbl = QLabel("— Trevon")
         self._quote_author_lbl.setFont(QFont("Segoe UI", 8))
         self._quote_author_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._quote_author_lbl.setStyleSheet("color: #64748b; background: transparent;")
@@ -1219,11 +1219,11 @@ class DashboardPage(QWidget):
 
         # Hidden test compatibility elements
         self._state_label = self._state_pill
-        self._aname_lbl = QLabel("JARVIS", self._status_card)
+        self._aname_lbl = QLabel("TREVON", self._status_card)
         self._aname_lbl.setVisible(False)
-        self._op_badge = QLabel("Operator: user", self._status_card)
+        self._op_badge = QLabel("User: user", self._status_card)
         self._op_badge.setVisible(False)
-        self._call_badge = QLabel("• JARVIS active", self._status_card)
+        self._call_badge = QLabel("• TREVON active", self._status_card)
         self._call_badge.setVisible(False)
 
         lay.addWidget(self._status_card)
@@ -1459,7 +1459,7 @@ class DashboardPage(QWidget):
             ("💬 Open Chat\nStart a conversation", "chat",
              "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(10, 45, 90, 0.65), stop:1 rgba(15, 75, 140, 0.65))",
              "rgba(0, 212, 255, 0.35)"),
-            ("▶ New Task\nGive Jarvis a task",     "tasks",
+            ("▶ New Task\nGive Trevon a task",     "tasks",
              "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(45, 20, 75, 0.65), stop:1 rgba(95, 45, 140, 0.65))",
              "rgba(168, 85, 247, 0.35)"),
             ("🎤 Voice Mode\nStart listening",      "chat",
@@ -1535,7 +1535,7 @@ class DashboardPage(QWidget):
         f_lay = QHBoxLayout(self._footer_strip)
         f_lay.setContentsMargins(4, 2, 4, 0)
 
-        self._footer_left_lbl = QLabel("● Jarvis | Your Personal AI Assistant")
+        self._footer_left_lbl = QLabel("● Trevon | Your Personal AI Assistant")
         self._footer_left_lbl.setFont(QFont("Segoe UI", 8))
         self._footer_left_lbl.setStyleSheet("color: #475569; background: transparent;")
         f_lay.addWidget(self._footer_left_lbl)
@@ -1557,7 +1557,7 @@ class DashboardPage(QWidget):
         self._refresh_timer.timeout.connect(self.refresh_all)
 
     def set_assistant_name(self, name: str):
-        aname = name or "Jarvis"
+        aname = name or "Trevon"
         self._assistant_name = aname
         self._hero_sub_lbl.setText(f"{aname} is listening and ready to assist you.")
         self._quote_author_lbl.setText(f"— {aname}")
@@ -1572,7 +1572,7 @@ class DashboardPage(QWidget):
         if hasattr(self, '_user_name_lbl') and self._user_name_lbl:
             self._user_name_lbl.setText(uname.capitalize())
         if hasattr(self, '_op_badge') and self._op_badge:
-            self._op_badge.setText(f"Operator: {uname}")
+            self._op_badge.setText(f"User: {uname}")
 
     def start_auto_refresh(self):
         if not self._refresh_timer.isActive():
@@ -1753,11 +1753,11 @@ class DashboardPage(QWidget):
         try:
             from core.assistant_core import assistant_core
             ctx = assistant_core.get_user_context()
-            uname = ctx.get("username") or "Ram"
-            aname = ctx.get("assistant_name") or "Jarvis"
+            uname = ctx.get("username") or "User"
+            aname = ctx.get("assistant_name") or "Trevon"
             self.set_assistant_name(aname)
             self._user_name_lbl.setText(uname.capitalize())
-            self._op_badge.setText(f"Operator: {uname}")
+            self._op_badge.setText(f"User: {uname}")
             self._call_badge.setText(f"• {aname} active")
         except Exception:
             pass
@@ -1838,7 +1838,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Smart Assistant")
+        self.setWindowTitle("Trevon Labs")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAcceptDrops(True)
@@ -1930,12 +1930,12 @@ class MainWindow(QMainWindow):
         try:
             from core.assistant_core import assistant_core
             ctx = assistant_core.get_user_context()
-            init_asst = ctx.get("assistant_name") or "Jarvis"
-            init_user = ctx.get("username") or "Ram"
+            init_asst = ctx.get("assistant_name") or "Trevon"
+            init_user = ctx.get("username") or "User"
             self.set_assistant_name(init_asst)
             self.set_user_name(init_user)
         except Exception:
-            self.set_assistant_name("Jarvis")
+            self.set_assistant_name("Trevon")
 
         # Fade in
         self.setWindowOpacity(0.0)

@@ -293,7 +293,7 @@ def resolve_email_attachment_and_recipient(command: str, user_id: Optional[Any] 
         if not body:
             body = f"Hello,\n\nPlease find attached {att_base}.\n\nBest regards."
     else:
-        subject = "Message from Smart Assistant"
+        subject = "Message from Trevon Labs"
         if not body:
             body = "Hello,\n\nPlease find the requested information.\n\nBest regards."
 
@@ -337,7 +337,7 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
                 attachments = [res["attachment"]] if res.get("attachment") else None
                 send_res = send_email_direct(
                     recipient=res["recipient"],
-                    subject=res.get("subject") or "Message from Smart Assistant",
+                    subject=res.get("subject") or "Message from Trevon Labs",
                     body=res.get("body") or "Please find the attached document.",
                     attachments=attachments,
                     user=current_u

@@ -182,7 +182,7 @@ def create_excel_spreadsheet(
                     logger.warning(f"[EXCEL] Could not generate chart: {c_err}")
 
         # Determine target file path
-        first_title = sheet_configs[0]["title"]
+        first_title = sheet_configs[0].get("title") or sheet_configs[0].get("name") or "Sheet1"
         if not filename:
             safe_title = "".join(c for c in first_title if c.isalnum() or c in (' ', '_', '-')).rstrip()
             filename = f"{safe_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"

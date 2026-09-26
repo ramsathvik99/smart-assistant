@@ -167,6 +167,17 @@ class MultiIntentAnalyzer:
     def _detect_connectors(self, user_input: str) -> bool:
         """Detect if input contains multi-intent connectors"""
         input_lower = user_input.lower()
+        
+        # Guard: Document generation specs (e.g. "Excel file with name and marks and add formulas")
+        if re.search(r'\b(?:create|make|generate|write|build)\s+.*(?:excel|spreadsheet|document|presentation|powerpoint|pdf|docx|pptx|xlsx)\b', input_lower):
+            if not any(k in input_lower for k in ["then", "and email", "and send", "and open", "and play", "and set", "and reminder"]):
+                return False
+
+        # Guard: Contextual reminder clauses (e.g. "tomorrow I have to go to movie at 3pm, remind me at 2pm")
+        if re.search(r'\b(?:so\s+)?(?:can\s+you\s+|could\s+you\s+|please\s+)?remind\s+me\b', input_lower) and any(k in input_lower for k in ["have to", "need to", "going to", "want to", "at ", "tomorrow", "today"]):
+            if not any(k in input_lower for k in ["then", "and open", "and play", "and create", "and launch"]):
+                return False
+
         for pattern, _ in self.INTENT_CONNECTORS:
             if re.search(pattern, input_lower):
                 return True

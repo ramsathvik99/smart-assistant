@@ -536,6 +536,7 @@ class DialogueStateManager:
         if is_browser and re.match(r'^(?:search\s+(?:for\s+)?|find\s+videos?\s+(?:about|on|for)\s+)(.+)', stripped, re.IGNORECASE):
             m_s = re.match(r'^(?:search\s+(?:for\s+)?|find\s+videos?\s+(?:about|on|for)\s+)(.+)', stripped, re.IGNORECASE)
             search_query = m_s.group(1).strip().rstrip('.?!')
+            search_query = re.sub(r'^(?:(?:the\s+)?(?:web|internet)\s+(?:for\s+)?|for\s+)', '', search_query, flags=re.IGNORECASE).strip()
             if active_site == "youtube" or "youtube" in active_app.lower():
                 resolved = f"search youtube for {search_query}"
             else:
@@ -564,6 +565,72 @@ class DialogueStateManager:
             resolved = f"open {new_app}"
             print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (user correction to open app: '{new_app}')")
             return resolved, True
+
+        # ── 4d. Explicit Cancellation / Abort During Interruption ──
+        if lower in (
+            "don't send it", "don't send", "actually, don't send it",
+            "actually don't send it", "no, don't send it", "cancel that",
+            "stop", "never mind", "forget it", "cancel it", "cancel",
+            "stop it", "abort", "don't do that"
+        ):
+            resolved = "cancel current goal"
+            print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (explicit cancellation)")
+            return resolved, True
+
+        # ── 4e. Conversational Pause / Short Utterance Hold ("Wait", "Wait...", "Hold on") ──
+        if lower in (
+            "wait", "wait...", "wait!", "hold on", "hang on",
+            "wait a second", "wait a sec", "wait a minute", "pause", "actually..."
+        ):
+            resolved = "pause current goal"
+            print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (conversational pause)")
+            return resolved, True
+
+        # ── 4f. Conversational Interruption Follow-up ("Wait, explain that more simply") ──
+        m_simpler = re.search(r'^(?:wait[,\s]+)?(?:explain|tell\s+me)\s+(?:that|it)?\s*(?:more\s+simply|simply|in\s+simple\s+terms)[.!?]?$', lower)
+        if m_simpler:
+            resolved = "explain that more simply"
+            print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (conversational simplification)")
+            return resolved, True
+
+        # ── 4g. Interruption Entity / Parameter Correction ──
+        # Handles: "No, I meant Guntur", "No, Guntur", "Actually, Guntur instead", "Guntur instead", "Change it to Hyderabad"
+        m_corr = (
+            re.search(r'^(?:no[,\s]+(?:i\s+meant\s+)?|actually[,\s]+|i\s+meant\s+|change\s+it\s+to\s+|use\s+)(.+?)(?:\s+instead)?[.!?]?$', stripped, re.IGNORECASE)
+            or re.search(r'^no[,\s]+([a-zA-Z0-9_\-\s]+)[.!?]?$', stripped, re.IGNORECASE)
+            or re.search(r'^([a-zA-Z0-9_\-\s]+)\s+instead[.!?]?$', stripped, re.IGNORECASE)
+        )
+        if m_corr:
+            candidate = m_corr.group(1).strip().rstrip('.?!')
+            if candidate.lower().startswith("i meant "):
+                candidate = candidate[8:].strip()
+            if candidate.lower().startswith("it to "):
+                candidate = candidate[6:].strip()
+
+            last_intent = self.current_state.recent_intents[-1] if self.current_state.recent_intents else ""
+            last_turn_input = self.current_state.turns[-1].user_input.lower() if self.current_state.turns else ""
+            has_weather = last_intent == "WEATHER_QUERY" or "weather" in last_turn_input or "location" in self.current_state.entities
+
+            # Case A: Weather location correction ("No, Guntur", "No, I meant Guntur", "Hyderabad instead")
+            if has_weather and not any(fmt in candidate.lower() for fmt in ("pdf", "docx", "desktop", "downloads", "chrome", "firefox")):
+                resolved = f"what is the weather in {candidate}"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (weather location correction to '{candidate}')")
+                return resolved, True
+
+            # Case B: Document format parameter ("make it pdf", "use pdf instead", "save as pdf")
+            if any(fmt in candidate.lower() for fmt in ("pdf", "docx", "doc", "txt", "markdown", "presentation")):
+                target_fmt = "pdf" if "pdf" in candidate.lower() else ("docx" if "docx" in candidate.lower() else candidate)
+                resolved = f"make it {target_fmt}"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (document format correction to '{target_fmt}')")
+                return resolved, True
+
+            # Case C: Destination location ("on the desktop", "desktop", "downloads")
+            if any(loc in candidate.lower() for loc in ("desktop", "downloads", "documents", "folder")):
+                clean_loc = "Desktop" if "desktop" in candidate.lower() else ("Downloads" if "downloads" in candidate.lower() else candidate)
+                resolved = f"save to {clean_loc}"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (destination correction to '{clean_loc}')")
+                return resolved, True
+
 
         # ── 5. Disambiguation & Alternative Selection ("The second one", "Show me the other one", "The first one", "The fifth one") ──
         m_ordinal = re.search(r'\b(?:the\s+)?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|other|1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th)\s+(?:one|file|presentation|document|option)\b|^the\s+(first|second|third|fourth|fifth|other|1st|2nd|3rd|4th|5th)\s+one[?.!]?$', lower)
@@ -714,6 +781,19 @@ class DialogueStateManager:
                 "timestamp": iso_now,
             }
             print(f"[REFERENCE_TRACKING] Stored file entity: '{fname}' (FILE)")
+            return
+
+        # Check if execution result produced a generated artifact / file
+        fpath = execution_result.get("filepath") or execution_result.get("file_path")
+        if fpath and (primary_intent in ("DOCUMENT_GENERATION", "FILE_OPERATIONS") or os.path.exists(fpath)):
+            self._last_mentioned_entity = {
+                "value": fpath,
+                "intent": primary_intent or "DOCUMENT_GENERATION",
+                "entity_type": "FILE",
+                "turn": current_t,
+                "timestamp": iso_now,
+            }
+            print(f"[REFERENCE_TRACKING] Stored artifact entity: '{fpath}' (FILE) from {primary_intent}")
             return
 
         # Update by intent type
@@ -999,9 +1079,9 @@ class DialogueStateManager:
         if observations:
             self.current_state.environmental_observations.update(observations)
             if observations.get("active_window"):
-                self.current_state.active_window = observations["active_window"]
+                self.current_state.environmental_observations["active_window"] = observations["active_window"]
             if observations.get("active_application"):
-                self.current_state.active_application = observations["active_application"]
+                self.current_state.environmental_observations["active_application"] = observations["active_application"]
             if observations.get("caps_lock") is not None:
                 self.current_state.environmental_observations["caps_lock"] = observations["caps_lock"]
 
@@ -1027,8 +1107,8 @@ class DialogueStateManager:
             self.current_state.last_search_results_turn = self.current_state.current_turn
             self.current_state.last_search_results_intent = primary_intent or "FILE_OPERATIONS"
 
-        # Track active applications and sites
-        if primary_intent == "OPEN_APPLICATION" or "open" in str(execution_result.get("response", "")).lower():
+        # Track active applications and sites ONLY when OPEN_APPLICATION occurred successfully
+        if primary_intent == "OPEN_APPLICATION" and execution_result.get("status") in ("success", True, None):
             target = execution_result.get("target") or execution_result.get("app_name") or execution_result.get("display_name")
             if not target and self.current_state.turns:
                 m_app = re.search(r'\b(?:open|launch|start|go\s+to|visit)\s+([a-zA-Z0-9_\-\s.]+)', self.current_state.turns[-1].user_input, re.IGNORECASE)
@@ -1107,15 +1187,16 @@ class DialogueStateManager:
             from core.visual_response import detect_visual_response
             raw_user_in = self.current_state.turns[-1].user_input if self.current_state.turns else ""
             active_gid = (self.current_state.current_goal.get("id") or self.current_state.current_goal.get("goal_id")) if self.current_state.current_goal else None
-            vr = detect_visual_response(execution_result, raw_user_in, self.user_id, goal_id=active_gid)
-            if vr:
-                self.store_visual_response(vr)
-                execution_result["visual_response"] = vr.to_dict()
-                try:
-                    from core.assistant_core import assistant_core
-                    assistant_core.show_visual_response(vr)
-                except Exception:
-                    pass
+            if not execution_result.get("visual_response"):
+                vr = detect_visual_response(execution_result, raw_user_in, self.user_id, goal_id=active_gid)
+                if vr:
+                    self.store_visual_response(vr)
+                    execution_result["visual_response"] = vr.to_dict()
+                    try:
+                        from core.assistant_core import assistant_core
+                        assistant_core.show_visual_response(vr)
+                    except Exception:
+                        pass
         except Exception as vr_err:
             print(f"[VISUAL_RESPONSE] Auto-detection notice: {vr_err}")
 
@@ -1123,7 +1204,8 @@ class DialogueStateManager:
         try:
             from extensions.context_manager import get_manager
             ctx_mgr = get_manager()
-            if self.current_state.active_application:
+            # Only update active app/browser context if the command actually opened/interacted with an application
+            if primary_intent in ("OPEN_APPLICATION", "WINDOW_CONTEXT") and self.current_state.active_application:
                 ctx_type = "browser" if self.current_state.active_application in ("chrome", "edge", "firefox", "browser") else "app"
                 ctx_mgr.set_active_context(ctx_type, self.current_state.active_application)
             if self.current_state.active_task:

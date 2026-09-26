@@ -124,10 +124,10 @@ class EchoGuard:
     def __init__(self) -> None:
         self._hist: list[tuple[float, np.ndarray, float]] = []   # (t, bands, level)
         self._gain = 0.6          # mic level per unit of output level; learned
-        self._seen = 0            # how many echo blocks the estimate has seen
+        self._seen = 8            # seeded with baseline trust
         self._last_sim = 0.0
         self._last_expected = 0.0
-        self._residuals: list[float] = []   # recent ECHO residuals only
+        self._residuals: list[float] = [0.10] * _WARMUP   # pre-warm so initial blocks aren't blind
         self._floor = 0.10        # typical echo residual here; learned
         self._run = 0             # consecutive blocks called speech
         self._head = 0.13         # near-worst echo residual here; learned

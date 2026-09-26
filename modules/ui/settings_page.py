@@ -228,7 +228,13 @@ class SettingsPage(QWidget):
 
         # Live Dynamic Initial Preview
         preview_box = QHBoxLayout()
-        self.badge_preview = QLabel("J")
+        try:
+            from instance.config import settings as CONFIG
+            initial_name = getattr(CONFIG, 'CURRENT_ASSISTANT_NAME', None) or "Trevon"
+        except Exception:
+            initial_name = "Trevon"
+        initial_letter = initial_name[0].upper() if initial_name else "T"
+        self.badge_preview = QLabel(initial_letter)
         self.badge_preview.setFixedSize(54, 54)
         self.badge_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.badge_preview.setFont(QFont(F.PRIMARY, 24, QFont.Weight.Bold))
@@ -266,7 +272,7 @@ class SettingsPage(QWidget):
         name_box.addWidget(lbl)
 
         self.name_input = QLineEdit()
-        self.name_input.setText("Jarvis")
+        self.name_input.setText(initial_name)
         self.name_input.setFont(QFont(F.PRIMARY, 12))
         self.name_input.setStyleSheet(f"""
             QLineEdit {{
@@ -321,8 +327,14 @@ class SettingsPage(QWidget):
             QPushButton:hover {{
                 background: rgba(0, 212, 255, 0.35);
             }}
+            QPushButton:disabled {{
+                background: rgba(255, 255, 255, 0.05);
+                color: {C.TEXT_MUTED};
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }}
         """)
         save_btn.clicked.connect(self._save_identity)
+        self._save_identity_btn = save_btn
         c_lay.addWidget(save_btn)
 
         lay.addWidget(card)
@@ -465,7 +477,7 @@ class SettingsPage(QWidget):
         self._dash_prev_orb.setStyleSheet(f"color: {self._dashboard_color}; border: 1.5px solid {self._dashboard_color}; border-radius: 10px; font-size: 9px;")
         dp_title_row.addWidget(self._dash_prev_orb)
 
-        dp_title_lbl = QLabel("Smart Assistant Dashboard")
+        dp_title_lbl = QLabel("Trevon Labs Dashboard")
         dp_title_lbl.setFont(QFont(F.PRIMARY, 9, QFont.Weight.Bold))
         dp_title_lbl.setStyleSheet(f"color: {C.TEXT};")
         dp_title_row.addWidget(dp_title_lbl)
@@ -507,6 +519,7 @@ class SettingsPage(QWidget):
 
         presets_row = QHBoxLayout()
         presets_row.setSpacing(6)
+        self._dash_preset_btns = []
         for name, hex_code in COLOR_PRESETS:
             p_btn = QPushButton(name)
             p_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -525,9 +538,15 @@ class SettingsPage(QWidget):
                     background: {rgba_str(hex_code, 0.2)};
                     border: 1px solid {hex_code};
                 }}
+                QPushButton:disabled {{
+                    background: rgba(255, 255, 255, 0.03);
+                    color: {C.TEXT_MUTED};
+                    border: 1px solid rgba(255, 255, 255, 0.08);
+                }}
             """)
             p_btn.clicked.connect(lambda _, h=hex_code: self.set_dashboard_color(h))
             presets_row.addWidget(p_btn)
+            self._dash_preset_btns.append(p_btn)
         presets_row.addStretch()
         dc_lay.addLayout(presets_row)
 
@@ -571,8 +590,14 @@ class SettingsPage(QWidget):
             QPushButton:hover {{
                 background: rgba(255, 255, 255, 0.16);
             }}
+            QPushButton:disabled {{
+                background: rgba(255, 255, 255, 0.03);
+                color: {C.TEXT_MUTED};
+                border: 1px solid rgba(255, 255, 255, 0.08);
+            }}
         """)
         dash_picker_btn.clicked.connect(self._open_dash_color_picker)
+        self._dash_picker_btn = dash_picker_btn
         custom_row.addWidget(dash_picker_btn)
 
         dash_reset_btn = QPushButton("↺ Reset Dashboard Color")
@@ -591,8 +616,14 @@ class SettingsPage(QWidget):
                 background: rgba(255, 255, 255, 0.08);
                 color: {C.TEXT};
             }}
+            QPushButton:disabled {{
+                background: transparent;
+                color: {C.TEXT_MUTED};
+                border: 1px solid rgba(255, 255, 255, 0.05);
+            }}
         """)
         dash_reset_btn.clicked.connect(self.reset_dashboard_color)
+        self._dash_reset_btn = dash_reset_btn
         custom_row.addWidget(dash_reset_btn)
 
         custom_row.addStretch()
@@ -712,6 +743,7 @@ class SettingsPage(QWidget):
 
         fc_presets_row = QHBoxLayout()
         fc_presets_row.setSpacing(6)
+        self._float_preset_btns = []
         for name, hex_code in COLOR_PRESETS:
             p_btn = QPushButton(name)
             p_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -730,9 +762,15 @@ class SettingsPage(QWidget):
                     background: {rgba_str(hex_code, 0.2)};
                     border: 1px solid {hex_code};
                 }}
+                QPushButton:disabled {{
+                    background: rgba(255, 255, 255, 0.03);
+                    color: {C.TEXT_MUTED};
+                    border: 1px solid rgba(255, 255, 255, 0.08);
+                }}
             """)
             p_btn.clicked.connect(lambda _, h=hex_code: self.set_floating_color(h))
             fc_presets_row.addWidget(p_btn)
+            self._float_preset_btns.append(p_btn)
         fc_presets_row.addStretch()
         fc_lay.addLayout(fc_presets_row)
 
@@ -776,8 +814,14 @@ class SettingsPage(QWidget):
             QPushButton:hover {{
                 background: rgba(255, 255, 255, 0.16);
             }}
+            QPushButton:disabled {{
+                background: rgba(255, 255, 255, 0.03);
+                color: {C.TEXT_MUTED};
+                border: 1px solid rgba(255, 255, 255, 0.08);
+            }}
         """)
         float_picker_btn.clicked.connect(self._open_float_color_picker)
+        self._float_picker_btn = float_picker_btn
         fc_custom_row.addWidget(float_picker_btn)
 
         float_reset_btn = QPushButton("↺ Reset Floating Button Color")
@@ -796,8 +840,14 @@ class SettingsPage(QWidget):
                 background: rgba(255, 255, 255, 0.08);
                 color: {C.TEXT};
             }}
+            QPushButton:disabled {{
+                background: transparent;
+                color: {C.TEXT_MUTED};
+                border: 1px solid rgba(255, 255, 255, 0.05);
+            }}
         """)
         float_reset_btn.clicked.connect(self.reset_floating_color)
+        self._float_reset_btn = float_reset_btn
         fc_custom_row.addWidget(float_reset_btn)
 
         fc_custom_row.addStretch()
@@ -842,6 +892,7 @@ class SettingsPage(QWidget):
             }}
         """)
         reset_all_btn.clicked.connect(self.reset_all_appearance)
+        self._reset_all_btn = reset_all_btn
         gc_lay.addWidget(reset_all_btn)
 
         lay.addWidget(global_card)
@@ -1090,7 +1141,7 @@ class SettingsPage(QWidget):
         self._settings_asst_name_input = QLineEdit()
         self._settings_asst_name_input.setFixedHeight(34)
         self._settings_asst_name_input.setFont(QFont(F.PRIMARY, 10))
-        self._settings_asst_name_input.setPlaceholderText("Enter assistant name (e.g. Jarvis, Friday, Nova)")
+        self._settings_asst_name_input.setPlaceholderText("Enter assistant name (e.g. Trevon, Athena, Orion)")
         self._settings_asst_name_input.setStyleSheet(f"""
             QLineEdit {{
                 background: rgba(255,255,255,0.05);
@@ -1103,9 +1154,9 @@ class SettingsPage(QWidget):
         """)
         try:
             from instance.config import settings as CONFIG
-            aname = getattr(CONFIG, 'CURRENT_ASSISTANT_NAME', None) or "Jarvis"
+            aname = getattr(CONFIG, 'CURRENT_ASSISTANT_NAME', None) or "Trevon"
         except Exception:
-            aname = "Jarvis"
+            aname = "Trevon"
         self._settings_asst_name_input.setText(aname)
         self._settings_asst_name_input.textChanged.connect(self._on_asst_name_typed)
         self._settings_asst_name_input.returnPressed.connect(self._settings_save_voice)
@@ -1246,6 +1297,7 @@ class SettingsPage(QWidget):
             QPushButton:hover {{ background: rgba(0,212,255,0.35); }}
         """)
         save_voice_btn.clicked.connect(self._settings_save_voice)
+        self._settings_voice_save_btn = save_voice_btn
         voice_btn_row.addWidget(save_voice_btn)
         voice_btn_row.addStretch()
         id_lay.addLayout(voice_btn_row)

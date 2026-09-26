@@ -808,3 +808,143 @@ def extract_text_content(file_path: str, max_chars: int = 10000) -> Dict[str, An
         }
     except Exception as e:
         return {"success": False, "message": f"Failed to read file: {e}"}
+
+
+def profile_file_content(file_path: str) -> Dict[str, Any]:
+    """
+    Perform deep structural and semantic profiling across various file formats:
+    - Tables/Data (CSV, XLSX, XLS, JSON): columns, row count, stats
+    - Documents (PDF, DOCX, TXT, MD): page count, word count, headers
+    - Presentations (PPTX): slide count, titles
+    - Code (PY, JS, TS, etc.): lines, classes, functions, imports
+    - Archives (ZIP, TAR): entry count, compressed/uncompressed sizes
+    """
+    try:
+        if not os.path.exists(file_path):
+            return {"success": False, "status": "error", "message": f"File '{file_path}' does not exist."}
+
+        size_bytes = os.path.getsize(file_path)
+        ext = os.path.splitext(file_path)[1].lower()
+        filename = os.path.basename(file_path)
+
+        profile: Dict[str, Any] = {
+            "success": True,
+            "status": "success",
+            "filename": filename,
+            "filepath": file_path,
+            "extension": ext,
+            "size_bytes": size_bytes,
+            "size_readable": f"{size_bytes / (1024 * 1024):.2f} MB" if size_bytes >= 1024*1024 else f"{size_bytes / 1024:.1f} KB"
+        }
+
+        # 1. Data / Tabular (CSV / TSV)
+        if ext in (".csv", ".tsv"):
+            import csv
+            delim = "\t" if ext == ".tsv" else ","
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                reader = csv.reader(f, delimiter=delim)
+                headers = next(reader, [])
+                row_count = sum(1 for _ in reader)
+            profile["category"] = "tabular_data"
+            profile["columns"] = headers
+            profile["column_count"] = len(headers)
+            profile["row_count"] = row_count
+            profile["message"] = f"Tabular data file '{filename}' with {len(headers)} column(s) and {row_count} data row(s)."
+            return profile
+
+        # 2. JSON
+        elif ext == ".json":
+            import json
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                data = json.load(f)
+            profile["category"] = "json_data"
+            if isinstance(data, dict):
+                profile["root_type"] = "object"
+                profile["keys"] = list(data.keys())[:20]
+                profile["key_count"] = len(data)
+                profile["message"] = f"JSON file '{filename}' with {len(data)} top-level key(s)."
+            elif isinstance(data, list):
+                profile["root_type"] = "array"
+                profile["item_count"] = len(data)
+                profile["message"] = f"JSON array file '{filename}' containing {len(data)} element(s)."
+            else:
+                profile["root_type"] = type(data).__name__
+                profile["message"] = f"JSON scalar file '{filename}' of type {type(data).__name__}."
+            return profile
+
+        # 3. PDF
+        elif ext == ".pdf":
+            profile["category"] = "document"
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(file_path)
+                profile["page_count"] = len(reader.pages)
+                first_text = reader.pages[0].extract_text() if reader.pages else ""
+                profile["preview"] = first_text[:300].strip()
+                profile["message"] = f"PDF document '{filename}' with {len(reader.pages)} page(s)."
+            except Exception:
+                profile["message"] = f"PDF document '{filename}' ({profile['size_readable']})."
+            return profile
+
+        # 4. Presentations (PPTX)
+        elif ext == ".pptx":
+            profile["category"] = "presentation"
+            try:
+                import pptx
+                prs = pptx.Presentation(file_path)
+                profile["slide_count"] = len(prs.slides)
+                profile["message"] = f"PowerPoint presentation '{filename}' with {len(prs.slides)} slide(s)."
+            except Exception:
+                profile["message"] = f"PowerPoint presentation '{filename}' ({profile['size_readable']})."
+            return profile
+
+        # 5. Code
+        elif ext in (".py", ".js", ".ts", ".html", ".css", ".java", ".cpp", ".c", ".h", ".sql"):
+            profile["category"] = "source_code"
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                code_text = f.read()
+            profile["line_count"] = len(code_text.splitlines())
+            if ext == ".py":
+                from modules.code_generator.utils import explain_code_structure
+                struct = explain_code_structure(code_text, "python")
+                profile["classes"] = struct.get("classes", [])
+                profile["functions"] = struct.get("functions", [])
+                profile["imports"] = struct.get("imports", [])
+                profile["message"] = f"Python source '{filename}' with {profile['line_count']} lines, {len(profile['classes'])} class(es), {len(profile['functions'])} function(s)."
+            else:
+                profile["message"] = f"{ext.upper()[1:]} source file '{filename}' with {profile['line_count']} lines."
+            return profile
+
+        # 6. Plain Text / Markdown
+        elif ext in (".txt", ".md", ".log"):
+            profile["category"] = "plain_text"
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                txt = f.read()
+            profile["line_count"] = len(txt.splitlines())
+            profile["word_count"] = len(txt.split())
+            profile["message"] = f"Text document '{filename}' with {profile['word_count']} words across {profile['line_count']} lines."
+            return profile
+
+        # 7. Archives
+        elif ext in (".zip", ".tar", ".gz", ".7z", ".rar"):
+            profile["category"] = "archive"
+            if ext == ".zip":
+                import zipfile
+                with zipfile.ZipFile(file_path, 'r') as zf:
+                    infos = zf.infolist()
+                    profile["file_count"] = len(infos)
+                    profile["uncompressed_bytes"] = sum(i.file_size for i in infos)
+                    profile["message"] = f"ZIP archive '{filename}' containing {len(infos)} items."
+            else:
+                profile["message"] = f"Compressed archive '{filename}' ({profile['size_readable']})."
+            return profile
+
+        else:
+            profile["category"] = "generic_file"
+            profile["message"] = f"File '{filename}' ({profile['size_readable']})."
+            return profile
+
+    except Exception as e:
+        logger.error(f"[FILE] Profile file failed: {e}")
+        return {"success": False, "status": "error", "message": f"Could not profile file: {e}"}
+

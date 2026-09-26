@@ -1,7 +1,7 @@
-# utils.py
 import re
 import os
 import time
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 from modules.code_generator.config import SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE, BLOCKED_KEYWORDS
 
@@ -250,4 +250,106 @@ def explain_code_structure(code: str, language: str = "python") -> dict:
         "total_lines": total_lines,
         "message": f"{language.capitalize()} snippet has {total_lines} lines."
     }
+
+
+def parse_traceback(error_output: str) -> Dict[str, Any]:
+    """
+    Parse Python execution traceback or runtime error to extract failing file,
+    line number, error type, and message.
+    """
+    if not error_output:
+        return {"has_error": False, "message": "No error output provided."}
+
+    lines = error_output.strip().splitlines()
+    failing_file = None
+    failing_line = None
+    error_line_content = None
+
+    # Scan for standard Python traceback patterns: File "...", line X, in ...
+    for line in reversed(lines):
+        match = re.search(r'File ["\']([^"\']+)["\'], line (\d+)(?:, in (.+))?', line)
+        if match:
+            failing_file = match.group(1)
+            failing_line = int(match.group(2))
+            break
+
+    # Look for the last error type and message (e.g. ValueError: ...)
+    last_line = lines[-1].strip() if lines else ""
+    err_match = re.match(r'^([A-Za-z_]\w*(?:Error|Exception|Warning|Interrupt)):?\s*(.*)', last_line)
+    err_type = err_match.group(1) if err_match else "RuntimeError"
+    err_msg = err_match.group(2) if err_match else last_line
+
+    return {
+        "has_error": True,
+        "file": failing_file,
+        "line": failing_line,
+        "error_type": err_type,
+        "error_message": err_msg,
+        "summary": f"{err_type} at {os.path.basename(failing_file) if failing_file else 'unknown'}:{failing_line or '?'}: {err_msg}"
+    }
+
+
+def classify_execution_error(error_output: str) -> Dict[str, Any]:
+    """
+    Classify common coding execution errors into actionable categories
+    (e.g., missing dependency, syntax error, type error, permission, file not found).
+    """
+    if not error_output:
+        return {"category": "none", "suggestion": "No error."}
+
+    text = error_output.lower()
+
+    # Missing module / package
+    mod_match = re.search(r"modulenotfounderror: no module named ['\"]([^'\"]+)['\"]", text)
+    if mod_match:
+        missing_pkg = mod_match.group(1)
+        return {
+            "category": "missing_dependency",
+            "package": missing_pkg,
+            "suggestion": f"Install the missing dependency with: pip install {missing_pkg}"
+        }
+
+    # Import error
+    if "importerror:" in text:
+        return {
+            "category": "import_error",
+            "suggestion": "Check module name spelling, circular imports, or package version compatibility."
+        }
+
+    # Syntax error / Indentation error
+    if "syntaxerror:" in text or "indentationerror:" in text:
+        return {
+            "category": "syntax_error",
+            "suggestion": "Fix syntax or indentation error on the indicated line."
+        }
+
+    # Name error
+    if "nameerror:" in text:
+        name_m = re.search(r"nameerror: name ['\"]([^'\"]+)['\"] is not defined", text)
+        var_name = name_m.group(1) if name_m else "unknown"
+        return {
+            "category": "name_error",
+            "variable": var_name,
+            "suggestion": f"Variable or function '{var_name}' is referenced before definition or import."
+        }
+
+    # File not found
+    if "filenotfounderror:" in text or "no such file or directory" in text:
+        return {
+            "category": "file_not_found",
+            "suggestion": "Verify file paths and working directory."
+        }
+
+    # Permission error
+    if "permissionerror:" in text or "access is denied" in text:
+        return {
+            "category": "permission_denied",
+            "suggestion": "Run with appropriate user permissions or check file lock status."
+        }
+
+    return {
+        "category": "general_error",
+        "suggestion": "Review traceback details to identify runtime issue."
+    }
+
 

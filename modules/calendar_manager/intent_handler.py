@@ -36,6 +36,11 @@ class CalendarIntentHandler:
     @classmethod
     def get_intent(cls, user_input: str) -> dict:
         """Processes user input and returns structured intent and entities."""
+        # Check deterministic keyword fallback first for high speed and offline reliability
+        fast_intent = cls._keyword_fallback(user_input)
+        if fast_intent.get("action") not in ("unknown", None):
+            return fast_intent
+
         current_date_str = datetime.now().strftime("%Y-%m-%d")
         
         messages = [

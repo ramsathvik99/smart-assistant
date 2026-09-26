@@ -68,20 +68,23 @@ class ContextManager:
         if uid not in self.user_artifacts:
             self.user_artifacts[uid] = []
         
-        raw_path = artifact.get("path") or artifact.get("filepath")
+        raw_path = artifact.get("path") or artifact.get("filepath") or artifact.get("file_path") or artifact.get("url")
         if not raw_path:
             return
 
+        is_url = str(raw_path).startswith("http://") or str(raw_path).startswith("https://")
         ext = (artifact.get("type") or "").lower().lstrip(".")
-        if not ext and "." in os.path.basename(raw_path):
+        if not ext and not is_url and "." in os.path.basename(raw_path):
             ext = os.path.basename(raw_path).rsplit(".", 1)[-1].lower()
 
+        final_path = str(raw_path) if is_url else os.path.abspath(raw_path)
         art_entry = {
-            "path": os.path.abspath(raw_path),
-            "filename": artifact.get("filename") or os.path.basename(raw_path),
-            "type": ext,
+            "path": final_path,
+            "filename": artifact.get("filename") or (str(raw_path) if is_url else os.path.basename(raw_path)),
+            "type": ext or ("url" if is_url else "file"),
             "source_action": artifact.get("source_action", "file_creation"),
-            "timestamp": artifact.get("timestamp", time.time())
+            "timestamp": artifact.get("timestamp", time.time()),
+            "url": artifact.get("url") or (str(raw_path) if is_url else None)
         }
         # Prepend to list, keeping max 20 entries
         self.user_artifacts[uid].insert(0, art_entry)
@@ -101,6 +104,10 @@ class ContextManager:
         """Get the most recent artifact for the given user."""
         arts = self.get_recent_user_artifacts(user_id=user_id, artifact_type=artifact_type, limit=1)
         return arts[0] if arts else None
+
+    def get_user_artifacts(self, user_id: Any = None, artifact_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all stored artifacts for the given user."""
+        return self.get_recent_user_artifacts(user_id=user_id, artifact_type=artifact_type, limit=50)
 
 
     def set_active_preference(self, key: str, value: Any):

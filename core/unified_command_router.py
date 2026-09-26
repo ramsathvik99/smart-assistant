@@ -22,14 +22,15 @@ HYBRID INTENT RESOLUTION (Phase 7):
 
 import os
 import re
+import uuid
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, Optional
 from enum import Enum
 
 def get_assistant_name() -> str:
-    """Get the current user's configured assistant name."""
+    """Get the current user's configured assistant name, defaulting to Trevon."""
     try:
         from instance.config import settings
         name = settings.get_assistant_name()
@@ -37,31 +38,31 @@ def get_assistant_name() -> str:
             return name.lower().strip()
     except Exception:
         pass
-    return "assistant"  # Fallback default
+    return "trevon"
 
 def contains_assistant_name(text: str) -> bool:
-    """Check if text contains the current user's assistant name.
+    """Check if text contains the current user's assistant name or default 'Trevon'.
     
     This is case-insensitive, position-agnostic, and punctuation-tolerant.
     Used as an addressing signal, NOT as a mandatory wake word.
-    
-    Examples for assistant name "Aira":
-    - "Aira open Chrome" → True
-    - "open Chrome Aira" → True  
-    - "can you Aira open Chrome" → True
-    - "can you open Chrome, Aira?" → True
-    - "AIRA open Chrome" → True
+    Recognizes both the default identity 'Trevon' and any personalized assistant name.
     """
-    assistant_name = get_assistant_name()
-    if not assistant_name or assistant_name == "assistant":
-        return False  # No specific name configured
-    
-    # Clean the text: remove punctuation, convert to lowercase
+    if not text:
+        return False
+
     clean_text = re.sub(r'[^\w\s]', '', text.lower())
-    clean_name = assistant_name.lower()
-    
-    # Check if name appears anywhere in the text
-    return clean_name in clean_text
+
+    # 1. Fixed default identity Trevon
+    if "trevon" in clean_text:
+        return True
+
+    # 2. Personalized assistant name if configured
+    assistant_name = get_assistant_name()
+    if assistant_name and assistant_name not in ("assistant", "trevon"):
+        if assistant_name in clean_text:
+            return True
+
+    return False
 
 class Intent(Enum):
     POWER_ACTION = 1
@@ -163,8 +164,14 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:battery|battery\s+(?:status|level|percentage|life)|how\s+much\s+battery)\b', re.IGNORECASE),
                 # Disk / Storage diagnostics
                 re.compile(r'\b(?:disk\s+space|free\s+space|storage\s+space|how\s+much\s+storage|check\s+disk)\b', re.IGNORECASE),
-                # System telemetry / Top processes
-                re.compile(r'\b(?:top\s+processes|running\s+processes|what\s+is\s+using\s+my\s+(?:ram|cpu|memory)|cpu\s+usage|memory\s+usage)\b', re.IGNORECASE),
+                # System telemetry / CPU / RAM / GPU / System usage
+                re.compile(r'\b(?:(?:can\s+i\s+)?check\s+(?:my\s+)?(?:cpu|ram|gpu|processor|memory|system(?:\s+usage|\s+telemetry)?))\b', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:my\s+)?(?:cpu|ram|gpu|processor|memory|system)\s*(?:usage|utilization|load|metrics?|telemetry)?)\b', re.IGNORECASE),
+                re.compile(r'\b(?:how\s+much\s+(?:cpu|ram|gpu|memory|vram)\s+(?:am\s+i\s+using|is\s+free|is\s+used|do\s+i\s+have))\b', re.IGNORECASE),
+                re.compile(r'\b(?:check\s+(?:my\s+)?cpu(?:\s*,\s*|\s+and\s+|\s+)ram(?:\s*,\s*|\s+and\s+|\s+)gpu(?:\s+usage|\s+telemetry)?)\b', re.IGNORECASE),
+                re.compile(r'\b(?:check\s+(?:my\s+)?(?:system|hardware)\s+(?:usage|telemetry|metrics?|stats?)|show\s+(?:my\s+)?system\s+usage)\b', re.IGNORECASE),
+                re.compile(r'\b(?:gpu\s+memory(?:\s+am\s+i\s+using)?|vram\s+usage|gpu\s+(?:telemetry|stats|usage|metrics?|temperature)|check\s+gpu\s+(?:temp|temperature|usage|memory))\b', re.IGNORECASE),
+                re.compile(r'\b(?:top\s+processes|running\s+processes|what\s+is\s+using\s+my\s+(?:ram|cpu|memory)|(?:check\s+|what\s+is\s+(?:my\s+)?)?(?:cpu|ram|memory|processor)\s+(?:usage|utilization|load|metrics?)|(?:cpu|ram|memory|processor)\s+(?:usage|utilization|load|metrics?))\b', re.IGNORECASE),
                 # Window controls
                 re.compile(r'\b(?:minimize\s+all(?:\s+windows)?|minimize\s+windows|show\s+desktop)\b', re.IGNORECASE),
                 # Clipboard
@@ -210,9 +217,10 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:turn\s+(?:the\s+)?scroll\s+lock\s+(?:on|off)|(?:toggle|turn\s+on|turn\s+off|enable|disable)\s+scroll\s+lock)\b', re.IGNORECASE),
                 re.compile(r'\b(?:is\s+caps\s+lock|caps\s+lock\s+(?:on|off|status|state)|keyboard\s+lights?\s+status)\b', re.IGNORECASE),
                 re.compile(r'\b(?:check|show|what\s+is)\s+(?:the\s+)?(?:keyboard|key(?:board)?)\s+(?:toggle|lock)\s+(?:keys?|state|status)\b', re.IGNORECASE),
-                # Hardware info
+                # Hardware & System info
                 re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:my\s+)?(?:gpu|graphics\s+card|cpu\s+model|processor|hardware)|my\s+gpu|my\s+cpu\s+model|my\s+processor|hardware\s+info(?:rmation)?)\b', re.IGNORECASE),
                 re.compile(r'\b(?:tell\s+me\s+about\s+(?:my\s+)?hardware|device\s+hardware|hardware\s+spec(?:ification)?s?)\b', re.IGNORECASE),
+                re.compile(r'\b(?:show\s+(?:my\s+)?|get\s+(?:my\s+)?|what\s+is\s+(?:my\s+)?)?(?:system\s+info(?:rmation)?|os\s+info(?:rmation)?|device\s+specs|system\s+specs)\b', re.IGNORECASE),
                 # Power plans
                 re.compile(r'\b(?:power\s+plan|power\s+mode|current\s+power\s+plan|active\s+power\s+plan|what\s+power\s+plan)\b', re.IGNORECASE),
                 re.compile(r'\b(?:list|show)\s+(?:all\s+)?power\s+plans?\b', re.IGNORECASE),
@@ -222,6 +230,19 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:system\s+uptime|how\s+long\s+has\s+(?:the\s+)?(?:system|computer|pc|laptop)\s+been\s+(?:on|running|up)|uptime)\b', re.IGNORECASE),
                 # All processes list
                 re.compile(r'\b(?:list\s+all\s+(?:running\s+)?processes|show\s+all\s+(?:running\s+)?processes|all\s+running\s+processes)\b', re.IGNORECASE),
+                # Dark mode / theme
+                re.compile(r'\b(?:toggle\s+dark\s+mode|enable\s+dark\s+mode|disable\s+dark\s+mode|turn\s+(?:on|off)\s+dark\s+mode|turn\s+(?:on|off)\s+light\s+mode|switch\s+to\s+dark\s+mode|switch\s+to\s+light\s+mode|dark\s+mode\s+(?:on|off)|light\s+mode\s+(?:on|off)|toggle\s+theme)\b', re.IGNORECASE),
+                # Wi-Fi connect
+                re.compile(r'\b(?:connect\s+to\s+(?:wifi|wi-fi|network)|join\s+(?:wifi|wi-fi))\s+(.+)\b', re.IGNORECASE),
+                # Display resolution change
+                re.compile(r'\b(?:change|set)\s+(?:display\s+|screen\s+)?resolution\s+(?:to\s+)?(\d+)\s*[xX*]\s*(\d+)\b', re.IGNORECASE),
+                # Wallpaper
+                re.compile(r'\b(?:(?:get|what(?:\'s|\s+is)\s+(?:my\s+)?(?:current\s+)?|show\s+(?:my\s+)?(?:current\s+)?|current\s+)?wallpaper)\b', re.IGNORECASE),
+                re.compile(r'\b(?:set|change)\s+(?:my\s+)?wallpaper\s+(?:to\s+)?(.+)\b', re.IGNORECASE),
+                # Desktop statistics
+                re.compile(r'\b(?:desktop\s+(?:stats|statistics|analysis|summary)|analyze\s+(?:my\s+)?desktop)\b', re.IGNORECASE),
+                # GPU Telemetry
+                re.compile(r'\b(?:gpu\s+(?:telemetry|stats|usage|metrics?|temperature)|check\s+gpu\s+(?:temp|temperature|usage))\b', re.IGNORECASE),
             ],
 
             # ── Priority 4: OPEN APPLICATION ──────────────────────────────────
@@ -232,6 +253,16 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(launch|start|run)\s+(.+)', re.IGNORECASE),
                 re.compile(r'\b(close|quit|exit|terminate|kill)\s+(?!(?:music|song|track|audio|playback|email|mail|video))\s*(.+)', re.IGNORECASE),
                 re.compile(r'(?:^|\b(?:please|can\s+you|could\s+you)\s+)(open)\s+(?!(?:music|song|email|mail|video|folder|directory|file\s+(?!explorer)|windows?\b|open\s+windows?\b))(.+)', re.IGNORECASE),
+                # Browser Link & Table Extraction & Follow-ups
+                re.compile(r'\b(?:extract\s+(?:all\s+)?(?:the\s+)?(?:available\s+)?links(?:\s+from\s+(?:the\s+|this\s+)?(?:web\s+)?page)?|extract\s+(?:all\s+)?(?:the\s+)?(?:available\s+)?links)\b', re.IGNORECASE),
+                re.compile(r'\b(?:extract\s+(?:all\s+)?(?:the\s+)?(?:available\s+)?tables?(?:\s+from\s+(?:the\s+|this\s+)?(?:web\s+)?page)?|extract\s+tables?)\b', re.IGNORECASE),
+                re.compile(r'\b(?:how\s+many\s+links(?:\s+(?:did\s+you\s+find|were\s+found|are\s+there|did\s+we\s+get|extracted))?)\b', re.IGNORECASE),
+                re.compile(r'\b(?:show|display|what(?:\'s|\s+is))\s+(?:me\s+)?(?:the\s+)?(?:(\d+)(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+link\b', re.IGNORECASE),
+                re.compile(r'\b(?:open)\s+(?:the\s+)?(?:(\d+)(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:one|link)\b', re.IGNORECASE),
+                re.compile(r'\b(?:show|display|get)\s+(?:me\s+)?(?:the\s+)?first\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+rows?(?:\s+of\s+(?:the\s+)?table)?\b', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?value\s+(?:in|of)\s+(?:the\s+)?|show\s+(?:me\s+)?(?:the\s+)?)(?:(\d+)(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+row\b', re.IGNORECASE),
+                # Flight Search & Navigation
+                re.compile(r'\b(?:find\s+flights|search\s+flights|flights\s+from|what\s+about\s+flights)\b', re.IGNORECASE),
                 re.compile(r'\b(?:go\s+to|visit|browse\s+(?:to\s+)?|navigate\s+to)\s+(.+)', re.IGNORECASE),
                 re.compile(r'^(?:go\s+back|navigate\s+back|browser\s+go\s+back|go\s+back\s+in\s+browser)[.!?]?$', re.IGNORECASE),
             ],
@@ -241,13 +272,13 @@ class UnifiedCommandRouter:
                 # Duplicate files
                 re.compile(r'\b(?:duplicate\s+files?|find\s+duplicates?)\b', re.IGNORECASE),
                 # File search & filtering
-                re.compile(r'\b(?:find\s+all|search\s+(?:for\s+)?files?|files?\s+larger\s+than|files?\s+modified)\b', re.IGNORECASE),
+                re.compile(r'\b(?:find\s+all|search\s+(?:for\s+)?(?:[a-zA-Z0-9_\-*\.]+\s+)?(?:files?|documents?)|search\s+(?:for\s+)?(?:.+?\s+)?(?:files?|documents?)\s+(?:in|under)\s+.+|(?:files?|documents?)\s+larger\s+than|(?:files?|documents?)\s+modified)\b', re.IGNORECASE),
                 # Directory statistics
                 re.compile(r'\b(?:statistics\s+for|stats\s+for|how\s+many\s+files\s+in|directory\s+stats)\b', re.IGNORECASE),
                 # Largest files
                 re.compile(r'\b(?:largest\s+files?|biggest\s+files?)\b', re.IGNORECASE),
                 # PDF inspection & utilities
-                re.compile(r'\b(?:how\s+many\s+pages\s+(?:are\s+)?in|information\s+about\s+(?:the\s+)?pdf|pdf\s+info|split\s+.*\.pdf|merge\s+.*pdfs?|extract\s+(?:the\s+)?text\s+from\s+.*\.pdf)\b', re.IGNORECASE),
+                re.compile(r'\b(?:how\s+many\s+pages\s+(?:are\s+)?in|(?:show\s+(?:me\s+)?)?(?:information|info)\s+about\s+(?:this\s+|the\s+)?pdf|pdf\s+info|split\s+(?:this\s+|the\s+)?(?:[\w\-.]+\.pdf|pdf)|merge\s+(?:these\s+|the\s+)?pdfs?|extract\s+(?:the\s+)?text\s+from\s+(?:this\s+|the\s+)?(?:[\w\-.]+\.pdf|pdf))\b', re.IGNORECASE),
                 # Specific file delete
                 re.compile(r'\b(delete|remove)\s+(?:the\s+)?(?:file\s+)?([\w\-.]+\.\w+)\b', re.IGNORECASE),
                 # File move
@@ -266,6 +297,9 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(find|locate|where\s+is)\s+(?:the\s+|my\s+)?(?:file\s+|document\s+)?(.+)', re.IGNORECASE),
                 # Desktop organizer
                 re.compile(r'\b(?:organize|clean\s+up|clean)\s+(?:my\s+)?(?:desktop|downloads)\b', re.IGNORECASE),
+                # File Profiling & Multi-Format Inspection
+                re.compile(r'\b(?:profile|inspect|analyze|analyse)\s+(?:(?:the|my|that|this)\s+)?(?:[a-zA-Z0-9_\-]+\s+)?(?:file|data|csv|excel|json|pptx|ppt|presentation|document|pdf)?(?:\s+(.+))?\b', re.IGNORECASE),
+                re.compile(r'\b(?:profile\s+file|inspect\s+file|file\s+profile|analyze\s+file|analyse\s+file|inspect\s+(?:data|csv|excel|json|pptx|ppt))\s+(.+)\b', re.IGNORECASE),
             ],
 
             # ── Priority 6: EMAIL ─────────────────────────────────────────────
@@ -305,7 +339,7 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(pause|resume|stop|next|previous|skip)\s+(?:the\s+)?(?:music|song|track|playback|audio)\b', re.IGNORECASE),
                 # NOTE: negative lookahead prevents 'stop task <id>' from matching here;
                 # that command belongs to TASK_MANAGEMENT (Priority 18).
-                re.compile(r'\b(pause|resume|stop|next|previous|skip)\b(?!\s+(?:my\s+)?task\b)(?:\s+track|\s+song)?(?:\s|$)', re.IGNORECASE),
+                re.compile(r'\b(pause|resume|stop|next|previous|skip)\b(?!\s+(?:my\s+)?(?:task|stopwatch|timer|alarm)\b)(?:\s+track|\s+song)?(?:\s|$)', re.IGNORECASE),
                 re.compile(r'\b(toggle\s+playback|play\s*\/\s*pause|next\s+track|previous\s+track)\b', re.IGNORECASE),
                 # YouTube video summary
                 re.compile(r'\b(?:summarize|summary\s+of)\s+(?:this\s+)?(?:youtube\s+video|video)\b', re.IGNORECASE),
@@ -313,25 +347,35 @@ class UnifiedCommandRouter:
 
             # ── Priority 10: DOCUMENT GENERATION ──────────────────────────────
             Intent.DOCUMENT_GENERATION: [
-                re.compile(r'\b(create|generate|make|write)\s+(?:an?\s+)?(?:word\s+doc(?:ument)?|docx|pdf(?:\s+document)?|excel(?:\s+sheet|\s+spreadsheet)?|spreadsheet|xlsx|powerpoint(?:\s+presentation)?|presentation|pptx|slides)\b', re.IGNORECASE),
-                re.compile(r'\b(?:create|generate|make|write)\s+(?:an?\s+)?(?:pdf|excel|word|powerpoint|presentation|spreadsheet)\s+report\b', re.IGNORECASE),
-                re.compile(r'\b(?:create|generate|make|write)\s+(?:an?\s+)?(?:excel\s+(?:expense\s+sheet|sheet)|pdf\s+report)\b', re.IGNORECASE),
-                re.compile(r'\b(?:generate|create|make)\s+(?:an?\s+)?(?:report|resume|document|spreadsheet|sheet|presentation|slides)\s*(?:in|as)?\s*(?:word|docx|pdf|excel|xlsx|pptx|powerpoint)?\b', re.IGNORECASE),
+                re.compile(r'\b(?:create|created|generate|generated|make|made|write|wrote|build|built)\s+(?:an?\s+)?(?:word\s+doc(?:ument)?|docx|pdf(?:\s+document|\s+report)?|excel(?:\s+sheet|\s+spreadsheet|\s+file)?|spreadsheet|xlsx|powerpoint(?:\s+presentation)?|presentation|pptx|ppt|slides)\b', re.IGNORECASE),
+                re.compile(r'\b(?:create|created|generate|generated|make|made|write|wrote|build|built)\s+(?:an?\s+)?(?:pdf|excel|word|powerpoint|presentation|spreadsheet|ppt|pptx)\s+report\b', re.IGNORECASE),
+                re.compile(r'\b(?:create|created|generate|generated|make|made|write|wrote|build|built)\s+(?:an?\s+)?(?:excel\s+(?:expense\s+sheet|sheet|file)|pdf\s+report|presentation\s+with\s+\d+\s+slides?)\b', re.IGNORECASE),
+                re.compile(r'\b(?:generate|generated|create|created|make|made|write|wrote|build|built)\s+(?:an?\s+)?(?:report|resume|document|spreadsheet|sheet|presentation|slides)\s*(?:in|as|about|with)?\s*(?:word|docx|pdf|excel|xlsx|pptx|ppt|powerpoint)?\b', re.IGNORECASE),
+                re.compile(r'\b(?:create|created|generate|generated|make|made|build|built)\s+(?:an?\s+)?(?:presentation|ppt|pptx|powerpoint)\b', re.IGNORECASE),
+                re.compile(r'\b(?:create|created|generate|generated|make|made|build|built|write|wrote)\s+(?:an?\s+)?(?:word\s+document|doc|docx)\b', re.IGNORECASE),
+                re.compile(r'\b(?:create|created|generate|generated|make|made|build|built|write|wrote)\s+(?:an?\s+)?(?:pdf|report\s+about|document\s+about)\b', re.IGNORECASE),
+                re.compile(r'\b(?:create|created|generate|generated|make|made|build|built)\s+(?:an?\s+)?(?:excel(?:\s+file|\s+sheet)?|spreadsheet)\b', re.IGNORECASE),
             ],
 
             # ── Priority 10: CALCULATOR ────────────────────────────────────────
-            # NOTE: 'add' is intentionally narrow here — 'add a meeting/event/appointment'
-            # must NOT match so they fall through to DAILY_BRIEFING (Priority 14).
+            # Arithmetic calculations and local random number generation
             Intent.CALCULATOR: [
-                re.compile(
-                    r'\b(calculate|math|subtract|multiply|divide|what\s+is\s+\d+)\b'
-                    r'|\badd\b(?!\s+(?:a\s+)?(?:meeting|event|appointment|calendar|task|reminder|note))\s+\d',
-                    re.IGNORECASE
-                )
+                re.compile(r'\b(?:calculate|compute|solve|math)\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+is\s+\d+\s*(?:[\+\-\*\/\^x]|plus|minus|times|multiplied\s+by|divided\s+by|over|to\s+the\s+power\s+of)\s*\d+', re.IGNORECASE),
+                re.compile(r'^\s*\d+\s*(?:[\+\-\*\/\^]|plus|minus|times|divided\s+by)\s*\d+\s*$', re.IGNORECASE),
+                re.compile(r'\b(?:calculate|what\s+is)?\s*\d+\s*(?:percent|%)\s+of\s+\d+\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+is\s+\d+\s+(?:squared|cubed)\b', re.IGNORECASE),
+                re.compile(r'\b(?:subtract|multiply|divide)\s+\d+\b', re.IGNORECASE),
+                re.compile(r'\badd\b(?!\s+(?:a\s+)?(?:meeting|event|appointment|calendar|task|reminder|note))\s+\d+\s+(?:to|and)\s+\d+\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+is\s+\d+\s*[\+\-\*\/\%x]\s*\d+\b', re.IGNORECASE),
+                re.compile(r'\b(?:random\s+numbers?|give\s+me\s+(?:\d+\s+)?random\s+numbers?|tell\s+me\s+(?:\d+\s+)?random\s+numbers?|generate\s+(?:\d+\s+)?random\s+numbers?|numbers?\s+(?:from|between)\s+\d+\s+(?:to|and)\s+\d+)\b', re.IGNORECASE),
             ],
 
             # ── Priority 11: CODE GENERATION ─────────────────────────────────
             Intent.CODE_GENERATION: [
+                re.compile(r'\b(?:diagnose|parse|explain|analyze|check)\s+(?:this\s+)?(?:error|traceback)\b', re.IGNORECASE),
+                re.compile(r'\btraceback\s+\(most\s+recent\s+call\s+last\)', re.IGNORECASE),
+                re.compile(r'\b(?:explain|analyze)\s+(?:this\s+)?code\b', re.IGNORECASE),
                 re.compile(r'\b(?:validate|check)\s+(?:this\s+)?(?:python\s+)?code(?:\s+for\s+syntax\s+errors)?\b', re.IGNORECASE),
                 re.compile(r'\b(?:does\s+this\s+code\s+have\s+syntax\s+errors|explain\s+(?:the\s+)?structure\s+of\s+(?:this\s+)?(?:python\s+)?code)\b', re.IGNORECASE),
                 re.compile(r'\b(?:what\s+classes\s+and\s+functions\s+are\s+in\s+this\s+code)\b', re.IGNORECASE),
@@ -362,8 +406,15 @@ class UnifiedCommandRouter:
             # ── Priority 14: DAILY BRIEFING & CALENDAR ────────────────────────
             # Calendar creation patterns are placed BEFORE CALCULATOR (Priority 10)
             # in enum evaluation order so 'add a meeting' routes here, not CALCULATOR.
+            # ── Priority 14: DAILY BRIEFING & CALENDAR ────────────────────────
+            # Calendar creation patterns are placed BEFORE CALCULATOR (Priority 10)
+            # in enum evaluation order so 'add a meeting' routes here, not CALCULATOR.
             Intent.DAILY_BRIEFING: [
                 re.compile(r'\b(daily\s+briefing|morning\s+briefing|morning\s+update|give\s+me\s+my\s+briefing|brief\s+me|daily\s+update)\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+do\s+i\s+have(?:\s+(?:for\s+)?(?:today|tomorrow|scheduled|planned))?\b', re.IGNORECASE),
+                re.compile(r'\bwhat(?:\'s|\s+is)\s+(?:on\s+my\s+schedule|scheduled|planned)(?:\s+(?:for\s+)?(?:today|tomorrow))?\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+do\s+i\s+(?:need|have)\s+to\s+do(?:\s+(?:today|tomorrow))?\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+(?:meetings?|appointments?)\s+do\s+i\s+have(?:\s+(?:today|tomorrow))?\b', re.IGNORECASE),
                 re.compile(r'\b(?:show|check|view|what(?:\'s|\s+is)\s+on|what)\s+(?:my\s+|today\'?s?\s+)?calendar\b', re.IGNORECASE),
                 re.compile(r'\b(?:show|check|view|what)\s+(?:today\'?s?\s+|my\s+)?events\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+events\s+do\s+i\s+have\b', re.IGNORECASE),
@@ -376,8 +427,30 @@ class UnifiedCommandRouter:
                 re.compile(r'\bput\s+.+?\s+(?:on|in(?:to)?)\s+(?:my\s+)?calendar\b', re.IGNORECASE),
             ],
 
-            # ── Priority 15: TIME QUERY (Local System Clock — Bypasses RAG/LLM) ─
+            # ── Priority 15: TIME QUERY & CLOCK / ALARM / TIMER / STOPWATCH ─
             Intent.TIME_QUERY: [
+                # Alarms
+                re.compile(r'\b(?:set|create|put|schedule)\s+(?:an?\s+)?alarm(?:\s+(?:for|at|in)\s+(.+))?\b', re.IGNORECASE),
+                re.compile(r'\bwake\s+me\s+up\s+(?:at|in|for)\s+(.+)', re.IGNORECASE),
+                re.compile(r'\b(?:show|list|view|check|what\s+are)\s+(?:all\s+|my\s+)?alarms\b', re.IGNORECASE),
+                re.compile(r'\b(?:cancel|delete|remove|turn\s+off|stop|dismiss)\s+(?:all\s+|the\s+|my\s+)?alarms?\b', re.IGNORECASE),
+                re.compile(r'\bsnooze(?:\s+the\s+alarm)?(?:\s+for\s+(\d+)\s+minutes?)?\b', re.IGNORECASE),
+                # Timers
+                re.compile(r'\b(?:set|start|create|begin)\s+(?:a\s+)?(?:\d+\s*(?:hours?|hrs?|minutes?|mins?|seconds?|secs?)\s+)?timer(?:\s+(?:for|of)\s+(.+))?\b', re.IGNORECASE),
+                re.compile(r'\b(?:show|list|view|check)\s+(?:all\s+|my\s+|active\s+)?timers\b', re.IGNORECASE),
+                re.compile(r'\b(?:how\s+much\s+time\s+(?:is\s+)?left\s+on\s+(?:the\s+)?timer|timer\s+status)\b', re.IGNORECASE),
+                re.compile(r'\b(?:cancel|stop|delete|reset)\s+(?:the\s+|my\s+|all\s+)?timers?\b', re.IGNORECASE),
+                # Stopwatch
+                re.compile(r'\b(?:start|begin|run|resume)\s+(?:the\s+)?stopwatch\b', re.IGNORECASE),
+                re.compile(r'\b(?:stop|pause|halt)\s+(?:the\s+)?stopwatch\b', re.IGNORECASE),
+                re.compile(r'\b(?:reset|clear)\s+(?:the\s+)?stopwatch\b', re.IGNORECASE),
+                re.compile(r'\b(?:lap|split)(?:\s+time)?\s+(?:on\s+)?(?:the\s+)?stopwatch\b', re.IGNORECASE),
+                re.compile(r'\b(?:check|what(?:\'s|\s+is)\s+(?:the\s+)?time\s+on|show|status\s+of)\s+(?:the\s+)?stopwatch\b', re.IGNORECASE),
+                re.compile(r'\bstopwatch\b', re.IGNORECASE),
+                # World Clock & Timezones
+                re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?time\s+(?:in|at|for|of)|current\s+time\s+(?:in|at|for)|time\s+in)\s+([a-zA-Z\s]+)', re.IGNORECASE),
+                re.compile(r'\bwhat\s+time\s+is\s+it\s+in\s+([a-zA-Z\s]+)', re.IGNORECASE),
+                # Standard Local Clock
                 re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?time|what\s+time(?:\s+is\s+it)?|(?:can\s+you\s+)?tell\s+me\s+the\s+time|current\s+time|time\s+is\s+it)\b', re.IGNORECASE)
             ],
 
@@ -404,7 +477,6 @@ class UnifiedCommandRouter:
             # Must come BEFORE RAG_SEARCH and MEMORY_STORE so personal queries hit here.
             Intent.MEMORY_QUERY: [
                 re.compile(r'\b(who\s+am\s+i|who\'?s\s+am\s+i)\b', re.IGNORECASE),
-                re.compile(r'\b(who\s+are\s+you|what(?:\'s|\s+is)\s+your\s+name)\b', re.IGNORECASE),
                 re.compile(r'\bhow\s+old\s+am\s+i\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+is\s+my\s+age\b', re.IGNORECASE),
                 re.compile(r'\bwhat(?:\'s|\s+is)\s+my\s+height\b', re.IGNORECASE),
@@ -500,7 +572,7 @@ class UnifiedCommandRouter:
 
             # ── Priority 25: RAG SEARCH ───────────────────────────────────────
             Intent.RAG_SEARCH: [
-                re.compile(r'\b(?:show\s+me|display)\s+(?:who|what|where|when|why|how|(?:an?|the)\s+explanation|an?\s+overview|what\s+you\s+know\s+about|facts|info|information|details|[a-zA-Z0-9_\s]{2,40})\b', re.IGNORECASE),
+                re.compile(r'\b(?:show\s+me|display)\s+(?:who|what|where|when|why|how|(?:an?|the)\s+explanation|an?\s+overview|what\s+you\s+know\s+about|facts|info|information|details)\b', re.IGNORECASE),
                 re.compile(r'\b(search|what|who|where|when|why|how|explain|explanation|tell\s+me|describe|summarize|news|latest|update|updates)\b', re.IGNORECASE)
             ],
 
@@ -511,7 +583,17 @@ class UnifiedCommandRouter:
                 re.compile(r'^(?:show|display)\s+that\s+again\.?$', re.IGNORECASE),
                 re.compile(r'^(?:can\s+you\s+)?(?:show|display)\s+(?:me\s+)?(?:that|it)(?:\s+(?:again|back))?\.?$', re.IGNORECASE),
                 re.compile(r'^(?:put\s+that\s+on\s+screen|let\s+me\s+see\s+it|let\s+me\s+see\s+that|bring\s+that\s+back|bring\s+it\s+back|show\s+the\s+list|show\s+the\s+result|display\s+what\s+you\s+(?:just\s+)?(?:said|told\s+me)|display\s+that)\.?$', re.IGNORECASE),
-                re.compile(r'^(?:show|display|put)\s+(?:me\s+)?(?:the\s+)?(?:pairing\s+code|code|ip|ip\s+address|address|url|link|file\s+path|file|path|list|devices|table|status|result)(?:\s+again)?(?:\s+on\s+(?:the\s+)?screen)?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:show|display|put)\s+(?:me\s+)?(?:the\s+)?(?:pairing\s+code|code|ip|ip\s+address|address|url|link|file\s+path|file|path|list|devices|table|status|result|device\s+info(?:rmation)?)(?:\s+again)?(?:\s+on\s+(?:the\s+)?screen)?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:show|display|put)\s+(?:me\s+)?(?:the\s+)?(?:digital\s+)?numbers?(?:\s+(?:from\s+)?\d+\s+to\s+\d+)?\s+in\s+a\s+box(?:\s+on\s+(?:the\s+)?screen)?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?(?:show|display|give|generate|list)\s+(?:me\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|twenty|thirty|fifty|hundred)?\s*(?:random\s+)?numbers?(?:\s+(?:from|between)\s+\d+\s+(?:to|and)\s+\d+)?(?:\s+in\s+(?:a\s+)?(?:box|table|grid|reverse\s+order|reverse))?(?:\s+on\s+(?:the\s+)?screen)?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?(?:generate|give\s+me)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twenty)?\s*(?:random\s+)?numbers?.*$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?(?:show|display)\s+(?:me\s+)?(?:the\s+)?numbers?.*$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?(?:give\s+me|generate)\s+.*\bnumbers?\b.*$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?count\s+(?:from\s+)?\d+\s*(?:to|-)\s*\d+(?:\s+numbers?)?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?count\s+(?:from\s+)?\d+\s+to\s+\d+(?:\s+numbers?)?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?count\s+(?:up\s+to\s+)?\d+(?:\s+numbers?)?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?count\s+(?:me\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twenty)\s+numbers?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?list\s+numbers?\s+(?:from|between)\s+\d+\s+(?:to|and|-)\s*\d+\.?$', re.IGNORECASE),
             ]
             # Priority 25: GENERAL_CONVERSATION — fallback, no pattern needed
         }
@@ -544,10 +626,17 @@ class UnifiedCommandRouter:
                 self._route_cache[cache_key] = (res_intent, res_params)
             return res_intent, res_params
 
+        # Strip leading assistant name / wake word and polite prefixes for matching
+        clean_input = re.sub(r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|nova|trevon|jarvis|assistant|computer)[,\s:]*', '', input_lower, flags=re.IGNORECASE).strip()
+        assistant_name = get_assistant_name()
+        if isinstance(assistant_name, str) and assistant_name.lower() not in ("assistant", "trevon", "friday", "nova", "jarvis", "computer"):
+            clean_input = re.sub(rf'^(?:hey\s+|ok\s+|okay\s+)?{re.escape(assistant_name.lower())}[,\s:]*', '', clean_input, flags=re.IGNORECASE).strip()
+        clean_no_polite = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+)+', '', clean_input, flags=re.IGNORECASE).strip()
+
         # ── Step 1: Deterministic regex, strict priority order ─────────────
-        # Fast path: Visual Surface requests ("show that again", "show the pairing code", etc.)
+        # Fast path: Visual Surface requests ("show that again", "show the pairing code", "numbers in a box", etc.)
         for pattern in self.patterns.get(Intent.VISUAL_SURFACE, []):
-            match = pattern.search(input_lower)
+            match = pattern.search(input_lower) or pattern.search(clean_input) or pattern.search(clean_no_polite)
             if match:
                 params = self._extract_params(Intent.VISUAL_SURFACE, match, user_input)
                 self.logger.debug(f"[DETERMINISTIC] '{user_input[:60]}' -> VISUAL_SURFACE")
@@ -558,71 +647,116 @@ class UnifiedCommandRouter:
                 continue
             # Background task, visual response & active window queries must not be hijacked by DEVICE_CONTROL
             if intent == Intent.DEVICE_CONTROL:
-                if any(k in input_lower for k in [
+                if any(any(k in t for k in [
                     "show that again", "show that", "show it again", "show it", "display that again", "display that",
                     "show me that", "show the pairing code", "show me the pairing code", "show the code", "display the pairing code",
                     "show the ip", "display the ip", "put that on screen", "let me see it", "display what you just said",
                     "show visual response",
+                    "numbers in a box", "digital numbers in a box", "in a box", "numbers 1 to 100",
                     "active window", "foreground window", "current window",
                     "queue a task", "queue task", "create a background task", "create a task",
                     "add a task", "schedule a background task", "schedule a task",
                     "run this as a background task", "run in the background", "run this in the background",
                     "task queue", "put this in the task queue", "cancel task", "stop task",
                     "task status", "background task", "list my tasks", "list my task", "show my tasks", "what tasks"
-                ]):
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
             # Preference and learned behavioral rules must not be routed to NOTES
             if intent == Intent.NOTES:
-                if any(k in input_lower for k in ["rule", "preference", "prefer", "note that "]):
+                if any(any(k in t for k in ["rule", "preference", "prefer", "note that "]) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
             # Questions and behavioral preferences/rules must not be routed to MEMORY_STORE
             if intent == Intent.MEMORY_STORE:
-                if input_lower.endswith('?') or input_lower.startswith(('what', 'which', 'who', 'where', 'when', 'how', 'is my', 'are my', 'do you', 'can you', 'tell me what')):
+                if input_lower.endswith('?') or clean_input.endswith('?') or clean_input.startswith(('what', 'which', 'who', 'where', 'when', 'how', 'is my', 'are my', 'do you', 'can you', 'tell me what')):
                     continue
-                if any(k in input_lower for k in ["prefer", "preference", "rule", "dark mode", "light mode", "always ", "never ", "remember that i like"]):
+                if any(any(k in t for k in ["prefer", "preference", "rule", "dark mode", "light mode", "always ", "never ", "remember that i like"]) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
             # Code structure, syntax or programming queries must not be routed to CALCULATOR
             if intent == Intent.CALCULATOR:
-                if any(k in input_lower for k in ["code", "python", "script", "syntax", "class ", "def ", "function", "program"]):
+                if any(any(k in t for k in ["code", "python", "script", "syntax", "class ", "def ", "function", "program"]) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
+                # Allow random number generation through to CALCULATOR
+                is_random = "random" in clean_input or "random" in input_lower or any(any(k in t for k in ["numbers from", "numbers between"]) for t in [clean_input, clean_no_polite, input_lower])
+                if not is_random:
+                    # Non-calculation display requests (e.g. lists, boxes) are not arithmetic
+                    if any(any(k in t for k in [
+                        "show me", "give me", "list of numbers", "numbers in reverse", "in reverse order", "in a box", "numbers", "number"
+                    ]) for t in [clean_input, clean_no_polite, input_lower]) and not any(any(k in t for k in [
+                        "calculate", "times", "divided", "plus", "minus", "percent", "squared", "cubed", "sqrt", "power"
+                    ]) for t in [clean_input, clean_no_polite, input_lower]):
+                        continue
             # Window management and background task queries must not be routed to OPEN_APPLICATION
             if intent == Intent.OPEN_APPLICATION:
-                if any(k in input_lower for k in [
+                # Reminder & Clock/Alarm/Timer/Stopwatch requests MUST NOT be routed to OPEN_APPLICATION
+                if any(any(k in t for k in [
+                    "remind me", "remind", "reminder", "reminders",
+                    "set a reminder", "create a reminder", "alert me",
+                    "alarm", "wake me up", "timer", "stopwatch"
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
+                    continue
+                if any(any(k in t for k in [
                     "open windows", "windows are open", "list windows", "show windows",
                     "what windows", "which windows", "active window", "foreground window", "current window",
                     "background task", "queue a task", "queue task", "create a background task",
                     "schedule a background task", "run this as a background task", "run in the background",
                     "run this in the background", "task queue", "put this in the task queue"
-                ]):
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
             # Background task & pairing code commands must not be routed to CODE_GENERATION unless user explicitly requests code/script writing
+            # Document generation requests (PPT, Word, Excel, PDF) must NEVER be routed to CODE_GENERATION
             if intent == Intent.CODE_GENERATION:
-                is_explicit_code = any(k in input_lower for k in [
+                if any(any(k in t for k in [
+                    "ppt", "powerpoint", "presentation", "slides", "docx", "word doc",
+                    "word document", "spreadsheet", "excel sheet", "excel file", "pdf report", "pdf document"
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
+                    continue
+                is_explicit_code = any(any(k in t for k in [
                     "write a python", "write python", "python script", "generate code",
                     "write code", "sample code", "example code", "write a function",
                     "validate code", "validate syntax", "check syntax", "write a script",
                     "create a python", "code to"
-                ])
-                if not is_explicit_code and any(k in input_lower for k in [
+                ]) for t in [clean_input, clean_no_polite, input_lower])
+                if not is_explicit_code and any(any(k in t for k in [
                     "queue a task", "queue task", "create a background task", "create a task",
                     "add a task", "schedule a background task", "schedule a task",
                     "run this as a background task", "run in the background", "task queue",
                     "put this in the task queue", "task status", "cancel task", "stop task", "background task",
                     "pairing code", "code again", "the code again", "what's the code", "whats the code",
                     "what is the code", "what was the code", "repeat the code", "phone pairing code"
-                ]):
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
             # Undo, location, and learning queries must not be hijacked by MEMORY_QUERY
             if intent == Intent.MEMORY_QUERY:
-                if any(k in input_lower for k in [
+                if any(any(k in t for k in [
                     "undo", "undone", "undoable",
                     "my location", "where am i", "current location", "location source", "how do you know my location",
                     "learned about me", "preferences have you learned"
-                ]):
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
-            # Specific skill commands must not be routed to RAG_SEARCH
+            # Specific skill commands and conversational questions directed at the assistant must not be routed to RAG_SEARCH
             if intent == Intent.RAG_SEARCH:
-                if any(k in input_lower for k in [
+                # Conversational questions directed at the assistant must remain GENERAL_CONVERSATION
+                is_conversational_to_assistant = any(
+                    re.search(p, t, re.IGNORECASE) for t in [clean_input, clean_no_polite, input_lower]
+                    for p in [
+                        r'\b(?:why|who|what|how|where|when)\s+(?:are|were|did|do|can|could|will|would|have|is)\s+you\b',
+                        r'\b(?:why|who|what|how|where|when)\s+(?:did|are|do)\s+you\b',
+                        r'\bwhy\s+(?:did\s+you\s+say\s+that|are\s+you\s+doing\s+this|are\s+you\s+doing\s+that|do\s+you\s+exist)\b',
+                        r'\bwho\s+(?:are\s+you|made\s+you|created\s+you|built\s+you)\b',
+                        r'\bwhat\s+(?:can\s+you\s+do|are\s+you|do\s+you\s+mean|are\s+you\s+doing|is\s+your\s+name)\b',
+                        r'\bhow\s+(?:are\s+you|are\s+you\s+doing|do\s+you\s+feel|do\s+you\s+do)\b',
+                        r'\b(?:tell\s+me\s+about\s+yourself|introduce\s+yourself)\b',
+                    ]
+                )
+                if is_conversational_to_assistant:
+                    continue
+
+                if any(any(k in t for k in [
+                    "what do i have", "what do i need to do", "what's on my schedule", "whats on my schedule",
+                    "what is on my schedule", "what's planned", "whats planned", "what is planned",
+                    "schedule today", "schedule tomorrow", "my schedule", "what meetings", "what appointments",
+                    "do i have today", "do i have tomorrow",
+                    "random number", "random numbers", "numbers from", "numbers between", "generate random",
                     "queue task", "task status", "cancel task", "stop task", "background task", "tasks are running",
                     "list my task", "show my task", "what tasks",
                     "smart device", "smart home", "active window", "what window", "what app", "what application", "active application", "active app",
@@ -631,12 +765,26 @@ class UnifiedCommandRouter:
                     "paired devices", "connected devices", "devices are paired", "devices are available", "device status",
                     "what preferences", "what you've learned", "what you have learned",
                     "recommend", "suggest", "push to talk", "clipboard", "reminder", "reminders",
-                    "my notes", "take a note", "create a note", "save a note", "inbox", "unread email"
-                ]):
+                    "my notes", "take a note", "create a note", "save a note", "inbox", "unread email",
+                    "check my cpu", "check cpu", "cpu usage", "cpu metrics", "how much cpu", "can i check my cpu",
+                    "check my gpu", "check gpu", "gpu usage", "gpu memory", "how much gpu", "gpu memory am i using",
+                    "check my ram", "check ram", "ram usage", "ram metrics", "how much ram", "how much ram is free",
+                    "check cpu ram and gpu", "system usage", "show system usage", "system telemetry",
+                    "what wallpaper", "my wallpaper", "current wallpaper", "wallpaper am i using",
+                    "extract all links", "extract links", "available links", "links from this page",
+                    "extract all tables", "extract table", "extract tables", "table from this page", "tables from this page",
+                    "how many links did you find", "how many links", "show me the third link", "open the third link", "open the third one",
+                    "first five rows", "third row", "value in the third row",
+                    "find flights", "search flights", "flights from", "flight search", "open that flight search", "open the flight search",
+                    "profile this file", "profile file", "diagnose this traceback", "diagnose traceback", "analyse that ppt", "analyze that ppt",
+                    "set alarm", "set an alarm", "wake me up", "my alarms", "list alarms", "show alarms", "cancel alarm", "snooze alarm", "stop alarm", "turn off alarm",
+                    "set a timer", "set timer", "my timers", "list timers", "cancel timer", "stopwatch", "start stopwatch", "stop stopwatch", "reset stopwatch",
+                    "time in", "what time is it", "current time", "what's the time", "today's date", "what day is it", "what day is today",
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
             patterns = self.patterns.get(intent, [])
             for pattern in patterns:
-                match = pattern.search(input_lower)
+                match = pattern.search(clean_input) or pattern.search(clean_no_polite) or pattern.search(input_lower)
                 if match:
                     params = self._extract_params(intent, match, user_input)
                     self.logger.debug(
@@ -660,6 +808,12 @@ class UnifiedCommandRouter:
                 m_spec = re.search(r'show\s+visual\s+response\s+([a-zA-Z0-9_]+)', text_low)
                 if m_spec:
                     params["target_type"] = m_spec.group(1).upper()
+                elif "box" in text_low and "number" in text_low:
+                    params["target_type"] = "NUMBERS_BOX"
+                elif any(w in text_low for w in ["number", "numbers", "count"]):
+                    params["target_type"] = "NUMBERS"
+                elif any(w in text_low for w in ["again", "back", "previous result", "what you just"]):
+                    params["target_type"] = "AGAIN"
                 else:
                     m_s = re.search(r'\b(pairing\s+code|code|ip\s+address|ip|address|url|link|file\s+path|file|path|list|devices|table|status|result)\b', text_low)
                     if m_s:
@@ -669,8 +823,52 @@ class UnifiedCommandRouter:
 
             elif intent == Intent.OPEN_APPLICATION:
                 text_low = user_input.lower().strip()
-                if re.match(r'^(?:go\s+back|navigate\s+back|browser\s+go\s+back|go\s+back\s+in\s+browser)[.!?]?$', text_low):
+                clean_text_low = re.sub(r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|nova|trevon|jarvis|assistant|computer)[,\s:]*', '', text_low).strip()
+                clean_text_no_polite = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+)+', '', clean_text_low).strip()
+
+                if re.match(r'^(?:go\s+back|navigate\s+back|browser\s+go\s+back|go\s+back\s+in\s+browser)[.!?]?$', clean_text_no_polite):
                     params["action"] = "navigate_back"
+                    params["target"] = "browser"
+                    return params
+
+                if re.search(r'\b(?:extract\s+(?:all\s+)?(?:the\s+)?(?:available\s+)?links(?:\s+from\s+(?:the\s+|this\s+)?(?:web\s+)?page)?|extract\s+(?:all\s+)?(?:the\s+)?(?:available\s+)?links)\b', clean_text_no_polite):
+                    params["action"] = "extract_links"
+                    params["target"] = "browser"
+                    return params
+                elif re.search(r'\b(?:extract\s+(?:all\s+)?(?:the\s+)?(?:available\s+)?tables?(?:\s+from\s+(?:the\s+|this\s+)?(?:web\s+)?page)?|extract\s+tables?)\b', clean_text_no_polite):
+                    params["action"] = "extract_tables"
+                    params["target"] = "browser"
+                    return params
+                elif re.search(r'\b(?:how\s+many\s+links(?:\s+(?:did\s+you\s+find|were\s+found|are\s+there|did\s+we\s+get|extracted))?)\b', clean_text_no_polite):
+                    params["action"] = "count_links"
+                    params["target"] = "browser"
+                    return params
+                elif re.search(r'\b(?:show|display|what(?:\'s|\s+is))\s+(?:me\s+)?(?:the\s+)?(?:(\d+)(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+link\b', clean_text_no_polite):
+                    m_l = re.search(r'\b(?:show|display|what(?:\'s|\s+is))\s+(?:me\s+)?(?:the\s+)?(?:(\d+)(?:st|nd|rd|th)|(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth))\s+link\b', clean_text_no_polite)
+                    params["action"] = "get_link"
+                    params["ordinal"] = (m_l.group(1) or m_l.group(2)) if m_l else "1"
+                    params["target"] = "browser"
+                    return params
+                elif re.search(r'\b(?:open)\s+(?:the\s+)?(?:(\d+)(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:one|link)\b', clean_text_no_polite):
+                    m_lo = re.search(r'\b(?:open)\s+(?:the\s+)?(?:(\d+)(?:st|nd|rd|th)|(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth))\s+(?:one|link)\b', clean_text_no_polite)
+                    params["action"] = "open_link"
+                    params["ordinal"] = (m_lo.group(1) or m_lo.group(2)) if m_lo else "1"
+                    params["target"] = "browser"
+                    return params
+                elif re.search(r'\b(?:show|display|get)\s+(?:me\s+)?(?:the\s+)?first\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+rows?(?:\s+of\s+(?:the\s+)?table)?\b', clean_text_no_polite):
+                    m_tr = re.search(r'\b(?:show|display|get)\s+(?:me\s+)?(?:the\s+)?first\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+rows?(?:\s+of\s+(?:the\s+)?table)?\b', clean_text_no_polite)
+                    params["action"] = "get_table_rows"
+                    params["count_str"] = m_tr.group(1) if m_tr else "5"
+                    params["target"] = "browser"
+                    return params
+                elif re.search(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?value\s+(?:in|of)\s+(?:the\s+)?|show\s+(?:me\s+)?(?:the\s+)?)(?:(\d+)(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+row\b', clean_text_no_polite):
+                    m_rw = re.search(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?value\s+(?:in|of)\s+(?:the\s+)?|show\s+(?:me\s+)?(?:the\s+)?)(?:(\d+)(?:st|nd|rd|th)|(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth))\s+row\b', clean_text_no_polite)
+                    params["action"] = "get_table_row"
+                    params["ordinal"] = (m_rw.group(1) or m_rw.group(2)) if m_rw else "1"
+                    params["target"] = "browser"
+                    return params
+                elif any(k in clean_text_no_polite for k in ["find flights", "search flights", "flights from", "flight from", "what about flights"]):
+                    params["action"] = "search_flights"
                     params["target"] = "browser"
                     return params
 
@@ -850,9 +1048,17 @@ class UnifiedCommandRouter:
                 elif any(k in text_low for k in ["list all processes", "show all processes", "all running processes", "all processes"]):
                     params["action"] = "list_processes"
                     params["sort_by"] = "cpu" if "cpu" in text_low else "memory"
-                elif any(k in text_low for k in ["top processes", "running processes", "cpu usage", "ram usage", "memory usage"]):
+                elif any(k in text_low for k in ["top processes", "running processes"]):
                     params["action"] = "top_processes"
                     params["sort_by"] = "cpu" if "cpu" in text_low else "memory"
+                elif ("cpu" in text_low and "ram" in text_low and "gpu" in text_low) or any(k in text_low for k in ["system usage", "system telemetry", "hardware telemetry", "show system usage", "check system usage"]):
+                    params["action"] = "system_telemetry_summary"
+                elif any(k in text_low for k in ["gpu telemetry", "gpu stats", "gpu usage", "gpu memory", "gpu metrics", "gpu temp", "check gpu", "check my gpu", "vram usage", "how much gpu", "gpu memory am i using", "how much gpu memory am i using"]):
+                    params["action"] = "gpu_telemetry"
+                elif any(k in text_low for k in ["cpu metrics", "cpu utilization", "per core cpu", "core usage", "check cpu", "check my cpu", "cpu usage", "how much cpu", "what is my cpu", "what's my cpu", "my cpu", "can i check my cpu"]):
+                    params["action"] = "cpu_metrics"
+                elif any(k in text_low for k in ["ram metrics", "ram usage", "memory utilization", "check ram", "check my ram", "how much ram", "what is my ram", "what's my ram", "ram is free", "memory is free", "my ram"]):
+                    params["action"] = "ram_metrics"
                 elif any(k in text_low for k in ["minimize all", "minimize windows", "show desktop"]):
                     params["action"] = "minimize_all"
                 elif "clipboard" in text_low:
@@ -869,12 +1075,14 @@ class UnifiedCommandRouter:
                         params["clipboard_op"] = "count_words"
                     elif any(k in text_low for k in ["trim", "strip"]):
                         params["clipboard_op"] = "strip"
-                elif any(k in text_low for k in ["cpu metrics", "cpu utilization", "per core cpu", "core usage"]):
-                    params["action"] = "cpu_metrics"
-                elif any(k in text_low for k in ["ram metrics", "ram usage", "memory utilization"]):
-                    params["action"] = "ram_metrics"
                 elif any(k in text_low for k in ["system info", "system information", "os info", "device specs", "system specs"]):
                     params["action"] = "system_info"
+                # ── Set resolution (must be before display_info to catch 'set display resolution to ...') ────
+                elif re.search(r'\b(?:change|set)\s+(?:display\s+|screen\s+)?resolution\s+(?:to\s+)?(\d+)\s*[xX*]\s*(\d+)\b', text_low):
+                    m_res = re.search(r'\b(?:change|set)\s+(?:display\s+|screen\s+)?resolution\s+(?:to\s+)?(\d+)\s*[xX*]\s*(\d+)\b', user_input, re.IGNORECASE)
+                    params["action"] = "set_resolution"
+                    params["width"] = int(m_res.group(1)) if m_res else 1920
+                    params["height"] = int(m_res.group(2)) if m_res else 1080
                 elif any(k in text_low for k in ["display info", "display information", "screen info", "screen information", "monitor info", "monitor information", "monitor resolution", "screen resolution", "display resolution"]):
                     params["action"] = "display_info"
                 elif any(k in text_low for k in ["all disks", "all drives"]):
@@ -938,6 +1146,9 @@ class UnifiedCommandRouter:
                 # READ-only fallback: "what is caps lock", "caps lock status", etc.
                 elif any(k in text_low for k in ["caps lock", "num lock", "scroll lock", "keyboard lights", "keyboard toggle", "keyboard lock"]):
                     params["action"] = "keyboard_state"
+                # ── GPU telemetry ──────────────────────────────────────────────
+                elif any(k in text_low for k in ["gpu telemetry", "gpu usage", "gpu stats", "gpu temp", "gpu temperature", "check gpu"]):
+                    params["action"] = "gpu_telemetry"
                 # ── Hardware info ──────────────────────────────────────────────
                 elif any(k in text_low for k in ["hardware info", "hardware spec", "gpu", "graphics card", "cpu model", "processor model", "my processor", "hardware information", "device hardware"]):
                     params["action"] = "hardware_info"
@@ -956,12 +1167,51 @@ class UnifiedCommandRouter:
                 elif any(k in text_low for k in ["list all processes", "show all processes", "all running processes"]):
                     params["action"] = "list_processes"
                     params["sort_by"] = "cpu" if "cpu" in text_low else "memory"
+                # ── Dark mode / Theme ──────────────────────────────────────────
+                elif any(k in text_low for k in ["dark mode", "light mode", "toggle theme", "switch to dark", "switch to light"]):
+                    params["action"] = "toggle_dark_mode"
+                    if "enable" in text_low or "dark mode on" in text_low or "turn on dark" in text_low or "switch to dark" in text_low or "on dark mode" in text_low:
+                        params["enable"] = True
+                    elif "disable" in text_low or "dark mode off" in text_low or "turn off dark" in text_low or "switch to light" in text_low or "off dark mode" in text_low or "light mode on" in text_low:
+                        params["enable"] = False
+                    else:
+                        params["enable"] = None
+                # ── Wi-Fi connect ──────────────────────────────────────────────
+                elif re.search(r'\b(?:connect\s+to\s+(?:wifi|wi-fi|network)|join\s+(?:wifi|wi-fi))\s+(.+)\b', text_low):
+                    m_wf = re.search(r'\b(?:connect\s+to\s+(?:wifi|wi-fi|network)|join\s+(?:wifi|wi-fi))\s+(.+)\b', user_input, re.IGNORECASE)
+                    params["action"] = "connect_wifi"
+                    params["ssid"] = m_wf.group(1).strip() if m_wf else ""
+                # ── Set resolution ─────────────────────────────────────────────
+                elif re.search(r'\b(?:change|set)\s+(?:display\s+|screen\s+)?resolution\s+(?:to\s+)?(\d+)\s*[xX*]\s*(\d+)\b', text_low):
+                    m_res = re.search(r'\b(?:change|set)\s+(?:display\s+|screen\s+)?resolution\s+(?:to\s+)?(\d+)\s*[xX*]\s*(\d+)\b', user_input, re.IGNORECASE)
+                    params["action"] = "set_resolution"
+                    params["width"] = int(m_res.group(1)) if m_res else 1920
+                    params["height"] = int(m_res.group(2)) if m_res else 1080
+                # ── Wallpaper ──────────────────────────────────────────────────
+                elif re.search(r'\b(?:set|change)\s+(?:my\s+)?wallpaper\s+(?:to\s+)?(.+)\b', text_low):
+                    m_wp = re.search(r'\b(?:set|change)\s+(?:my\s+)?wallpaper\s+(?:to\s+)?(.+)\b', user_input, re.IGNORECASE)
+                    params["action"] = "set_wallpaper"
+                    params["wallpaper_path"] = m_wp.group(1).strip(' "\'') if m_wp else ""
+                elif "wallpaper" in text_low:
+                    params["action"] = "get_wallpaper"
+                # ── Desktop statistics ─────────────────────────────────────────
+                elif any(k in text_low for k in ["desktop stats", "desktop statistics", "desktop summary", "analyze desktop", "analyze my desktop"]):
+                    params["action"] = "desktop_stats"
+
                 else:
                     g = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group(0)
                     params["action"] = g.strip().lower()
             elif intent == Intent.FILE_OPERATIONS:
                 text_low = user_input.lower()
-                if "duplicate" in text_low:
+                clean_f_low = re.sub(r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|nova|trevon|jarvis|assistant|computer)[,\s:]*', '', text_low).strip()
+                clean_f_no_polite = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+)+', '', clean_f_low).strip()
+                if any(k in clean_f_no_polite for k in ["profile file", "inspect file", "file profile", "analyze file", "analyse file", "inspect data", "inspect csv", "inspect excel", "inspect json", "inspect pptx", "profile json", "profile csv", "profile pdf", "profile pptx", "profile code", "profile this file", "analyse that ppt", "analyze that ppt", "analyse ppt", "analyze ppt", "analyse that presentation", "analyze that presentation", "analyse this", "analyze this", "profile this"]):
+                    params["action"] = "profile_file"
+                    m_pf = re.search(r'\b(?:profile|inspect|analyze|analyse)\s+(?:(?:the|my|that|this)\s+)?(?:[a-zA-Z0-9_\-]+\s+)?(?:file|data|csv|excel|json|pptx|ppt|presentation|document|pdf)?(?:\s+(.+))?\b', user_input, re.IGNORECASE)
+                    if not m_pf or not m_pf.group(1):
+                        m_pf = re.search(r'\b(?:profile\s+file|inspect\s+file|file\s+profile|analyze\s+file|analyse\s+file|inspect\s+(?:data|csv|excel|json|pptx|ppt))\s+(.+)\b', user_input, re.IGNORECASE)
+                    params["target"] = m_pf.group(1).strip(' "\'') if (m_pf and m_pf.group(1)) else ("that ppt" if ("ppt" in text_low or "presentation" in text_low) else "")
+                elif "duplicate" in text_low:
                     params["action"] = "find_duplicates"
                     params["location"] = "downloads" if "download" in text_low else ("documents" if "document" in text_low else "desktop")
                 elif any(k in text_low for k in ["statistic", "stats for", "how many files in", "how many files are in"]):
@@ -970,24 +1220,24 @@ class UnifiedCommandRouter:
                 elif any(k in text_low for k in ["largest file", "biggest file"]):
                     params["action"] = "largest_files"
                     params["location"] = "downloads" if "download" in text_low else ("documents" if "document" in text_low else "desktop")
-                elif re.search(r'\b(?:how\s+many\s+pages\s+(?:are\s+)?in|information\s+about\s+.*\.pdf|pdf\s+info)\b', text_low):
+                elif re.search(r'\b(?:how\s+many\s+pages\s+(?:are\s+)?in|(?:show\s+(?:me\s+)?)?(?:information|info)\s+about\s+(?:this\s+|the\s+)?pdf|pdf\s+info)\b', text_low):
                     params["action"] = "pdf_info"
                     m = re.search(r'([\w\-.]+\.pdf)', user_input, re.IGNORECASE)
-                    params["target"] = m.group(1) if m else ""
-                elif re.search(r'\bsplit\s+(?:the\s+)?([\w\-.]+\.pdf)', text_low):
+                    params["target"] = m.group(1) if m else "this pdf"
+                elif re.search(r'\bsplit\s+(?:this\s+|the\s+)?(?:([\w\-.]+\.pdf)|pdf)\b', text_low):
                     params["action"] = "split_pdf"
                     m = re.search(r'([\w\-.]+\.pdf)', user_input, re.IGNORECASE)
-                    params["target"] = m.group(1) if m else ""
+                    params["target"] = m.group(1) if m else "this pdf"
                     m_p = re.search(r'from\s+page\s+(\d+)\s+to\s+(?:page\s+)?(\d+)', text_low)
                     params["start_page"] = int(m_p.group(1)) if m_p else 1
                     params["end_page"] = int(m_p.group(2)) if m_p else 2
-                elif re.search(r'\bmerge\s+(?:these\s+)?pdfs?\b', text_low):
+                elif re.search(r'\bmerge\s+(?:these\s+|the\s+)?pdfs?\b', text_low):
                     params["action"] = "merge_pdfs"
-                elif re.search(r'\bextract\s+(?:the\s+)?text\s+from\s+([\w\-.]+\.pdf)', text_low):
+                elif re.search(r'\bextract\s+(?:the\s+)?text\s+from\s+(?:this\s+|the\s+)?(?:([\w\-.]+\.pdf)|pdf)\b', text_low):
                     params["action"] = "extract_pdf_text"
                     m = re.search(r'([\w\-.]+\.pdf)', user_input, re.IGNORECASE)
-                    params["target"] = m.group(1) if m else ""
-                elif re.search(r'\b(?:find\s+all|search\s+(?:for\s+)?files?|files?\s+larger\s+than|files?\s+modified)\b', text_low):
+                    params["target"] = m.group(1) if m else "this pdf"
+                elif re.search(r'\b(?:find\s+all|search\s+(?:for\s+)?(?:[a-zA-Z0-9_\-*\.]+\s+)?(?:files?|documents?)|search\s+(?:for\s+)?(?:.+?\s+)?(?:files?|documents?)\s+(?:in|under)\s+.+|(?:files?|documents?)\s+larger\s+than|(?:files?|documents?)\s+modified)\b', text_low):
                     params["action"] = "search_files"
                     params["location"] = "downloads" if "download" in text_low else ("documents" if "document" in text_low else "desktop")
                     if "pdf" in text_low:
@@ -1002,6 +1252,11 @@ class UnifiedCommandRouter:
                     elif "xlsx" in text_low or "excel" in text_low:
                         params["pattern"] = "*.xlsx"
                         params["ext"] = "xlsx"
+                    elif "python" in text_low or "py" in text_low:
+                        params["pattern"] = "*.py"
+                        params["ext"] = "py"
+                    elif "document" in text_low or "docs" in text_low:
+                        params["pattern"] = "*.*"
                     m_sz = re.search(r'larger\s+than\s+(\d+)\s*(?:mb|megabytes)?', text_low)
                     if m_sz: params["min_size_mb"] = float(m_sz.group(1))
                     m_days = re.search(r'(?:modified|changed)\s+(?:in\s+the\s+last|within)\s+(\d+)\s+days?', text_low)
@@ -1089,7 +1344,7 @@ class UnifiedCommandRouter:
                     params["doc_type"] = "pdf"
                 elif any(k in text_low for k in ["excel", "spreadsheet", "xlsx"]):
                     params["doc_type"] = "xlsx"
-                elif any(k in text_low for k in ["powerpoint", "presentation", "slides", "pptx"]):
+                elif any(k in text_low for k in ["powerpoint", "presentation", "slides", "pptx", "ppt"]):
                     params["doc_type"] = "pptx"
                 else:
                     params["doc_type"] = "docx"
@@ -1113,19 +1368,27 @@ class UnifiedCommandRouter:
                     params["action"] = "generate_code"
             elif intent == Intent.DAILY_BRIEFING:
                 text_low = user_input.lower()
-                # Route to calendar_query when creation/event/meeting/appointment keywords present.
-                # This ensures "add a meeting tomorrow" reaches process_calendar_query,
-                # not the daily-briefing summary handler.
-                _calendar_keywords = [
-                    "calendar", "event", "events", "meeting", "appointment",
-                    "schedule", "create", "add",
+                _sched_keywords = [
+                    "what do i have", "what's on my schedule", "whats on my schedule",
+                    "what is on my schedule", "what's planned", "whats planned", "what is planned",
+                    "what do i need to do", "what do i have to do", "schedule today", "schedule tomorrow"
                 ]
-                _creation_verbs = ("create", "schedule", "add", "put", "book", "set up")
-                _is_creation = any(text_low.startswith(v) or (" " + v + " ") in text_low for v in _creation_verbs)
-                if any(k in text_low for k in _calendar_keywords) or _is_creation:
-                    params["action"] = "calendar_query"
+                if any(k in text_low for k in _sched_keywords):
+                    params["action"] = "personal_schedule"
                 else:
-                    params["action"] = "daily_briefing"
+                    # Route to calendar_query when creation/event/meeting/appointment keywords present.
+                    # This ensures "add a meeting tomorrow" reaches process_calendar_query,
+                    # not the daily-briefing summary handler.
+                    _calendar_keywords = [
+                        "calendar", "event", "events", "meeting", "appointment",
+                        "schedule", "create", "add",
+                    ]
+                    _creation_verbs = ("create", "schedule", "add", "put", "book", "set up")
+                    _is_creation = any(text_low.startswith(v) or (" " + v + " ") in text_low for v in _creation_verbs)
+                    if any(k in text_low for k in _calendar_keywords) or _is_creation:
+                        params["action"] = "calendar_query"
+                    else:
+                        params["action"] = "daily_briefing"
             elif intent == Intent.WEATHER_QUERY:
                 from extensions.weather_engine import _default_weather_engine
                 extracted_loc = _default_weather_engine.extract_location(user_input)
@@ -1195,6 +1458,70 @@ class UnifiedCommandRouter:
                 clean_query = re.sub(r'^(?:an?|some)\s+', '', clean_query, flags=re.IGNORECASE).strip()
                 params["action"] = "recommend"
                 params["query"] = clean_query if clean_query else user_input
+            elif intent == Intent.VISUAL_SURFACE:
+                text_low = user_input.lower().strip()
+                params["action"] = "show_visual_response"
+                if "box" in text_low and "number" in text_low:
+                    params["target_type"] = "NUMBERS_BOX"
+                elif "number" in text_low:
+                    params["target_type"] = "NUMBERS"
+                elif "pairing" in text_low or "code" in text_low:
+                    params["target_type"] = "PAIRING_CODE"
+                elif "ip" in text_low or "address" in text_low:
+                    params["target_type"] = "IP_ADDRESS"
+                elif "url" in text_low or "link" in text_low:
+                    params["target_type"] = "URL"
+                elif "file" in text_low or "path" in text_low:
+                    params["target_type"] = "FILE_PATH"
+                elif "list" in text_low or "devices" in text_low:
+                    params["target_type"] = "LIST"
+                elif "device" in text_low:
+                    params["target_type"] = "DEVICE_INFO"
+                elif any(k in text_low for k in ["again", "back", "previous", "what you just"]):
+                    params["target_type"] = "AGAIN"
+            elif intent == Intent.TIME_QUERY:
+                text_low = user_input.lower().strip()
+                if "alarm" in text_low or "wake me up" in text_low:
+                    if any(k in text_low for k in ["show", "list", "check", "what", "view", "get"]):
+                        params["action"] = "list_alarms"
+                    elif any(k in text_low for k in ["cancel", "delete", "remove", "turn off", "stop", "dismiss"]):
+                        params["action"] = "cancel_alarm"
+                    elif "snooze" in text_low:
+                        params["action"] = "snooze_alarm"
+                        m_m = re.search(r'(\d+)\s*min', text_low)
+                        params["duration_minutes"] = int(m_m.group(1)) if m_m else 5
+                    else:
+                        params["action"] = "set_alarm"
+                        params["time_text"] = user_input
+                elif "timer" in text_low:
+                    if any(k in text_low for k in ["show", "list", "check", "how much time", "remaining", "status"]):
+                        params["action"] = "list_timers"
+                    elif any(k in text_low for k in ["cancel", "stop", "reset", "delete"]):
+                        params["action"] = "cancel_timer"
+                    else:
+                        params["action"] = "set_timer"
+                        params["duration"] = user_input
+                elif "stopwatch" in text_low:
+                    if any(k in text_low for k in ["start", "begin", "run", "resume"]):
+                        params["action"] = "stopwatch_start"
+                    elif any(k in text_low for k in ["stop", "pause", "halt"]):
+                        params["action"] = "stopwatch_stop"
+                    elif "reset" in text_low:
+                        params["action"] = "stopwatch_reset"
+                    elif any(k in text_low for k in ["lap", "split"]):
+                        params["action"] = "stopwatch_lap"
+                    else:
+                        params["action"] = "stopwatch_status"
+                elif any(k in text_low for k in ["time in", "time at", "time of", "in tokyo", "in london", "in new york", "in paris", "in sydney", "in dubai"]):
+                    params["action"] = "world_time"
+                    m = re.search(r'\b(?:in|at|for|of)\s+([a-zA-Z\s]+?)(?:\s+right\s+now|\s+today|\s+currently|\?|$)', user_input, re.IGNORECASE)
+                    params["location"] = m.group(1).strip() if m else ""
+                elif any(k in text_low for k in ["what date", "what is the date", "today's date", "todays date", "what day is it", "what day is today"]):
+                    params["action"] = "date_query"
+                else:
+                    params["action"] = "time_query"
+            elif intent == Intent.DATE_QUERY:
+                params["action"] = "date_query"
         except IndexError:
             params["action"] = match.group(0).strip().lower() if match.lastindex else ""
         return params
@@ -1310,6 +1637,16 @@ class UnifiedCommandRouter:
         if resolved_intent is None:
             self.logger.warning(f"[SEMANTIC] Unknown label '{intent_label}' — falling through.")
             return Intent.GENERAL_CONVERSATION, {}
+
+        # Override CALCULATOR if the utterance is asking to show/generate/list numbers
+        if resolved_intent == Intent.CALCULATOR:
+            u_low = user_input.lower()
+            if any(k in u_low for k in ["random", "numbers from", "numbers between", "show me", "give me", "generate", "list of numbers", "numbers in reverse", "in reverse order", "in a box", "numbers", "number"]):
+                if not any(k in u_low for k in ["calculate", "times", "divided", "plus", "minus", "+", "-", "*", "/", "%", "percent", "squared", "cubed", "sqrt", "power", "math"]):
+                    self.logger.info(f"[SEMANTIC] Overriding CALCULATOR -> VISUAL_SURFACE for number generation request")
+                    resolved_intent = Intent.VISUAL_SURFACE
+                    params = {"action": "show_visual_response", "target_type": "NUMBERS", "raw_input": user_input}
+                    return resolved_intent, params
 
         # ── Build params dict from semantic entities ─────────────────────────
         params = self._params_from_semantic(
@@ -1517,6 +1854,8 @@ class UnifiedCommandRouter:
                     "handled": True
                 }
 
+            from instance.config import settings
+            effective_uid = user_id or getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user() or 1
             result = {"status": "success", "intent": intent.name}
             
             # 1. POWER ACTION
@@ -1629,14 +1968,30 @@ class UnifiedCommandRouter:
                             result["status"] = "success" if clip_res.get("success", True) else "error"
                             result["response"] = clip_res.get("message", "Checked clipboard.")
                             result.update(clip_res)
+                    elif action == "system_telemetry_summary":
+                        from modules.system_controller import get_system_telemetry_summary
+                        st_res = get_system_telemetry_summary()
+                        result["status"] = "success"
+                        result["response"] = st_res.get("message", "System telemetry checked.")
+                        result.update(st_res)
+                    elif action == "gpu_telemetry":
+                        from modules.system_controller import get_gpu_telemetry
+                        g_res = get_gpu_telemetry()
+                        result["status"] = "success"
+                        result["response"] = g_res.get("message", "GPU telemetry checked.")
+                        result.update(g_res)
                     elif action == "cpu_metrics":
                         from modules.system_controller import get_cpu_metrics
                         c_res = get_cpu_metrics()
+                        result["status"] = "success"
                         result["response"] = c_res.get("message", "CPU metrics checked.")
+                        result.update(c_res)
                     elif action == "ram_metrics":
                         from modules.system_controller import get_ram_metrics
                         r_res = get_ram_metrics()
+                        result["status"] = "success"
                         result["response"] = r_res.get("message", "RAM metrics checked.")
+                        result.update(r_res)
                     elif action == "system_info":
                         from modules.system_controller import get_system_info
                         s_res = get_system_info()
@@ -1785,6 +2140,58 @@ class UnifiedCommandRouter:
                         lp = list_all_processes(sort_by=sort_by)
                         result["response"] = lp.get("message", "Processes listed.")
                         result.update(lp)
+                    # ── Dark mode / theme ─────────────────────────────────────────
+                    elif action == "toggle_dark_mode":
+                        from modules.system_controller import toggle_dark_mode
+                        dm_res = toggle_dark_mode(enable=params.get("enable"))
+                        result["status"] = "success" if dm_res.get("success") else "error"
+                        result["response"] = dm_res.get("message", "Appearance theme updated.")
+                        result.update(dm_res)
+                    # ── Connect Wi-Fi ─────────────────────────────────────────────
+                    elif action == "connect_wifi":
+                        from modules.system_controller import connect_to_wifi
+                        ssid = params.get("ssid", "")
+                        wf_res = connect_to_wifi(ssid)
+                        result["status"] = "success" if wf_res.get("success") else "error"
+                        result["response"] = wf_res.get("message", f"Connecting to Wi-Fi '{ssid}'.")
+                        result.update(wf_res)
+                    # ── Set display resolution ────────────────────────────────────
+                    elif action == "set_resolution":
+                        from modules.system_controller import set_display_resolution
+                        w = params.get("width", 1920)
+                        h = params.get("height", 1080)
+                        sr_res = set_display_resolution(w, h)
+                        result["status"] = "success" if sr_res.get("success") else "error"
+                        result["response"] = sr_res.get("message", f"Resolution set to {w}x{h}.")
+                        result.update(sr_res)
+                    # ── Desktop wallpaper ──────────────────────────────────────────
+                    elif action == "get_wallpaper":
+                        from modules.system_controller import get_current_wallpaper
+                        wp_res = get_current_wallpaper()
+                        result["status"] = "success" if wp_res.get("success") else "error"
+                        result["response"] = wp_res.get("message", "Checked current wallpaper.")
+                        result.update(wp_res)
+                    elif action == "set_wallpaper":
+                        from modules.system_controller import set_wallpaper
+                        wp_path = params.get("wallpaper_path", "")
+                        wp_res = set_wallpaper(wp_path)
+                        result["status"] = "success" if wp_res.get("success") else "error"
+                        result["response"] = wp_res.get("message", f"Setting wallpaper to {wp_path}.")
+                        result.update(wp_res)
+                    # ── Desktop statistics ─────────────────────────────────────────
+                    elif action == "desktop_stats":
+                        from modules.system_controller import get_desktop_statistics
+                        ds_res = get_desktop_statistics()
+                        result["status"] = "success" if ds_res.get("success") else "error"
+                        result["response"] = ds_res.get("message", "Analyzed desktop.")
+                        result.update(ds_res)
+                    # ── GPU telemetry ──────────────────────────────────────────────
+                    elif action == "gpu_telemetry":
+                        from modules.system_controller import get_gpu_telemetry
+                        gpu_res = get_gpu_telemetry()
+                        result["status"] = "success" if gpu_res.get("success") else "error"
+                        result["response"] = gpu_res.get("message", "Checked GPU telemetry.")
+                        result.update(gpu_res)
                     else:
                         result["status"] = "error"
                         result["response"] = f"Unrecognized device control command: '{user_input}'. Could not execute."
@@ -1803,8 +2210,247 @@ class UnifiedCommandRouter:
                         result["action"] = "navigate_back"
                         result["response"] = "Navigated back."
                         return result
+                    if action == "extract_links":
+                        from modules.browser.browser_controller import extract_page_links
+                        m_u = re.search(r'https?://[^\s]+', user_input)
+                        target_url = m_u.group(0) if m_u else "https://en.wikipedia.org"
+                        link_res = extract_page_links(target_url)
+                        result["status"] = "success" if link_res.get("success") else "error"
+                        links = link_res.get("links", [])
+                        cnt = link_res.get("count", len(links))
+                        result["status"] = "success"
+                        result["count"] = cnt
+                        result["links"] = links
+                        result["response"] = link_res.get("message", f"Extracted {cnt} links.")
+                        result.update(link_res)
+                        try:
+                            from extensions.context_manager import get_manager, ContextType
+                            get_manager().active_context["last_extracted_links"] = links
+                            get_manager().set_active_context(ContextType.BROWSER, "page", metadata={"links": links, "link_count": cnt, "url": target_url})
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            dm = get_dialogue_manager(str(effective_uid))
+                            dm.current_state.session_context["last_extracted_links"] = links
+                            dm.current_state.session_context["last_extracted_page_url"] = target_url
+                        except Exception:
+                            pass
+                        return result
+                    if action == "extract_tables":
+                        from modules.browser.browser_controller import extract_page_tables
+                        m_u = re.search(r'https?://[^\s]+', user_input)
+                        target_url = m_u.group(0) if m_u else "https://en.wikipedia.org"
+                        tab_res = extract_page_tables(target_url)
+                        result["status"] = "success" if tab_res.get("success") else "error"
+                        tables = tab_res.get("tables", [])
+                        result["status"] = "success"
+                        result["table_count"] = len(tables)
+                        result["tables"] = tables
+                        result["response"] = tab_res.get("message", f"Extracted {len(tables)} tables.")
+                        result.update(tab_res)
+                        try:
+                            from extensions.context_manager import get_manager, ContextType
+                            get_manager().active_context["last_extracted_tables"] = tables
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            dm = get_dialogue_manager(str(effective_uid))
+                            dm.current_state.session_context["last_extracted_tables"] = tables
+                            dm.current_state.session_context["last_extracted_page_url"] = target_url
+                        except Exception:
+                            pass
+                        return result
+                    if action == "count_links":
+                        links = []
+                        try:
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            dm = get_dialogue_manager(str(effective_uid))
+                            links = dm.current_state.session_context.get("last_extracted_links", [])
+                        except Exception:
+                            pass
+                        if not links:
+                            try:
+                                from extensions.context_manager import get_manager
+                                links = get_manager().active_context.get("last_extracted_links", [])
+                            except Exception:
+                                pass
+                        cnt = len(links)
+                        result["status"] = "success"
+                        result["count"] = cnt
+                        result["response"] = f"I found {cnt} links on the page." if cnt > 0 else "I don't have any extracted links in context."
+                        return result
+                    if action == "get_link":
+                        links = []
+                        try:
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            dm = get_dialogue_manager(str(effective_uid))
+                            links = dm.current_state.session_context.get("last_extracted_links", [])
+                        except Exception:
+                            pass
+                        if not links:
+                            try:
+                                from extensions.context_manager import get_manager
+                                links = get_manager().active_context.get("last_extracted_links", [])
+                            except Exception:
+                                pass
+                        ord_map = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10}
+                        ord_raw = str(params.get("ordinal", "1")).lower()
+                        idx_num = ord_map.get(ord_raw) or (int(re.sub(r'\D', '', ord_raw)) if re.sub(r'\D', '', ord_raw) else 1)
+                        zero_idx = idx_num - 1
+                        if 0 <= zero_idx < len(links):
+                            lk = links[zero_idx]
+                            result["status"] = "success"
+                            result["link"] = lk
+                            result["response"] = f"Link {idx_num} is '{lk.get('text')}' pointing to {lk.get('url')}."
+                        else:
+                            result["status"] = "error"
+                            result["response"] = f"Link {idx_num} is unavailable. Only {len(links)} links were found."
+                        return result
+                    if action == "open_link":
+                        links = []
+                        try:
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            dm = get_dialogue_manager(str(effective_uid))
+                            links = dm.current_state.session_context.get("last_extracted_links", [])
+                        except Exception:
+                            pass
+                        if not links:
+                            try:
+                                from extensions.context_manager import get_manager
+                                links = get_manager().active_context.get("last_extracted_links", [])
+                            except Exception:
+                                pass
+                        ord_map = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10}
+                        ord_raw = str(params.get("ordinal", "1")).lower()
+                        idx_num = ord_map.get(ord_raw) or (int(re.sub(r'\D', '', ord_raw)) if re.sub(r'\D', '', ord_raw) else 1)
+                        zero_idx = idx_num - 1
+                        if 0 <= zero_idx < len(links):
+                            lk = links[zero_idx]
+                            url = lk.get("url")
+                            from modules.browser.browser_controller import open_url
+                            open_url(url)
+                            result["status"] = "success"
+                            result["url"] = url
+                            result["response"] = f"Opening link {idx_num}: {url}."
+                        else:
+                            result["status"] = "error"
+                            result["response"] = f"Link {idx_num} is unavailable. Only {len(links)} links were found."
+                        return result
+                    if action == "get_table_rows":
+                        tables = []
+                        try:
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            dm = get_dialogue_manager(str(effective_uid))
+                            tables = dm.current_state.session_context.get("last_extracted_tables", [])
+                        except Exception:
+                            pass
+                        if not tables:
+                            try:
+                                from extensions.context_manager import get_manager
+                                tables = get_manager().active_context.get("last_extracted_tables", [])
+                            except Exception:
+                                pass
+                        num_map = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+                        raw_c = str(params.get("count_str", "5")).lower()
+                        n_rows = num_map.get(raw_c) or (int(re.sub(r'\D', '', raw_c)) if re.sub(r'\D', '', raw_c) else 5)
+                        if tables and len(tables) > 0:
+                            tb = tables[0]
+                            selected = tb[:n_rows]
+                            formatted = "\n".join([" | ".join(r) for r in selected])
+                            result["status"] = "success"
+                            result["rows"] = selected
+                            result["response"] = f"Here are the first {len(selected)} rows:\n{formatted}"
+                        else:
+                            result["status"] = "error"
+                            result["response"] = "No extracted table found in context."
+                        return result
+                    if action == "get_table_row":
+                        tables = []
+                        try:
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            dm = get_dialogue_manager(str(effective_uid))
+                            tables = dm.current_state.session_context.get("last_extracted_tables", [])
+                        except Exception:
+                            pass
+                        if not tables:
+                            try:
+                                from extensions.context_manager import get_manager
+                                tables = get_manager().active_context.get("last_extracted_tables", [])
+                            except Exception:
+                                pass
+                        ord_map = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10}
+                        ord_raw = str(params.get("ordinal", "1")).lower()
+                        idx_num = ord_map.get(ord_raw) or (int(re.sub(r'\D', '', ord_raw)) if re.sub(r'\D', '', ord_raw) else 1)
+                        zero_idx = idx_num - 1
+                        if tables and len(tables) > 0 and 0 <= zero_idx < len(tables[0]):
+                            row = tables[0][zero_idx]
+                            result["status"] = "success"
+                            result["row"] = row
+                            result["response"] = f"The value in row {idx_num} is: {' | '.join(row)}."
+                        else:
+                            result["status"] = "error"
+                            result["response"] = f"Row {idx_num} is unavailable in table context."
+                        return result
+                    if action == "search_flights":
+                        from modules.browser.browser_controller import build_flight_search_url
+                        if "express" in user_input.lower():
+                            result["status"] = "clarification_needed"
+                            result["response"] = "Do you mean Air India Express, or flights from Hyderabad to Mumbai?"
+                            result["handled"] = True
+                            return result
+
+                        m_o = re.search(r'from\s+([A-Z]{3}|[a-zA-Z\s]+?)\s+to\s+([A-Z]{3}|[a-zA-Z\s]+?)(?:\s+(?:on|tomorrow|next|for)|\s*$)', user_input, re.IGNORECASE)
+                        origin = m_o.group(1).strip() if m_o else "Hyderabad"
+                        dest = m_o.group(2).strip() if m_o else "Delhi"
+                        m_d = re.search(r'(\d{4}-\d{2}-\d{2})', user_input)
+                        date_str = m_d.group(1) if m_d else None
+                        if "tomorrow" in user_input.lower() and not date_str:
+                            from datetime import date, timedelta
+                            date_str = str(date.today() + timedelta(days=1))
+                        f_res = build_flight_search_url(origin=origin, destination=dest, departure_date=date_str)
+                        result["status"] = "success" if f_res.get("success") else "error"
+                        result["response"] = f_res.get("message", "Generated flight search URL.")
+                        result.update(f_res)
+                        try:
+                            from extensions.context_manager import get_manager
+                            get_manager().add_user_artifact(user_id=effective_uid, artifact={
+                                "path": f_res["url"],
+                                "filepath": f_res["url"],
+                                "type": "flight_search",
+                                "filename": f"Flight Search {origin} to {dest}",
+                                "source_action": "flight_search",
+                                "url": f_res["url"]
+                            })
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            dm = get_dialogue_manager(str(effective_uid))
+                            dm.current_state.session_context["last_flight_search"] = f_res
+                        except Exception:
+                            pass
+                        return result
                     if action == "open":
-                        clean_target = target.lower().strip()
+                        clean_target = target.lower().strip().rstrip('.?!')
+                        # Check for flight search reference first
+                        if clean_target in ("the flight search", "that flight search", "the flight results", "that flight results", "flight search", "the flights", "that flights") or (clean_target in ("it", "that") and any(a.get("type") == "flight_search" for a in (get_manager().get_user_artifacts(user_id=effective_uid) if 'get_manager' in locals() else []))):
+                            from extensions.context_manager import get_manager
+                            flight_url = None
+                            art = get_manager().get_last_user_artifact(user_id=effective_uid, artifact_type="flight_search")
+                            if art and (art.get("path") or art.get("url")):
+                                flight_url = art.get("path") or art.get("url")
+                            if not flight_url:
+                                try:
+                                    from extensions.dialogue_state_manager import get_dialogue_manager
+                                    dm = get_dialogue_manager(str(effective_uid))
+                                    last_f = dm.current_state.session_context.get("last_flight_search")
+                                    if last_f and isinstance(last_f, dict) and last_f.get("url"):
+                                        flight_url = last_f["url"]
+                                except Exception:
+                                    pass
+                            if flight_url:
+                                from modules.browser.browser_controller import open_url
+                                from legacy.tts import speak
+                                open_url(flight_url)
+                                result["status"] = "success"
+                                result["url"] = flight_url
+                                result["response"] = f"Opened flight search: {flight_url}"
+                                speak("Opened your flight search.")
+                                return result
+
                         if clean_target in ["dashboard", "my dashboard", "the dashboard", "assistant dashboard", "ui dashboard"] or "dashboard" in clean_target:
                             from core.assistant_core import assistant_core
                             from legacy.tts import speak
@@ -1854,6 +2500,29 @@ class UnifiedCommandRouter:
                                 result["response"] = msg
                                 speak(msg)
                         else:
+                            # Check if target is a direct file path, 'file <path>', or conversational reference
+                            clean_path = target.strip().rstrip('.?!')
+                            if clean_path.lower().startswith("file "):
+                                clean_path = clean_path[5:].strip().rstrip('.?!')
+
+                            if clean_path.lower() in ("it", "that", "that file", "the file", "the document", "the presentation", "the sheet", "that presentation", "this document", "that ppt", "the ppt"):
+                                from extensions.context_manager import get_manager
+                                art = get_manager().get_last_user_artifact(user_id=effective_uid)
+                                if art and art.get("path") and os.path.exists(art["path"]):
+                                    clean_path = art["path"]
+
+                            if os.path.exists(clean_path) and os.path.isfile(clean_path):
+                                from modules.system_controller.file_manager import open_file
+                                from legacy.tts import speak
+                                open_file(clean_path)
+                                f_name = os.path.basename(clean_path)
+                                result["status"] = "success"
+                                result["target"] = f_name
+                                result["filepath"] = clean_path
+                                result["response"] = f"Opened file '{f_name}'."
+                                speak(result["response"])
+                                return result
+
                             # Universal path: smart_opener handles .exe, .lnk, Store, URI
                             from extensions.system.smart_opener import smart_opener
                             from legacy.tts import speak
@@ -1916,6 +2585,15 @@ class UnifiedCommandRouter:
                                             result["response"] = f"I found {len(found_files)} presentation files: '{f0_name}' and '{f1_name}'. Which one should I open?"
                                             speak(result["response"])
                                         return result
+
+                                from modules.system_controller.app_launcher import launch_game
+                                g_res = launch_game(target)
+                                if g_res.get("success"):
+                                    result["status"] = "success"
+                                    result["target"] = target
+                                    result["response"] = g_res.get("message", f"Launching '{target}'.")
+                                    speak(result["response"])
+                                    return result
 
                                 msg = (open_dict.get("message") if isinstance(open_dict, dict) else None) \
                                       or f"Could not find '{target}' on your system."
@@ -2113,13 +2791,18 @@ class UnifiedCommandRouter:
                     elif action == "pdf_info":
                         from modules.document_tools import get_pdf_info
                         from modules.system_controller.file_manager import find_file_in_desktop
+                        from extensions.context_manager import get_manager
                         from pathlib import Path
-                        tf = params.get("target", "")
+                        tf = params.get("target", "").strip()
+                        if not tf or tf.lower() in ("this pdf", "the pdf", "pdf"):
+                            art = get_manager().get_last_user_artifact(user_id=user_id, artifact_type="pdf")
+                            if art and art.get("path") and os.path.exists(art["path"]):
+                                tf = art["path"]
                         if not os.path.exists(tf):
                             found = find_file_in_desktop(os.path.basename(tf))
                             if found: tf = found
                             else:
-                                for std_dir in ["Downloads", "Documents"]:
+                                for std_dir in ["Documents", "Downloads"]:
                                     cand = Path.home() / std_dir / os.path.basename(tf)
                                     if cand.exists(): tf = str(cand); break
                         p_res = get_pdf_info(tf)
@@ -2130,47 +2813,123 @@ class UnifiedCommandRouter:
                     elif action == "split_pdf":
                         from modules.document_tools import split_pdf
                         from modules.system_controller.file_manager import find_file_in_desktop
+                        from extensions.context_manager import get_manager
                         from pathlib import Path
-                        tf = params.get("target", "")
+                        tf = params.get("target", "").strip()
+                        if not tf or tf.lower() in ("this pdf", "the pdf", "pdf"):
+                            art = get_manager().get_last_user_artifact(user_id=user_id, artifact_type="pdf")
+                            if art and art.get("path") and os.path.exists(art["path"]):
+                                tf = art["path"]
                         if not os.path.exists(tf):
                             found = find_file_in_desktop(os.path.basename(tf))
                             if found: tf = found
                             else:
-                                for std_dir in ["Downloads", "Documents"]:
+                                for std_dir in ["Documents", "Downloads"]:
                                     cand = Path.home() / std_dir / os.path.basename(tf)
                                     if cand.exists(): tf = str(cand); break
                         sp_res = split_pdf(tf, start_page=params.get("start_page", 1), end_page=params.get("end_page", 2))
                         result["status"] = "success" if sp_res.get("success") else "error"
                         result["response"] = sp_res.get("message", "Split PDF.")
+                        result["filepath"] = sp_res.get("filepath")
                         result.update(sp_res)
+                        if result["status"] == "success" and result.get("filepath"):
+                            try:
+                                get_manager().add_user_artifact(user_id, {
+                                    "path": result["filepath"],
+                                    "filename": os.path.basename(result["filepath"]),
+                                    "type": "pdf",
+                                    "source_action": "pdf_split"
+                                })
+                            except Exception:
+                                pass
 
                     elif action == "merge_pdfs":
                         from modules.document_tools import merge_pdfs
                         from modules.system_controller.file_manager import search_files, resolve_directory_name
-                        pdf_list = [f["path"] for f in search_files(root_dir=resolve_directory_name("downloads"), ext="pdf").get("files", [])[:3]]
+                        from extensions.context_manager import get_manager
+                        pdf_list = []
+                        # 1. Check recent user artifacts
+                        arts = get_manager().get_recent_user_artifacts(user_id=user_id, artifact_type="pdf", limit=5)
+                        for a in arts:
+                            if a.get("path") and os.path.exists(a["path"]) and a["path"] not in pdf_list:
+                                pdf_list.append(a["path"])
+                        # 2. Check documents directory
                         if len(pdf_list) < 2:
-                            pdf_list = [f["path"] for f in search_files(root_dir=resolve_directory_name("desktop"), ext="pdf").get("files", [])[:3]]
+                            for f in search_files(root_dir=resolve_directory_name("documents"), ext="pdf").get("files", []):
+                                if f["path"] not in pdf_list:
+                                    pdf_list.append(f["path"])
+                                if len(pdf_list) >= 3: break
+                        # 3. Check downloads directory
+                        if len(pdf_list) < 2:
+                            for f in search_files(root_dir=resolve_directory_name("downloads"), ext="pdf").get("files", []):
+                                if f["path"] not in pdf_list:
+                                    pdf_list.append(f["path"])
+                                if len(pdf_list) >= 3: break
+                        # 4. Check desktop directory
+                        if len(pdf_list) < 2:
+                            for f in search_files(root_dir=resolve_directory_name("desktop"), ext="pdf").get("files", []):
+                                if f["path"] not in pdf_list:
+                                    pdf_list.append(f["path"])
+                                if len(pdf_list) >= 3: break
                         mg_res = merge_pdfs(pdf_list)
                         result["status"] = "success" if mg_res.get("success") else "error"
                         result["response"] = mg_res.get("message", "Merged PDFs.")
+                        result["filepath"] = mg_res.get("filepath")
                         result.update(mg_res)
+                        if result["status"] == "success" and result.get("filepath"):
+                            try:
+                                get_manager().add_user_artifact(user_id, {
+                                    "path": result["filepath"],
+                                    "filename": os.path.basename(result["filepath"]),
+                                    "type": "pdf",
+                                    "source_action": "pdf_merge"
+                                })
+                            except Exception:
+                                pass
 
                     elif action == "extract_pdf_text":
                         from modules.document_tools import extract_pdf_text
                         from modules.system_controller.file_manager import find_file_in_desktop
+                        from extensions.context_manager import get_manager
                         from pathlib import Path
-                        tf = params.get("target", "")
+                        tf = params.get("target", "").strip()
+                        if not tf or tf.lower() in ("this pdf", "the pdf", "pdf"):
+                            art = get_manager().get_last_user_artifact(user_id=user_id, artifact_type="pdf")
+                            if art and art.get("path") and os.path.exists(art["path"]):
+                                tf = art["path"]
                         if not os.path.exists(tf):
                             found = find_file_in_desktop(os.path.basename(tf))
                             if found: tf = found
                             else:
-                                for std_dir in ["Downloads", "Documents"]:
+                                for std_dir in ["Documents", "Downloads"]:
                                     cand = Path.home() / std_dir / os.path.basename(tf)
                                     if cand.exists(): tf = str(cand); break
                         ex_res = extract_pdf_text(tf)
                         result["status"] = "success" if ex_res.get("success") else "error"
                         result["response"] = ex_res.get("message", "Extracted PDF text.")
-                        result.update(ex_res)
+                    elif action == "profile_file":
+                        from pathlib import Path
+                        from modules.system_controller.file_manager import profile_file_content, find_file_in_desktop, resolve_directory_name
+                        tf = params.get("target", "").strip()
+                        if not tf or tf.lower() in ("it", "that", "that ppt", "the ppt", "that pptx", "the pptx", "that presentation", "the presentation", "that file", "the file", "this file", "that document", "this document"):
+                            from extensions.context_manager import get_manager
+                            art_type = "pptx" if ("ppt" in tf.lower() or "presentation" in tf.lower()) else None
+                            art = get_manager().get_last_user_artifact(user_id=effective_uid, artifact_type=art_type)
+                            if not art and art_type:
+                                art = get_manager().get_last_user_artifact(user_id=effective_uid)
+                            if art and art.get("path") and os.path.exists(art["path"]):
+                                tf = art["path"]
+                        if not os.path.exists(tf):
+                            found = find_file_in_desktop(os.path.basename(tf))
+                            if found: tf = found
+                            else:
+                                for std_dir in ["Documents", "Downloads"]:
+                                    cand = Path.home() / std_dir / os.path.basename(tf)
+                                    if cand.exists(): tf = str(cand); break
+                        pf_res = profile_file_content(tf)
+                        result["status"] = "success" if pf_res.get("success") else "error"
+                        result["response"] = pf_res.get("message", "File profiled.")
+                        result.update(pf_res)
 
                     else:
                         result["status"] = "error"
@@ -2212,14 +2971,15 @@ class UnifiedCommandRouter:
                     from legacy.memory_manager import get_connection
                     from instance.config import settings
                     
-                    # Get the actual authenticated user ID from session
-                    user_id = getattr(settings, 'CURRENT_USER_ID', None)
+                    # Get the actual authenticated user ID from parameter or session
+                    effective_uid = user_id if user_id is not None else getattr(settings, 'CURRENT_USER_ID', None)
                     
                     # If no user is authenticated, return error
-                    if user_id is None:
+                    if effective_uid is None:
                         result["status"] = "error"
                         result["response"] = "No authenticated user. Please log in first."
                         return result
+                    user_id = effective_uid
                     
                     # Get database manager and reminder handler
                     # Create a simple pool wrapper for the existing connection function
@@ -2437,22 +3197,49 @@ class UnifiedCommandRouter:
             # 10. DOCUMENT GENERATION
             elif intent == Intent.DOCUMENT_GENERATION:
                 try:
-                    from modules.document_tools import create_docx_document, create_pdf_document, create_excel_spreadsheet, create_presentation
+                    from modules.document_tools import (
+                        create_docx_document,
+                        create_pdf_document,
+                        create_excel_spreadsheet,
+                        create_presentation,
+                        extract_topic_from_query,
+                        build_document_content,
+                        build_presentation_slides,
+                        build_spreadsheet_spec
+                    )
                     doc_type = params.get("doc_type", "docx")
                     title = params.get("title", "Document")
                     content = params.get("content", user_input)
                     
+                    # Extract enriched topic and structured content for natural language queries
+                    topic = extract_topic_from_query(user_input, default=title)
+                    if not title or title.lower() in ("document", "presentation", "spreadsheet"):
+                        title = topic
+                    
                     if doc_type == "pdf":
-                        doc_res = create_pdf_document(title=title, content=content)
+                        pdf_content = build_document_content(topic, user_input, doc_type="pdf")
+                        doc_res = create_pdf_document(title=title, content=pdf_content)
                     elif doc_type == "xlsx":
-                        headers = ["Item", "Details", "Date"]
-                        rows = [["Generated Item", "Created by Smart Assistant", datetime.now().strftime("%Y-%m-%d")]]
-                        doc_res = create_excel_spreadsheet(sheet_title=title, headers=headers, rows=rows)
+                        spec = build_spreadsheet_spec(user_input, title=title)
+                        if "sheets" in spec:
+                            doc_res = create_excel_spreadsheet(
+                                sheets=spec["sheets"],
+                                chart_type=spec.get("chart_type")
+                            )
+                        else:
+                            doc_res = create_excel_spreadsheet(
+                                sheet_title=spec.get("sheet_title", title),
+                                headers=spec.get("headers"),
+                                rows=spec.get("rows"),
+                                add_totals=spec.get("add_totals", False),
+                                chart_type=spec.get("chart_type")
+                            )
                     elif doc_type == "pptx":
-                        slides = [{"type": "content", "title": "Overview", "bullets": [content[:200]]}]
+                        slides = build_presentation_slides(topic, user_input)
                         doc_res = create_presentation(title=title, slides=slides)
                     else:
-                        doc_res = create_docx_document(title=title, content=content)
+                        docx_content = build_document_content(topic, user_input, doc_type="docx")
+                        doc_res = create_docx_document(title=title, content=docx_content)
                         
                     result["status"] = "success" if doc_res.get("success") else "error"
                     result["response"] = doc_res.get("message", "Document generated.")
@@ -2479,10 +3266,18 @@ class UnifiedCommandRouter:
             # 10. CALCULATOR
             elif intent == Intent.CALCULATOR:
                 try:
-                    from legacy.skills_utilities import solve_math
-                    res = solve_math(user_input)
-                    result["response"] = res if res else "Calculated expression."
+                    if any(w in user_input.lower() for w in ["random", "dice", "coin"]):
+                        from legacy.skills_utilities import generate_random_numbers
+                        res = generate_random_numbers(user_input)
+                        result["response"] = res if res else "Generated random numbers."
+                        result["status"] = "success"
+                    else:
+                        from legacy.skills_utilities import solve_math
+                        res = solve_math(user_input)
+                        result["response"] = res if res else "Calculated expression."
+                        result["status"] = "success"
                 except Exception as e:
+                    result["status"] = "error"
                     result["response"] = f"Calculation failed: {e}"
 
             # 11. CODE GENERATION
@@ -2512,7 +3307,24 @@ class UnifiedCommandRouter:
                         result.update(val_res)
                         result["handled"] = True
 
-                    elif any(k in text_low for k in ["explain structure", "structure of", "what classes and functions"]):
+                    elif any(k in text_low for k in ["diagnose", "traceback", "classify error", "parse traceback"]):
+                        from modules.code_generator.utils import classify_execution_error, parse_traceback
+                        tb_text = ""
+                        if ":" in user_input:
+                            tb_text = user_input.split(":", 1)[1].strip()
+                        elif "```" in user_input:
+                            m_c = re.search(r'```(?:python)?(.*?)```', user_input, re.DOTALL)
+                            if m_c: tb_text = m_c.group(1).strip()
+                        if not tb_text:
+                            tb_text = user_input
+
+                        diag_res = classify_execution_error(tb_text)
+                        result["status"] = "success" if diag_res.get("success") else "error"
+                        result["response"] = diag_res.get("message", "Traceback diagnosed.")
+                        result.update(diag_res)
+                        result["handled"] = True
+
+                    elif any(k in text_low for k in ["explain structure", "structure of", "what classes and functions", "explain code", "explain this code"]):
                         from modules.code_generator.utils import explain_code_structure
                         code_to_explain = ""
                         if ":" in user_input:
@@ -2563,7 +3375,70 @@ class UnifiedCommandRouter:
                     effective_uid = user_id or getattr(settings, 'CURRENT_USER_ID', None) or 1
                     effective_uname = getattr(settings, 'CURRENT_USERNAME', 'User')
 
-                    if action == "calendar_query" or any(k in user_input.lower() for k in ["calendar", "event", "events"]):
+                    if action == "personal_schedule" or (action != "calendar_query" and any(k in user_input.lower() for k in ["what do i have", "what's on my schedule", "whats on my schedule", "what is on my schedule", "planned", "need to do", "have to do"])):
+                        now = datetime.now()
+                        is_tomorrow = "tomorrow" in user_input.lower()
+                        target_date = now.date() + timedelta(days=1) if is_tomorrow else now.date()
+                        date_label = "tomorrow" if is_tomorrow else "today"
+                        target_iso = target_date.strftime("%Y-%m-%d")
+
+                        # 1. Check Calendar Events
+                        events = []
+                        try:
+                            from modules.calendar_manager.calendar_storage import CalendarStorage
+                            c_storage = CalendarStorage()
+                            events = c_storage.get_events(effective_uid, target_iso) or []
+                        except Exception as e:
+                            self.logger.debug(f"Calendar events check error: {e}")
+
+                        # 2. Check Reminders for the user
+                        reminders = []
+                        try:
+                            from extensions.database_manager import DatabaseManager
+                            from legacy.memory_manager import get_connection
+                            class SimplePoolWrapper:
+                                def __init__(self, connection_func): self.get_connection = connection_func
+                                def getconn(self): return self.get_connection()
+                                def putconn(self, conn):
+                                    try: conn.close()
+                                    except: pass
+                            db_mgr = DatabaseManager(SimplePoolWrapper(get_connection))
+                            all_rems = db_mgr.get_reminders(effective_uid, start_date=target_date, end_date=target_date) or []
+                            reminders = [r for r in all_rems if not r.get("completed")]
+                        except Exception as e:
+                            self.logger.debug(f"Reminders check error: {e}")
+
+                        # 3. Check Active Background Tasks
+                        active_tasks = []
+                        try:
+                            from skills.task_management.task_queue import TaskQueue
+                            tq = getattr(self, "_task_queue", None) or TaskQueue.get_instance()
+                            if tq:
+                                uid_int = int(effective_uid) if str(effective_uid).isdigit() else 0
+                                active_tasks = [t for t in tq.list_tasks(uid_int) if t.get("status") in ("queued", "running")]
+                        except Exception as e:
+                            self.logger.debug(f"Tasks check error: {e}")
+
+                        # Truthful synthesis without inventing data or calling SerpAPI
+                        if not events and not reminders and not active_tasks:
+                            result["status"] = "success"
+                            result["response"] = f"You don't have anything scheduled/reminded for {date_label}."
+                        else:
+                            parts = []
+                            if events:
+                                ev_strs = [f"{e.get('title', 'Event')} at {e.get('time', 'all day')}" for e in events]
+                                parts.append(f"{len(events)} event(s): {', '.join(ev_strs)}")
+                            if reminders:
+                                rem_strs = [f"{r.get('task_text', 'Reminder')}" for r in reminders]
+                                parts.append(f"{len(reminders)} reminder(s): {', '.join(rem_strs)}")
+                            if active_tasks:
+                                task_strs = [f"{t.get('goal', 'Task')}" for t in active_tasks]
+                                parts.append(f"{len(active_tasks)} active task(s): {', '.join(task_strs)}")
+
+                            result["status"] = "success"
+                            result["response"] = f"For {date_label}, you have " + "; ".join(parts) + "."
+
+                    elif action == "calendar_query" or any(k in user_input.lower() for k in ["calendar", "event", "events", "meeting", "appointment"]):
                         from modules.calendar_manager import calendar_controller
                         cal_res = calendar_controller.process_calendar_query(user_input, user_id=effective_uid)
                         result["status"] = "success" if cal_res.get("success", True) else "error"
@@ -2580,21 +3455,37 @@ class UnifiedCommandRouter:
                     result["status"] = "error"
                     result["response"] = f"Failed to process calendar request: {e}"
 
-            # 15. TIME QUERY (Pure Local Clock — Bypasses RAG / LLM)
+            # 15. TIME QUERY & CLOCK / ALARM / TIMER / STOPWATCH (Pure Local Clock — Bypasses RAG / LLM)
             elif intent == Intent.TIME_QUERY:
                 try:
-                    from legacy.skills_utilities import tell_time
-                    result["response"] = tell_time()
+                    from skills.clock_manager import get_clock_controller
+                    ctrl = get_clock_controller()
+                    clock_res = ctrl.handle_command(user_input, user_id=effective_uid, params=params)
+                    result["status"] = clock_res.get("status", "success")
+                    result["response"] = clock_res.get("message") or clock_res.get("response") or "Clock command executed."
+                    result.update(clock_res)
+                    result["handled"] = True
                 except Exception as e:
-                    result["response"] = f"Time query failed: {e}"
+                    self.logger.error(f"Clock operation failed: {e}")
+                    try:
+                        from legacy.skills_utilities import tell_time
+                        result["response"] = tell_time()
+                    except Exception:
+                        result["response"] = f"Time query failed: {e}"
 
             # 14. DATE QUERY (Pure Local Clock — Bypasses RAG / LLM)
             elif intent == Intent.DATE_QUERY:
                 try:
+                    from skills.clock_manager import get_clock_controller
+                    ctrl = get_clock_controller()
+                    clock_res = ctrl.get_local_date()
+                    result["status"] = "success"
+                    result["response"] = clock_res.get("message") or clock_res.get("response") or "Today's date."
+                    result.update(clock_res)
+                    result["handled"] = True
+                except Exception as e:
                     from legacy.skills_utilities import tell_date
                     result["response"] = tell_date()
-                except Exception as e:
-                    result["response"] = f"Date query failed: {e}"
 
             # 15. WEATHER QUERY
             elif intent == Intent.WEATHER_QUERY:
@@ -2643,7 +3534,7 @@ class UnifiedCommandRouter:
                     else:
                         from extensions.rag_system import RAGSystem
                         rag = RAGSystem()
-                        rag_output = rag.process(user_input)
+                        rag_output = rag.process(user_input, user_id=effective_uid)
                         if isinstance(rag_output, dict):
                             result["response"] = rag_output.get("response", "I don't have that information in my memory.")
                             result["handled"] = rag_output.get("handled", True)
@@ -2697,7 +3588,7 @@ class UnifiedCommandRouter:
                     else:
                         from extensions.rag_system import RAGSystem
                         rag = RAGSystem()
-                        rag_output = rag.process(user_input)
+                        rag_output = rag.process(user_input, user_id=user_id)
                         if isinstance(rag_output, dict):
                             result["response"] = rag_output.get("response", "No answer found.")
                             # CRITICAL: Mark as handled to prevent any fallback to other subsystems
@@ -2727,7 +3618,7 @@ class UnifiedCommandRouter:
                 try:
                     from extensions.rag_system import RAGSystem
                     rag = RAGSystem()
-                    rag_output = rag.process(user_input)
+                    rag_output = rag.process(user_input, user_id=user_id)
                     if isinstance(rag_output, dict):
                         result["response"] = rag_output.get("response", "I'm not sure how to respond.")
                         # CRITICAL: Mark as handled to prevent any fallback to other subsystems
@@ -2935,11 +3826,15 @@ class UnifiedCommandRouter:
 
                     effective_uid = str(user_id or getattr(settings, 'CURRENT_USER_ID', None) or "default")
                     dm = get_dialogue_manager(effective_uid)
-
+                    raw_input = user_input
+                    raw_low = user_input.lower()
                     req_type = params.get("target_type")
                     if not req_type:
-                        raw_low = user_input.lower()
-                        if "pairing" in raw_low or "code" in raw_low:
+                        if "box" in raw_low and "number" in raw_low:
+                            req_type = "NUMBERS_BOX"
+                        elif any(w in raw_low for w in ["number", "numbers", "count"]):
+                            req_type = "NUMBERS"
+                        elif "pairing" in raw_low or "code" in raw_low:
                             req_type = "PAIRING_CODE"
                         elif "ip" in raw_low or "address" in raw_low:
                             req_type = "IP_ADDRESS"
@@ -2952,68 +3847,336 @@ class UnifiedCommandRouter:
                         elif any(w in raw_low for w in ["knowledge", "answer", "explanation", "about"]):
                             req_type = "KNOWLEDGE"
 
-                    is_explicit_again = (
-                        "again" in user_input.lower()
-                        or "again" in raw_input.lower()
-                        or req_type == "AGAIN"
-                        or "previous" in raw_input.lower()
-                        or "what you just" in raw_input.lower()
-                        or "back" in raw_input.lower()
-                        or "on screen" in raw_input.lower()
-                        or "let me see" in raw_input.lower()
-                        or "display what" in raw_input.lower()
-                        or "show that" in raw_input.lower()
+                    # Explicit repeat request check
+                    is_explicit_again = bool(
+                        req_type == "AGAIN"
+                        or re.search(r'\b(?:again|back)\b', raw_low)
+                        or re.search(r'\b(?:previous|last)\s+result\b', raw_low)
+                        or re.search(r'\bwhat\s+you\s+(?:just\s+)?(?:said|told\s+me)\b', raw_low)
+                        or re.match(r'^(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:show|display)\s+(?:me\s+)?(?:that|it)[.!?]?$', raw_low)
                     )
-                    if req_type == "AGAIN":
-                        req_type = None
 
-                    # Check for ambiguity if multiple fresh distinct visual responses exist
-                    candidates = dm.get_recent_visual_candidates()
-                    if len(candidates) > 1 and not req_type and not is_explicit_again:
-                        types = set(c.get("response_type") for c in candidates)
-                        if len(types) > 1:
-                            result["status"] = "waiting_for_user"
+                    # Check for explicit numbers / counting / random numbers / box request
+                    is_number_req = (
+                        req_type in ("NUMBERS_BOX", "NUMBERS")
+                        or (re.search(r'\b(?:count|numbers?)\b', raw_low) and any(w in raw_low for w in ["count", "show", "generate", "give", "list", "box", "random", "reverse", "from", "to", "between"]))
+                        or bool(re.search(r'\bcount\s+(?:from\s+)?\d+', raw_low))
+                        or bool(re.search(r'\bcount\s+\d+', raw_low))
+                    )
+
+                    # --- CASE 1: NUMBERS / COUNTING REQUEST (NEW PAYLOAD) ---
+                    if is_number_req and not is_explicit_again and "pairing" not in raw_low and "code" not in raw_low:
+                        WORD_NUMS = {
+                            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                            "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+                            "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+                            "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+                            "eighty": 80, "ninety": 90, "hundred": 100
+                        }
+
+                        # Check for range: "from X to Y" or "between X and Y" or "from X-Y" or "X to Y" or "X-Y"
+                        m_range = re.search(r'(?:from|between)\s+(\d+)\s*(?:to|and|-)\s*(\d+)', raw_low)
+                        if not m_range:
+                            m_range = re.search(r'\b(\d+)\s*(?:to|-)\s*(\d+)\b', raw_low)
+                        
+                        start_bound, end_bound = None, None
+                        if m_range:
+                            start_bound = int(m_range.group(1))
+                            end_bound = int(m_range.group(2))
+
+                        # Check count
+                        count = None
+                        m_count_digit = re.search(r'\b(\d+)\s+(?:random\s+)?numbers?\b', raw_low)
+                        if m_count_digit:
+                            count = int(m_count_digit.group(1))
+                        else:
+                            m_cnt = re.search(r'\bcount\s+(?:up\s+to\s+)?(\d+)\b', raw_low)
+                            if m_cnt:
+                                count = int(m_cnt.group(1))
+                            else:
+                                for word, val in WORD_NUMS.items():
+                                    if re.search(rf'\b{word}\s+(?:random\s+)?numbers?\b', raw_low) or re.search(rf'\bcount\s+{word}\b', raw_low):
+                                        count = val
+                                        break
+
+                        is_random = "random" in raw_low
+                        is_reverse = "reverse" in raw_low
+
+                        if count is None:
+                            if start_bound is not None and end_bound is not None:
+                                count = abs(end_bound - start_bound) + 1
+                            else:
+                                count = 10
+
+                        import random
+                        if is_random:
+                            if start_bound is not None and end_bound is not None:
+                                low = min(start_bound, end_bound)
+                                high = max(start_bound, end_bound)
+                            else:
+                                low = 1
+                                high = max(100, count * 10)
+                            num_list = [random.randint(low, high) for _ in range(count)]
+                        else:
+                            if start_bound is not None and end_bound is not None:
+                                step = 1 if end_bound >= start_bound else -1
+                                num_list = list(range(start_bound, end_bound + step, step))
+                            else:
+                                num_list = list(range(1, count + 1))
+
+                        if is_reverse:
+                            num_list = list(reversed(num_list))
+
+                        # Format grid
+                        cols = 10 if len(num_list) >= 10 else len(num_list)
+                        cols = max(cols, 1)
+                        width = max(len(str(n)) for n in num_list) if num_list else 2
+                        rows = []
+                        for i in range(0, len(num_list), cols):
+                            chunk = num_list[i:i + cols]
+                            rows.append("  ".join(f"{n:>{width}}" for n in chunk))
+                        grid_text = "\n".join(rows)
+
+                        # Determine title and speech
+                        if is_random:
+                            title = "RANDOM NUMBERS"
+                            speech = f"Here are {count} random numbers from {low} to {high}."
+                            sec_desc = f"{count} random numbers between {low} and {high}."
+                        elif "box" in raw_low:
+                            title = "NUMBERS IN A BOX"
+                            if start_bound and end_bound:
+                                speech = f"Here are the numbers {start_bound} to {end_bound} in a box."
+                            else:
+                                speech = f"Here are {len(num_list)} numbers in a box."
+                            sec_desc = f"Numbers structured in a box."
+                        elif is_reverse:
+                            title = "NUMBERS"
+                            speech = f"Here are {len(num_list)} numbers in reverse order."
+                            sec_desc = f"{len(num_list)} numbers in reverse order."
+                        elif len(num_list) <= 10:
+                            title = "NUMBERS"
+                            nums_s = ", ".join(str(n) for n in num_list[:-1]) + f", and {num_list[-1]}" if len(num_list) > 1 else str(num_list[0])
+                            speech = f"Here are the numbers: {nums_s}."
+                            sec_desc = f"{len(num_list)} numbers."
+                        elif len(num_list) <= 20:
+                            title = "NUMBERS"
+                            nums_s = ", ".join(str(n) for n in num_list)
+                            speech = f"Here are the numbers from {num_list[0]} to {num_list[-1]}: {nums_s}."
+                            sec_desc = f"Numbers from {num_list[0]} to {num_list[-1]}."
+                        else:
+                            title = "NUMBERS"
+                            speech = f"Here are {len(num_list)} numbers from {num_list[0]} to {num_list[-1]}."
+                            sec_desc = f"{len(num_list)} numbers."
+
+                        from core.visual_response import VisualResponse, VisualResponseType, VisualResponseAction
+                        vr = VisualResponse(
+                            response_id=str(uuid.uuid4())[:8],
+                            user_id=str(effective_uid),
+                            response_type=VisualResponseType.TABLE,
+                            title=title,
+                            primary_value=grid_text,
+                            secondary_text=sec_desc,
+                            actions=[VisualResponseAction(label="Copy", action_type="copy", payload=grid_text)],
+                            created_at=time.time(),
+                            ttl_seconds=600.0,
+                            source_context="numbers_display"
+                        )
+                        dm.store_visual_response(vr)
+                        assistant_core.show_visual_response(vr)
+
+                        # Debug logging (Section 13)
+                        print(
+                            f"[VISUAL]\n"
+                            f"Current command: {user_input}\n"
+                            f"Intent: VISUAL_SURFACE\n"
+                            f"Payload source: generation\n"
+                            f"Payload type: TABLE\n"
+                            f"Using previous result: NO\n"
+                            f"Previous result age: N/A\n"
+                            f"Previous result explicitly referenced: NO"
+                        )
+
+                        result["status"] = "success"
+                        result["intent"] = "VISUAL_SURFACE"
+                        result["response"] = speech
+                        result["visual_response"] = vr.to_dict()
+                        result["handled"] = True
+                        return result
+
+                    # --- CASE 2: EXPLICIT REPLAY ("SHOW THAT AGAIN") ---
+                    if is_explicit_again:
+                        cached_vr = dm.get_last_visual_response(response_type=req_type if req_type != "AGAIN" else None, allow_expired=True)
+
+                        now = time.time()
+                        prev_age = (now - float(cached_vr.get("created_at", now))) if (cached_vr and "created_at" in cached_vr) else 0.0
+                        prev_age_str = f"{prev_age:.1f}s" if cached_vr else "N/A"
+
+                        if not cached_vr:
+                            print(
+                                f"[VISUAL]\n"
+                                f"Current command: {user_input}\n"
+                                f"Intent: VISUAL_SURFACE\n"
+                                f"Payload source: cache\n"
+                                f"Payload type: NONE\n"
+                                f"Using previous result: NO\n"
+                                f"Previous result age: N/A\n"
+                                f"Previous result explicitly referenced: YES"
+                            )
+                            result["status"] = "success"
                             result["intent"] = "VISUAL_SURFACE"
-                            result["response"] = "I have more than one recent result. Which one would you like me to show?"
+                            result["response"] = "There is no recent information to display."
                             result["handled"] = True
                             return result
 
-                    # Retrieve last visual response for this user (user-isolated, no regeneration)
-                    cached_vr = dm.get_last_visual_response(response_type=req_type, allow_expired=True)
+                        ttl = float(cached_vr.get("ttl_seconds", 300.0))
+                        if prev_age > ttl:
+                            result["status"] = "expired"
+                            result["intent"] = "VISUAL_SURFACE"
+                            result["response"] = "I no longer have a current version of that information. Would you like me to retrieve it again?"
+                            result["handled"] = True
+                            return result
 
-                    if not cached_vr:
+                        from core.visual_response import VisualResponse
+                        vr_obj = VisualResponse.from_dict(cached_vr)
+                        assistant_core.show_visual_response(vr_obj)
+
+                        print(
+                            f"[VISUAL]\n"
+                            f"Current command: {user_input}\n"
+                            f"Intent: VISUAL_SURFACE\n"
+                            f"Payload source: cache\n"
+                            f"Payload type: {cached_vr.get('response_type', 'UNKNOWN')}\n"
+                            f"Using previous result: YES\n"
+                            f"Previous result age: {prev_age_str}\n"
+                            f"Previous result explicitly referenced: YES"
+                        )
+
+                        title_display = vr_obj.title.lower()
                         result["status"] = "success"
                         result["intent"] = "VISUAL_SURFACE"
-                        result["response"] = "There is no recent information to display."
+                        val_preview = vr_obj.primary_value if len(vr_obj.primary_value) <= 40 and "\n" not in vr_obj.primary_value else ""
+                        if val_preview:
+                            result["response"] = f"Displaying {title_display}: {val_preview}."
+                        else:
+                            result["response"] = f"Displaying {title_display}."
+                        result["visual_response"] = vr_obj.to_dict()
+                        result["reused_cache"] = True
                         result["handled"] = True
                         return result
 
-                    # Check freshness
-                    now = time.time()
-                    created = float(cached_vr.get("created_at", now))
-                    ttl = float(cached_vr.get("ttl_seconds", 300.0))
-                    if (now - created) > ttl:
-                        result["status"] = "expired"
+                    # --- CASE 3: EXPLICIT ENTITY QUERY (e.g. "show me the pairing code") ---
+                    if req_type == "PAIRING_CODE" or "pairing" in raw_low or "code" in raw_low:
+                        cached_vr = dm.get_last_visual_response(response_type="PAIRING_CODE", allow_expired=False)
+                        if not cached_vr:
+                            try:
+                                from skills.device_management import get_device_controller
+                                dc = get_device_controller()
+                                offer_info = dc.get_active_pairing_code(int(effective_uid) if str(effective_uid).isdigit() else 1)
+                                if offer_info and offer_info.get("code"):
+                                    from core.visual_response import detect_visual_response
+                                    vr_obj = detect_visual_response(offer_info, user_input, user_id=str(effective_uid))
+                                    if vr_obj:
+                                        dm.store_visual_response(vr_obj)
+                                        cached_vr = vr_obj.to_dict()
+                            except Exception as e:
+                                self.logger.warning(f"Error checking active pairing code: {e}")
+
+                        if cached_vr:
+                            from core.visual_response import VisualResponse
+                            vr_obj = VisualResponse.from_dict(cached_vr)
+                            assistant_core.show_visual_response(vr_obj)
+                            print(
+                                f"[VISUAL]\n"
+                                f"Current command: {user_input}\n"
+                                f"Intent: VISUAL_SURFACE\n"
+                                f"Payload source: active_entity\n"
+                                f"Payload type: PAIRING_CODE\n"
+                                f"Using previous result: YES\n"
+                                f"Previous result age: N/A\n"
+                                f"Previous result explicitly referenced: NO"
+                            )
+                            result["status"] = "success"
+                            result["intent"] = "VISUAL_SURFACE"
+                            result["response"] = f"Displaying mobile pairing: {vr_obj.primary_value}."
+                            result["visual_response"] = vr_obj.to_dict()
+                            result["handled"] = True
+                            return result
+                        else:
+                            result["status"] = "success"
+                            result["intent"] = "VISUAL_SURFACE"
+                            result["response"] = "There is no active pairing code. Say 'pair my phone' to connect a new device."
+                            result["handled"] = True
+                            return result
+
+                    # --- CASE 4: EXPLICIT VISUAL DIRECTIVE (Weather / Knowledge / Search) ---
+                    if "weather" in raw_low or "temperature" in raw_low:
+                        from extensions.weather_engine import get_weather_for_query
+                        wx_resp = get_weather_for_query(user_input)
+                        result["status"] = "success"
                         result["intent"] = "VISUAL_SURFACE"
-                        result["response"] = "I no longer have a current version of that information. Would you like me to retrieve it again?"
+                        result["response"] = wx_resp
                         result["handled"] = True
+                        from core.visual_response import detect_visual_response
+                        vr = detect_visual_response({"response": wx_resp}, user_input, str(effective_uid))
+                        if vr:
+                            dm.store_visual_response(vr)
+                            assistant_core.show_visual_response(vr)
+                            result["visual_response"] = vr.to_dict()
+                        print(
+                            f"[VISUAL]\n"
+                            f"Current command: {user_input}\n"
+                            f"Intent: VISUAL_SURFACE\n"
+                            f"Payload source: weather_engine\n"
+                            f"Payload type: STATUS\n"
+                            f"Using previous result: NO\n"
+                            f"Previous result age: N/A\n"
+                            f"Previous result explicitly referenced: NO"
+                        )
                         return result
 
-                    # Restore cached visual response without regeneration
-                    from core.visual_response import VisualResponse
-                    vr_obj = VisualResponse.from_dict(cached_vr)
-                    assistant_core.show_visual_response(vr_obj)
+                    if any(w in raw_low for w in ["what", "who", "where", "when", "why", "how", "explain", "tell me about"]):
+                        from extensions.rag_system import RAGSystem
+                        rag = RAGSystem()
+                        rag_res = rag.process(user_input)
+                        ans = rag_res.get("response") if isinstance(rag_res, dict) else str(rag_res)
+                        result["status"] = "success"
+                        result["intent"] = "VISUAL_SURFACE"
+                        result["response"] = ans
+                        result["handled"] = True
+                        from core.visual_response import detect_visual_response
+                        vr = detect_visual_response({"response": ans}, user_input, str(effective_uid))
+                        if vr:
+                            dm.store_visual_response(vr)
+                            assistant_core.show_visual_response(vr)
+                            result["visual_response"] = vr.to_dict()
+                        print(
+                            f"[VISUAL]\n"
+                            f"Current command: {user_input}\n"
+                            f"Intent: VISUAL_SURFACE\n"
+                            f"Payload source: rag_system\n"
+                            f"Payload type: KNOWLEDGE\n"
+                            f"Using previous result: NO\n"
+                            f"Previous result age: N/A\n"
+                            f"Previous result explicitly referenced: NO"
+                        )
+                        return result
 
-                    title_display = vr_obj.title.lower()
+                    # --- CASE 5: STRICT CONTEXT FALLBACK ---
+                    # A new command that does not request replay and cannot be resolved visually MUST NEVER blindly reuse previous visual response!
+                    print(
+                        f"[VISUAL]\n"
+                        f"Current command: {user_input}\n"
+                        f"Intent: VISUAL_SURFACE\n"
+                        f"Payload source: none\n"
+                        f"Payload type: NONE\n"
+                        f"Using previous result: NO\n"
+                        f"Previous result age: N/A\n"
+                        f"Previous result explicitly referenced: NO"
+                    )
                     result["status"] = "success"
                     result["intent"] = "VISUAL_SURFACE"
-                    val_preview = vr_obj.primary_value if len(vr_obj.primary_value) <= 40 and "\n" not in vr_obj.primary_value else ""
-                    if val_preview:
-                        result["response"] = f"Displaying {title_display}: {val_preview}."
-                    else:
-                        result["response"] = f"Displaying {title_display}."
-                    result["visual_response"] = vr_obj.to_dict()
-                    result["reused_cache"] = True
+                    result["response"] = "I don't have new visual information to display for that request."
                     result["handled"] = True
                     return result
                 except Exception as e:
@@ -3025,6 +4188,23 @@ class UnifiedCommandRouter:
             # Catch-all for not fully implemented intents
             else:
                 result["response"] = f"Intent {intent.name} recognized but execution not fully wired yet."
+
+            # Canonical production visual response hook:
+            # If the action produced a result with visually useful data and hasn't been emitted yet,
+            # detect and dispatch it automatically without altering the authoritative speech response.
+            if not result.get("visual_response") and intent != Intent.VISUAL_SURFACE:
+                try:
+                    from core.visual_response import detect_visual_response
+                    vr = detect_visual_response(result, user_input, str(effective_uid))
+                    if vr:
+                        from extensions.dialogue_state_manager import get_dialogue_manager
+                        dm = get_dialogue_manager(str(effective_uid))
+                        dm.store_visual_response(vr)
+                        result["visual_response"] = vr.to_dict()
+                        from core.assistant_core import assistant_core
+                        assistant_core.show_visual_response(vr)
+                except Exception as vr_err:
+                    self.logger.debug(f"Direct visual response detection notice: {vr_err}")
 
             if "response" in result and "speech_response" not in result:
                 result["speech_response"] = result["response"]

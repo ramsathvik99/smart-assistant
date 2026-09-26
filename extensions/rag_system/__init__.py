@@ -23,7 +23,7 @@ class RAGSystem:
         
         print(f"[RAG SYSTEM] Configs: ENABLE_RAG={self.enable_rag}, ENABLE_WEB_SEARCH={self.enable_web_search}, ENABLE_RETRIEVAL={self.enable_retrieval}, ENABLE_LIVE_DATA={self.enable_live_data}, SEARCH_PROVIDER={self.search_provider}, FALLBACK_TO_LLM={self.fallback_to_llm}")
 
-    def process(self, query):
+    def process(self, query, user_id=None):
         """
         Main Execution Pipeline: Input -> Intent -> Decision -> Execution -> Response.
         Returns a dictionary: {"intent": str, "response": str, "data": dict}
@@ -168,7 +168,7 @@ class RAGSystem:
              else:
                  # Retrieval
                  retrieval_intent = sub_intent if sub_intent != "memory_retrieval" else "memory_management"
-                 data = self.retriever.retrieve(retrieval_intent, query)
+                 data = self.retriever.retrieve(retrieval_intent, query, user_id=user_id)
              
              # DB Fallback Relevance Check
              if not self.validator.validate(sub_intent, data):

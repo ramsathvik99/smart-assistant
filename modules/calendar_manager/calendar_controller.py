@@ -95,6 +95,11 @@ class CalendarController:
                     pass
             if user_id is None:
                 user_id = 0
+            # Ensure user_id is a real integer for DB queries
+            try:
+                user_id = int(user_id)
+            except (ValueError, TypeError):
+                user_id = 0
 
             results = {
                 "success": True,
@@ -130,6 +135,7 @@ class CalendarController:
                     
                     # Synthesize clean speech response
                     total_events = sum(len(evs) for evs in results["personal_events"].values()) if isinstance(results["personal_events"], dict) else len(results["personal_events"])
+                    is_meeting_query = any(w in text.lower() for w in ["meeting", "meetings", "appointment", "appointments"])
                     speech_parts = []
                     if total_events > 0:
                         event_names = []
@@ -139,9 +145,12 @@ class CalendarController:
                                     event_names.append(f"{ev['title']} at {ev['time'] or 'all day'}")
                         speech_parts.append(f"You have {total_events} event(s): {', '.join(event_names[:3])}")
                     else:
-                        speech_parts.append(f"You have no scheduled personal events on {target_start}")
+                        if is_meeting_query:
+                            speech_parts.append(f"You don't have any meetings scheduled for {target_start}")
+                        else:
+                            speech_parts.append(f"You have no scheduled personal events on {target_start}")
 
-                    if results["holidays"]:
+                    if results["holidays"] and not is_meeting_query:
                         h_names = [h.get("name", "Holiday") for h in results["holidays"][:2]]
                         speech_parts.append(f"Holidays: {', '.join(h_names)}")
 

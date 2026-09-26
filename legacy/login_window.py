@@ -90,7 +90,7 @@ class NameAssistantDialog:
             justify="center"
         )
         self.name_entry.pack(fill=tk.X, ipady=8, pady=(0, 6))
-        self.name_entry.insert(0, "e.g. Aria, Friday, Jarvis...")
+        self.name_entry.insert(0, "e.g. Trevon, Athena, Orion...")
         self.name_entry.bind("<FocusIn>", self._clear_placeholder)
         self.name_entry.bind("<Return>", lambda e: self._submit())
         self.name_entry.config(fg="grey")

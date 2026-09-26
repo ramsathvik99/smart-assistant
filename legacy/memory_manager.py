@@ -109,6 +109,67 @@ def safe_execute(query, params=None):
         conn.close()
 
 # ---------------- USER HANDLING ---------------- #
+def authenticate_user(username, password):
+    """
+    Authenticate an existing user from the canonical users table.
+    Returns (user_id, 'LOGIN_SUCCESS'), (None, 'WRONG_PASSWORD'), or (None, 'USER_NOT_FOUND').
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, password FROM users WHERE username=%s", (username,))
+    row = cur.fetchone()
+
+    if not row:
+        cur.close()
+        conn.close()
+        return None, "USER_NOT_FOUND"
+
+    user_id, stored_pass = row
+    entered_hash = hashlib.sha256(password.encode()).hexdigest()
+    print("[AUTH] User authentication verification completed")
+
+    if stored_pass != entered_hash:
+        cur.close()
+        conn.close()
+        return None, "WRONG_PASSWORD"
+
+    cur.close()
+    conn.close()
+    return user_id, "LOGIN_SUCCESS"
+
+
+def register_user(username, password):
+    """
+    Register a new user account using the canonical users table and schema.
+    Returns (user_id, 'NEW_USER') or (None, 'USER_EXISTS').
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id FROM users WHERE username=%s", (username,))
+    if cur.fetchone():
+        cur.close()
+        conn.close()
+        return None, "USER_EXISTS"
+
+    password_hash = hashlib.sha256(password.encode()).hexdigest()
+    cur.execute(
+        "INSERT INTO users (username, password) VALUES (%s, %s) RETURNING id",
+        (username, password_hash)
+    )
+    user_id = cur.fetchone()[0]
+    conn.commit()
+
+    cur.execute("INSERT INTO user_memory (user_id, memory) VALUES (%s, '{}'::jsonb)", (user_id,))
+    conn.commit()
+
+    cur.close()
+    conn.close()
+    print(f"[AUTH] New user account registered: {username} (ID: {user_id})")
+    return user_id, "NEW_USER"
+
+
 def get_or_create_user(username, password):
     conn = get_connection()
     cur = conn.cursor()

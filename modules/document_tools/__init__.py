@@ -14,6 +14,12 @@ from .pdf_builder import (
 )
 from .excel_builder import create_excel_spreadsheet, create_excel_spreadsheet as build_excel_spreadsheet
 from .presentation_builder import create_presentation, create_presentation as build_presentation
+from .content_helper import (
+    extract_topic_from_query,
+    build_document_content,
+    build_presentation_slides,
+    build_spreadsheet_spec
+)
 
 __all__ = [
     'create_docx_document',
@@ -27,5 +33,9 @@ __all__ = [
     'create_excel_spreadsheet',
     'build_excel_spreadsheet',
     'create_presentation',
-    'build_presentation'
+    'build_presentation',
+    'extract_topic_from_query',
+    'build_document_content',
+    'build_presentation_slides',
+    'build_spreadsheet_spec'
 ]

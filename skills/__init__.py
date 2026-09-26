@@ -12,6 +12,7 @@ from . import learning
 from . import undo
 from . import device_location
 from . import clipboard
+from . import clock_manager
 
 __all__ = [
     "device_management",
@@ -23,4 +24,5 @@ __all__ = [
     "undo",
     "device_location",
     "clipboard",
+    "clock_manager",
 ]

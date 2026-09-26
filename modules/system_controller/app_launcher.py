@@ -199,3 +199,131 @@ def get_running_applications():
     except Exception as e:
         logger.error(f"Failed to get running applications: {str(e)}")
         return []
+
+
+def discover_installed_games() -> list[dict]:
+    """
+    Discover installed PC games across Steam libraries and Epic Games manifests.
+    Returns list of dicts with name, app_id, launcher ('steam'/'epic'), and install path.
+    """
+    games = []
+    
+    # 1. Scan Steam Games
+    try:
+        steam_paths = [
+            r"C:\Program Files (x86)\Steam",
+            r"C:\Program Files\Steam",
+            os.path.expanduser(r"~\AppData\Local\Steam")
+        ]
+        
+        # Check Windows registry if available
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+                val, _ = winreg.QueryValueEx(key, "SteamPath")
+                if val and os.path.exists(val):
+                    steam_paths.insert(0, val.replace('/', '\\'))
+        except Exception:
+            pass
+
+        steam_root = next((p for p in steam_paths if os.path.exists(p)), None)
+        if steam_root:
+            lib_file = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+            library_dirs = [steam_root]
+            
+            if os.path.exists(lib_file):
+                import re
+                with open(lib_file, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                for match in re.finditer(r'"path"\s+"([^"]+)"', content):
+                    p = match.group(1).replace("\\\\", "\\")
+                    if os.path.exists(p) and p not in library_dirs:
+                        library_dirs.append(p)
+
+            for lib in library_dirs:
+                apps_dir = os.path.join(lib, "steamapps")
+                if not os.path.exists(apps_dir):
+                    continue
+                for fname in os.listdir(apps_dir):
+                    if fname.startswith("appmanifest_") and fname.endswith(".acf"):
+                        acf_path = os.path.join(apps_dir, fname)
+                        try:
+                            with open(acf_path, "r", encoding="utf-8", errors="ignore") as af:
+                                acf_txt = af.read()
+                            id_match = re.search(r'"appid"\s+"(\d+)"', acf_txt)
+                            name_match = re.search(r'"name"\s+"([^"]+)"', acf_txt)
+                            if id_match and name_match:
+                                app_id = id_match.group(1)
+                                name = name_match.group(1)
+                                # Exclude Steamworks Common Redistributables / Proton
+                                if not name.startswith("Steamworks") and not name.startswith("Proton"):
+                                    games.append({
+                                        "name": name,
+                                        "app_id": app_id,
+                                        "launcher": "steam",
+                                        "launch_uri": f"steam://run/{app_id}"
+                                    })
+                        except Exception:
+                            continue
+    except Exception as e:
+        logger.debug(f"Steam scan error: {e}")
+
+    # 2. Scan Epic Games Manifests
+    try:
+        epic_manifests = r"C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests"
+        if os.path.exists(epic_manifests):
+            import json
+            for mf in os.listdir(epic_manifests):
+                if mf.endswith(".item"):
+                    try:
+                        with open(os.path.join(epic_manifests, mf), "r", encoding="utf-8", errors="ignore") as jf:
+                            data = json.load(jf)
+                        disp_name = data.get("DisplayName")
+                        app_name = data.get("AppName")
+                        if disp_name and app_name:
+                            games.append({
+                                "name": disp_name,
+                                "app_id": app_name,
+                                "launcher": "epic",
+                                "launch_uri": f"com.epicgames.launcher://apps/{app_name}?action=launch&silent=true"
+                            })
+                    except Exception:
+                        continue
+    except Exception as e:
+        logger.debug(f"Epic scan error: {e}")
+
+    return games
+
+
+def launch_game(game_query: str) -> dict:
+    """
+    Find and launch an installed Steam or Epic game matching game_query.
+    """
+    games = discover_installed_games()
+    if not games:
+        return {"success": False, "status": "not_found", "message": "No installed games detected on system."}
+
+    q = game_query.lower().strip()
+    match = next((g for g in games if q in g["name"].lower()), None)
+    if not match:
+        names = ", ".join(g["name"] for g in games[:5])
+        return {
+            "success": False,
+            "status": "not_found",
+            "message": f"Could not find game matching '{game_query}'. Installed games: {names}."
+        }
+
+    try:
+        import webbrowser
+        uri = match["launch_uri"]
+        webbrowser.open(uri)
+        return {
+            "success": True,
+            "status": "success",
+            "game": match["name"],
+            "launcher": match["launcher"],
+            "message": f"Launching '{match['name']}' via {match['launcher'].capitalize()}."
+        }
+    except Exception as e:
+        return {"success": False, "status": "error", "message": f"Failed to launch '{match['name']}': {e}"}
+

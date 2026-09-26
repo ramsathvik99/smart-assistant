@@ -78,38 +78,18 @@ def open_website(url, name=None, confirm=True):
         speak(f"Opening {site_name}.")
         webbrowser.get().open_new_tab(url)
 
-        # Set Command Intelligence Context
+        # Set Global Context via Canonical ContextManager
         try:
-            # Try to import the global context from assistant.py
-            import sys
-            if 'legacy.assistant' in sys.modules:
-                from legacy.assistant import context
-                if context:
-                    context.set_context("browser", site_name.lower())
-                    print(f"[COMMAND INTELLIGENCE] Set browser context: {site_name.lower()}")
+            from extensions.context_manager import get_manager
+            ctx = get_manager()
+            ctx.set_active_context("browser", site_name.lower(), await_confirm=confirm)
+            print(f"[COMMAND INTELLIGENCE] Set browser context: {site_name.lower()}")
         except Exception as e:
-            print(f"[COMMAND INTELLIGENCE CONTEXT] Failed to set context: {e}")
+            print(f"[CONTEXT ERROR] Failed to set browser context: {e}")
 
-        # Set Global Context with Confirmation Gate (legacy)
         if confirm:
-            try:
-                from extensions.context_manager import get_manager
-                ctx = get_manager()
-                ctx.set_active_context("browser", site_name.lower(), await_confirm=True)
-            except Exception as e:
-                print(f"[CONTEXT ERROR] Failed to set browser context: {e}")
             time.sleep(0.5)
             speak(f"{site_name} is now open. Do you want to do something here?")
-        else:
-            # Still set context, but NO confirmation wait
-            try:
-                from extensions.context_manager import get_manager
-                ctx = get_manager()
-                ctx.set_active_context("browser", site_name.lower(), await_confirm=False)
-            except ImportError as e:
-                print(f"[CONTEXT ERROR] Interaction agent not available: {e}")
-            except Exception as e:
-                print(f"[CONTEXT ERROR] Failed to set browser context (no confirm): {e}")
 
         return f"Opened {site_name}."
 
@@ -176,14 +156,12 @@ def open_app(name):
         message = result.get("message")
 
         if success:
-            # Set Command Intelligence Context for successful app opens
+            # Set Command Intelligence Context for successful app opens via canonical ContextManager
             try:
-                import sys
-                if 'legacy.assistant' in sys.modules:
-                    from legacy.assistant import context
-                    if context:
-                        context.set_context("system", display_name.lower())
-                        print(f"[COMMAND INTELLIGENCE] Set system context: {display_name.lower()}")
+                from extensions.context_manager import get_manager
+                ctx = get_manager()
+                ctx.set_active_context("app", display_name.lower(), await_confirm=False)
+                print(f"[COMMAND INTELLIGENCE] Set app context: {display_name.lower()}")
             except Exception as e:
                 print(f"[COMMAND INTELLIGENCE CONTEXT] Failed to set app context: {e}")
 
@@ -392,25 +370,13 @@ def close_app(app_name):
     if closed_any:
         speak(f"{app_name} closed.")
         
-        # Clear Command Intelligence Context
-        try:
-            import sys
-            if 'legacy.assistant' in sys.modules:
-                from legacy.assistant import context
-                if context:
-                    current_context = context.get_context()
-                    if current_context and current_context.get("value") == app_name:
-                        context.clear()
-                        print(f"[COMMAND INTELLIGENCE] Cleared context for {app_name}")
-        except Exception as e:
-            print(f"[COMMAND INTELLIGENCE CONTEXT] Failed to clear context: {e}")
-        
-        # Clear legacy context
+        # Clear context via canonical ContextManager
         try:
             from extensions.context_manager import get_manager
             ctx = get_manager()
-            if ctx.get_active_context().get("name") == app_name:
+            if ctx.get_active_context().get("name") == app_name.lower():
                 ctx.clear_context()
+                print(f"[COMMAND INTELLIGENCE] Cleared context for {app_name}")
         except Exception as e:
             print(f"[CONTEXT ERROR] Failed to clear context for {app_name}: {e}")
         return f"{app_name} closed."

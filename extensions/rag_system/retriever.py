@@ -53,7 +53,7 @@ class RAGRetriever:
     # Public dispatch
     # ------------------------------------------------------------------
 
-    def retrieve(self, intent: str, query: str):
+    def retrieve(self, intent: str, query: str, user_id=None):
         """Main retrieval dispatcher — routes by intent name."""
         print(f"[RAG RETRIEVER] Retrieving for intent: {intent}")
 
@@ -68,9 +68,9 @@ class RAGRetriever:
         elif intent == "location_query":
             return self._retrieve_location(query)
         elif intent == "memory_management":
-            return self._retrieve_memory(query)
+            return self._retrieve_memory(query, user_id=user_id)
         elif intent == "history_query":
-            return self._retrieve_history(query)
+            return self._retrieve_history(query, user_id=user_id)
         elif intent == "recommendation":
             return self._retrieve_recommendation(query)
         elif intent == "email_command":
@@ -434,19 +434,19 @@ class RAGRetriever:
     # Memory
     # ------------------------------------------------------------------
 
-    def _retrieve_memory(self, query: str):
-        user_id = CONFIG.CURRENT_USER_ID or CONFIG.get_last_user()
-        if not user_id:
+    def _retrieve_memory(self, query: str, user_id=None):
+        effective_uid = user_id or getattr(CONFIG, 'CURRENT_USER_ID', None) or CONFIG.get_last_user()
+        if not effective_uid:
             print("[RAG ERROR] Memory retrieval: user not authenticated.")
             return {"error": "User not authenticated. Cannot retrieve memory."}
 
         try:
             from legacy.memory_manager import load_user_memory
 
-            all_memory = load_user_memory(user_id)
+            all_memory = load_user_memory(effective_uid)
             available_keys = list(all_memory.keys()) if all_memory else []
 
-            history_data = self._retrieve_history(query)
+            history_data = self._retrieve_history(query, user_id=effective_uid)
             recent_hist = history_data.get("recent_history", []) if isinstance(history_data, dict) else []
 
             if not available_keys:
@@ -483,14 +483,14 @@ class RAGRetriever:
     # History
     # ------------------------------------------------------------------
 
-    def _retrieve_history(self, query: str):
-        user_id = CONFIG.CURRENT_USER_ID or CONFIG.get_last_user()
-        if not user_id:
+    def _retrieve_history(self, query: str, user_id=None):
+        effective_uid = user_id or getattr(CONFIG, 'CURRENT_USER_ID', None) or CONFIG.get_last_user()
+        if not effective_uid:
             print("[RAG RETRIEVER] No active session (no authenticated user).")
             return {"recent_history": [], "status": "No active session."}
 
         try:
-            history = get_chat_history(user_id, limit=10)
+            history = get_chat_history(effective_uid, limit=10)
             print(f"[RAG RETRIEVER] Fetched {len(history)} recent message exchanges.")
             return {"recent_history": history}
         except Exception as exc:

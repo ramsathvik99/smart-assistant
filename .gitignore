@@ -44,6 +44,8 @@ desktop.ini
 .env.*.local
 *.key
 data/screenshots/
+data/uploads/
+data/learned_rules/
 
 # Logs
 *.log
