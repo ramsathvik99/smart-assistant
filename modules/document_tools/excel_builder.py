@@ -74,12 +74,18 @@ def create_excel_spreadsheet(
                 "totals": add_totals
             }]
 
+        import re
         total_rows_created = 0
         for s_idx, s_cfg in enumerate(sheet_configs):
-            s_title = (s_cfg.get("title") or f"Sheet{s_idx+1}")[:30]
+            raw_title = s_cfg.get("title") or s_cfg.get("name") or f"Sheet{s_idx+1}"
+            s_title = re.sub(r'[:\\/?*\[\]]', '_', str(raw_title))[:31] or f"Sheet{s_idx+1}"
             s_headers = s_cfg.get("headers", ["Column 1"])
             s_rows = s_cfg.get("rows", [])
             s_totals = s_cfg.get("totals", add_totals)
+
+            # Ensure headers are flat strings
+            if isinstance(s_headers, list) and s_headers and isinstance(s_headers[0], dict):
+                s_headers = list(s_headers[0].keys())
 
             if s_idx == 0:
                 ws = wb.active
@@ -91,7 +97,7 @@ def create_excel_spreadsheet(
             ws.freeze_panes = "A2"
 
             # Write headers
-            ws.append(s_headers)
+            ws.append([str(h) for h in s_headers])
             for col_num in range(1, len(s_headers) + 1):
                 cell = ws.cell(row=1, column=col_num)
                 cell.font = header_font
@@ -101,7 +107,13 @@ def create_excel_spreadsheet(
 
             # Write data rows
             for r_data in s_rows:
-                ws.append(r_data)
+                if isinstance(r_data, dict):
+                    row_vals = [r_data.get(h, "") for h in s_headers]
+                elif isinstance(r_data, (list, tuple)):
+                    row_vals = list(r_data)
+                else:
+                    row_vals = [r_data]
+                ws.append(row_vals)
                 total_rows_created += 1
 
             num_rows = len(s_rows)

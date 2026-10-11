@@ -1509,3 +1509,6 @@ def get_universal_computer_access() -> UniversalComputerAccess:
     if _universal_computer_access is None:
         _universal_computer_access = UniversalComputerAccess()
     return _universal_computer_access
+
+# Canonical alias
+get_computer_access = get_universal_computer_access

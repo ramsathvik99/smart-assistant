@@ -12,6 +12,7 @@ Regression test suite verifying fixes applied during old/new version integration
    - Ambiguous outcome prevents automatic duplicate send.
    - Partial delivery prevents automatic resend of accepted recipients.
 """
+import os
 import unittest
 from unittest.mock import patch, MagicMock
 import time
@@ -180,6 +181,69 @@ class TestOldNewVersionRepairRegressions(unittest.TestCase):
             self.assertTrue(res_cancel.get("success"))
             self.assertEqual(res_cancel.get("status"), "cancelled")
 
+    def test_09_remember_my_fact_is_stored_and_retrieved(self):
+        """Declarative 'remember my X is Y' must route to MEMORY_STORE and be queryable."""
+        from legacy.memory_manager import delete_memory_key
+        try:
+            # Route store command
+            res_store = self.router.execute_single_action("remember my favorite fruit is mango", user_id=1)
+            self.assertEqual(res_store.get("status"), "success")
+            self.assertEqual(res_store.get("intent"), "MEMORY_STORE")
+
+            # Route query command
+            res_query = self.router.execute_single_action("what is my favorite fruit", user_id=1)
+            self.assertEqual(res_query.get("status"), "success")
+            self.assertIn("mango", (res_query.get("response") or "").lower())
+        finally:
+            delete_memory_key(1, "favorite_fruit")
+            delete_memory_key(1, "favourite_fruit")
+
+    def test_10_dashboard_document_generation_all_formats(self):
+        """Dashboard service adapter must successfully generate all 4 formats without parameter mismatch."""
+        from modules.ui.dashboard import service_adapters as sa
+        for kind, topic in [("pdf", "Audit Alpha"), ("docx", "Audit Beta"), ("xlsx", "Audit Gamma"), ("pptx", "Audit Delta")]:
+            res = sa.generate_document(kind, topic)
+            self.assertTrue(res.get("success"), f"Failed for {kind}: {res}")
+            path = res.get("path")
+            self.assertIsNotNone(path)
+            self.assertTrue(os.path.exists(path), f"File {path} was not created")
+            self.assertGreater(os.path.getsize(path), 200, f"File {path} is too small")
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    def test_11_excel_sheet_title_sanitization_and_dict_rows(self):
+        """Excel generator must sanitize colons and brackets in sheet titles and convert dict rows."""
+        from modules.document_tools.excel_builder import create_excel_spreadsheet
+        tmp_xlsx = os.path.join(os.path.expanduser("~"), "Documents", "test_sanitize_sheet.xlsx")
+        try:
+            res = create_excel_spreadsheet(
+                sheet_title="Report: 2026 [Q1]",
+                headers=["Item", "Score"],
+                rows=[{"Item": "Task A", "Score": 95}, {"Item": "Task B", "Score": 88}],
+                filename=tmp_xlsx
+            )
+            self.assertTrue(res.get("success"), f"create_excel_spreadsheet failed: {res}")
+            self.assertTrue(os.path.exists(tmp_xlsx))
+            self.assertGreater(os.path.getsize(tmp_xlsx), 500)
+        finally:
+            if os.path.exists(tmp_xlsx):
+                os.remove(tmp_xlsx)
+
+    def test_12_computer_access_alias_and_telemetry(self):
+        """get_computer_access must alias get_universal_computer_access and yield valid telemetry."""
+        from core.universal_computer_access import get_computer_access, get_universal_computer_access
+        uca1 = get_computer_access()
+        uca2 = get_universal_computer_access()
+        self.assertIs(uca1, uca2)
+        info = uca1.get_system_info()
+        self.assertIn("hostname", info)
+        self.assertIn("os_name", info)
+        win = uca1.get_active_window()
+        self.assertIn("title", win)
+
 
 if __name__ == "__main__":
     unittest.main()
+

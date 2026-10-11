@@ -793,7 +793,7 @@ class UnifiedCommandRouter:
                 re.compile(r'\bwhat(\'s|\s+is)\s+my\b', re.IGNORECASE),
                 re.compile(r'\btell\s+me\s+my\b', re.IGNORECASE),
                 re.compile(r'\bwhich\s+([a-zA-Z\s]+)\s+do\s+i\s+(like|love|prefer)\b', re.IGNORECASE),
-                re.compile(r'\b(remember|recall)\s+my\b', re.IGNORECASE),
+                re.compile(r'\b(?:remember\s+my\b(?!\s+[a-zA-Z0-9_\s]+?\s+(?:is|was|=))|recall\s+my\b)', re.IGNORECASE),
                 re.compile(r'\bwhat\s+do\s+i\s+like\b', re.IGNORECASE),
                 re.compile(r'\b(?:tell\s+me\s+about|what\s+did\s+i\s+tell\s+you\s+about)\s+myself\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+do\s+you\s+(know|remember)\s+about\s+me\b', re.IGNORECASE),

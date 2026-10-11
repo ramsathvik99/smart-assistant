@@ -614,24 +614,36 @@ def generate_document(doc_type: str, topic: str, extra: Optional[Dict[str, Any]]
         os.makedirs(output_dir, exist_ok=True)
         safe_topic = "".join(c for c in topic if c.isalnum() or c in " _-").strip() or "document"
         if dt in ("pdf", "docx"):
-            content = build_document_content(topic) or {}
-            title = content.get("title") or safe_topic
-            sections = content.get("sections", [])
+            content = build_document_content(topic)
+            if isinstance(content, dict):
+                title = content.get("title") or safe_topic
+                sections = content.get("sections", []) or content
+            else:
+                title = safe_topic
+                sections = content or safe_topic
             if dt == "pdf":
                 path = os.path.join(output_dir, f"{safe_topic}.pdf")
-                create_pdf_document(path, title, sections)
+                res = create_pdf_document(title=title, content=sections, filename=path)
+                if not res.get("success"):
+                    return {"success": False, "message": res.get("message", "Failed to generate PDF")}
             else:
                 path = os.path.join(output_dir, f"{safe_topic}.docx")
-                create_docx_document(path, title, sections)
+                res = create_docx_document(title=title, content=sections, filename=path)
+                if not res.get("success"):
+                    return {"success": False, "message": res.get("message", "Failed to generate Word document")}
         elif dt == "xlsx":
             spec = build_spreadsheet_spec(topic) or {}
-            sheets = spec.get("sheets", [{"name": "Sheet1", "headers": ["Item", "Value"], "rows": []}])
+            sheets = spec.get("sheets", [{"title": "Sheet1", "headers": ["Item", "Value"], "rows": []}])
             path = os.path.join(output_dir, f"{safe_topic}.xlsx")
-            create_excel_spreadsheet(path, sheets)
+            res = create_excel_spreadsheet(sheet_title="Sheet1", sheets=sheets, filename=path)
+            if not res.get("success"):
+                return {"success": False, "message": res.get("message", "Failed to generate Excel spreadsheet")}
         elif dt == "pptx":
             slides = build_presentation_slides(topic) or []
             path = os.path.join(output_dir, f"{safe_topic}.pptx")
-            create_presentation(path, topic, slides)
+            res = create_presentation(title=topic, slides=slides, filename=path)
+            if not res.get("success"):
+                return {"success": False, "message": res.get("message", "Failed to generate PowerPoint presentation")}
         else:
             return {"success": False, "message": f"Unsupported type: {doc_type}"}
         return {"success": True, "path": path, "message": f"Generated: {path}"}
