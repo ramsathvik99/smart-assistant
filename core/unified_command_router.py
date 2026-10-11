@@ -553,7 +553,7 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:send\s+(?:email|mail)|send\s+.*\s+(?:to|email|mail))\b', re.IGNORECASE),
                 re.compile(r'\b(?:email|mail)\s+.+?\s+to\b', re.IGNORECASE),
                 re.compile(r'\b(?:send|email|mail)\s+(?:it|that\s+file|this\s+file|the\s+file|the\s+pdf|the\s+excel|the\s+report)\s+to\b', re.IGNORECASE),
-                re.compile(r'\b(?:i\s+need\s+to|i\s+want\s+to|can\s+you\s+(?:help\s+me\s+)?|please\s+)?(?:write|compose|prepare|send|mail|email)\s+(?:an?\s+)?(?:email|mail|message)?\b', re.IGNORECASE),
+                re.compile(r'\b(?:i\s+need\s+to|i\s+want\s+to|can\s+you\s+(?:help\s+me\s+)?|please\s+)?(?:write|compose|prepare|send|mail|email)\s+(?:an?\s+)?(?:email|mail|message)\b', re.IGNORECASE),
                 # Inbox and Mailbox checking variants
                 re.compile(r'\b(?:check|read|show|list|view|display|get)\s+(?:me\s+)?(?:my\s+)?(?:latest\s+|recent\s+)?(?:inbox|emails?|mails?|recent\s+messages?|messages?)\b', re.IGNORECASE),
                 re.compile(r'\b(?:unread\s+emails?|new\s+emails?|unread\s+mails?|new\s+mails?)\b', re.IGNORECASE),
@@ -798,7 +798,7 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:tell\s+me\s+about|what\s+did\s+i\s+tell\s+you\s+about)\s+myself\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+do\s+you\s+(know|remember)\s+about\s+me\b', re.IGNORECASE),
                 re.compile(r'\bshow\s+(?:my\s+)?memory\b', re.IGNORECASE),
-                re.compile(r'\b(?:project\s+secret|my\s+secret|my\s+project\s+secret)\b', re.IGNORECASE),
+                re.compile(r'\b(?:project\s+secret|my\s+project\s+secret)\b', re.IGNORECASE),
                 re.compile(r'\b(?:what(?:\'s|\s+is)|tell\s+me|show\s+me|get)\b.*?\bmy\s+([a-zA-Z0-9_\s]+)', re.IGNORECASE),
             ],
 

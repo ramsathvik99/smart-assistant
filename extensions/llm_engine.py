@@ -133,7 +133,7 @@ class LLMEngine:
         self.interactive_timeout = float(CONFIG.get("LLM_INTERACTIVE_TIMEOUT", 7.0))
 
         # Primary provider and authoritative timeout configuration
-        self.primary_provider = str(CONFIG.get("LLM_PRIMARY_PROVIDER", CONFIG.get("PRIMARY_PROVIDER", "ollama"))).lower().strip()
+        self.primary_provider = str(CONFIG.get("LLM_PRIMARY_PROVIDER", CONFIG.get("PRIMARY_PROVIDER", "openai"))).lower().strip()
         self.request_timeout = float(CONFIG.get("LLM_REQUEST_TIMEOUT", CONFIG.get("LLM_TIMEOUT", 65.0)))
         self.groq_timeout = float(CONFIG.get("GROQ_TIMEOUT", 6.0))
         self.openai_timeout = float(CONFIG.get("OPENAI_TIMEOUT", 8.0))
@@ -473,7 +473,7 @@ class LLMEngine:
             return None
 
         is_interactive = task_type in ("interactive", "conversational", "chat", "classification")
-        primary = getattr(self, "primary_provider", "ollama").lower().strip()
+        primary = getattr(self, "primary_provider", "openai").lower().strip()
         if timeout_budget is None:
             if is_interactive:
                 timeout_budget = self.interactive_timeout
@@ -570,8 +570,8 @@ class LLMEngine:
             {"role": "user", "content": prompt}
         ]
 
-        default_chain = ["ollama", "groq", "gemini", "openai", "deepseek", "huggingface"]
-        if primary in default_chain:
+        default_chain = ["openai", "groq", "gemini", "deepseek", "huggingface", "ollama"]
+        if primary in default_chain and primary != "ollama":
             provider_chain = [primary] + [p for p in default_chain if p != primary]
         else:
             provider_chain = default_chain

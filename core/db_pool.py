@@ -39,7 +39,7 @@ class DatabaseConnectionPool:
     def __init__(
         self,
         minconn: int = 1,
-        maxconn: int = 20,
+        maxconn: int = 50,
         host: Optional[str] = None,
         port: Optional[int] = None,
         dbname: Optional[str] = None,
@@ -58,7 +58,7 @@ class DatabaseConnectionPool:
         self.password = password or os.getenv("DB_PASSWORD") or getattr(settings, "DB_PASSWORD", None)
         self.database_url = database_url or os.getenv("DATABASE_URL")
         self.minconn = minconn
-        self.maxconn = maxconn
+        self.maxconn = int(os.getenv("DB_MAX_CONNECTIONS", maxconn))
 
         self._pool: Optional[pool.ThreadedConnectionPool] = None
         self._pool_lock = threading.Lock()

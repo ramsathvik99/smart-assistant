@@ -411,6 +411,8 @@ def get_credentials(user: Optional[str] = None) -> Tuple[Optional[str], Optional
     current_u = user or get_current_user()
     email, password = get_user_email(current_u)
     if not email or not password:
+        if os.environ.get("HEADLESS") or os.environ.get("CI") or os.environ.get("PYTEST_CURRENT_TEST"):
+            return None, None
         speak(f"I don't have email credentials for {current_u}. Please enter them in the popup.")
         email, password = get_email_credentials_popup()
         if email and password:
@@ -938,6 +940,11 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
 
     # ── Active In-Flight Pending Email Resolution ────────────────────────────
     pending = _pending_email_sessions.get(current_u)
+    if not pending and (action == "cancel" or any(w in cmd_lower for w in ["cancel email", "cancel draft", "cancel the email", "cancel the draft", "discard email", "discard draft"])):
+        msg = "There is no active email draft or pending send to cancel."
+        speak(msg)
+        return {"success": True, "status": "no_pending", "message": msg}
+
     if pending:
         if pending.get("status") == STATE_SENDING_EMAIL:
             return {"success": False, "status": "in_progress", "message": "The email is currently being sent. Please wait for the result before editing or cancelling it."}

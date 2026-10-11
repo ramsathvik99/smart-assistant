@@ -77,7 +77,8 @@ def _get_connection():
         if pool.is_healthy():
             raw_conn = pool.getconn()
             raw_conn.autocommit = True
-            return raw_conn
+            from legacy.memory_manager import PooledConnectionWrapper
+            return PooledConnectionWrapper(raw_conn, pool)
     except Exception as e:
         print(f"[CONV_MEMORY] [INFO] Canonical db_pool unavailable: {e}")
 
@@ -102,18 +103,19 @@ def close_connection(conn=None):
     target_conn = conn or _conn
     if target_conn and not getattr(target_conn, 'closed', False):
         try:
-            from core.db_pool import get_db_pool
-            pool = get_db_pool()
-            if pool.is_healthy() and pool._pool:
-                pool.putconn(target_conn)
-                return
+            target_conn.close()
+            return
         except Exception:
             pass
         try:
-            target_conn.close()
-            print("[CONV_MEMORY] PostgreSQL connection closed.")
-        except Exception as e:
-            print(f"[CONV_MEMORY] Error closing DB connection: {e}")
+            from core.db_pool import get_db_pool
+            pool = get_db_pool()
+            raw = getattr(target_conn, '_raw_conn', target_conn)
+            if pool.is_healthy() and pool._pool:
+                pool.putconn(raw)
+                return
+        except Exception:
+            pass
     if target_conn == _conn:
         _conn = None
 
@@ -153,6 +155,8 @@ def restore_memory_on_startup():
 
     except Exception as e:
         print(f"[CONV_MEMORY] [WARN] Error restoring memory from DB: {e}")
+    finally:
+        close_connection(conn)
 
 
 # ──────────────────────────────────────────────
@@ -212,8 +216,11 @@ def store_interaction(user_command: str, assistant_response: str, user_id=None):
                 
         except Exception as e:
             print(f"[CONV_MEMORY] [WARN] Failed to insert interaction into DB: {e}")
+        finally:
+            close_connection(conn)
 
     threading.Thread(target=_insert_db, daemon=True).start()
+
 
 
 # ──────────────────────────────────────────────

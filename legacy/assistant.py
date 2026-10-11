@@ -305,6 +305,7 @@ def extract_history_query(user_input):
 _last_utterance_text: str = ""
 _last_utterance_time: float = 0.0
 _last_utterance_response: str = ""
+_last_utterance_user_id = None
 _utterance_lock = threading.Lock()
 _current_turn_epoch: int = 0
 
@@ -327,10 +328,10 @@ def process_input(text, user_id=None):
 
     # Utterance Deduplication & Atomic Epoch Transition (Requirement 4)
     with _utterance_lock:
-        global _last_utterance_text, _last_utterance_time, _last_utterance_response, _current_turn_epoch
+        global _last_utterance_text, _last_utterance_time, _last_utterance_response, _last_utterance_user_id, _current_turn_epoch
         from instance.config import settings as _cfg_dup
         suppression_window = float(_cfg_dup.get("DUPLICATE_UTTERANCE_WINDOW", 0.75))
-        if norm_text == _last_utterance_text and (now_mono - _last_utterance_time) < suppression_window:
+        if norm_text == _last_utterance_text and user_id == _last_utterance_user_id and (now_mono - _last_utterance_time) < suppression_window:
             print(f"[DEDUPLICATION] Suppressed duplicate utterance '{clean_text}' within {now_mono - _last_utterance_time:.3f}s window.")
             return _last_utterance_response
 
@@ -338,6 +339,7 @@ def process_input(text, user_id=None):
         my_epoch = _current_turn_epoch
         _last_utterance_text = norm_text
         _last_utterance_time = now_mono
+        _last_utterance_user_id = user_id
 
     # Performance instrumentation: Start monotonic latency tracker with unique correlation ID (Requirement 7)
     correlation_id = f"turn_{int(now_mono * 1000)}_{my_epoch}"
