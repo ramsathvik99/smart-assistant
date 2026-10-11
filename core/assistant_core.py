@@ -79,6 +79,15 @@ class AssistantCore:
         except Exception as e:
             print(f"[CORE] Proactive coordinator user context update error: {e}")
 
+        # Start continuous environment observer (additive – zero regression)
+        try:
+            from core.environment import get_environment_coordinator
+            if user_id and user_id != 0:
+                get_environment_coordinator().ensure_running(str(user_id))
+        except Exception as e:
+            print(f"[CORE] Environment observer start error: {e}")
+
+
     def get_user_context(self) -> Dict[str, Any]:
         """Return active user context ensuring isolation."""
         with self._state_lock:
@@ -189,13 +198,34 @@ class AssistantCore:
             if callback in self._visual_listeners:
                 self._visual_listeners.remove(callback)
 
-    def show_visual_response(self, visual_response: Any):
-        """Dispatch a visual response to all registered presentation surfaces."""
+    def show_visual_response(self, visual_response: Any, user_input: Optional[str] = None, intent: Any = None):
+        """Dispatch a visual response to all registered presentation surfaces,
+        strictly enforcing the centralized visual surface policy.
+        """
         vr_dict = visual_response.to_dict() if hasattr(visual_response, "to_dict") else dict(visual_response)
         uid = str(vr_dict.get("user_id") or self._user_id or "default")
         with self._state_lock:
             self._active_visual_responses[uid] = vr_dict
             listeners = list(self._visual_listeners)
+
+        try:
+            from core.visual_response import should_show_visual_surface
+            req = user_input or vr_dict.get("metadata", {}).get("user_input") or vr_dict.get("source_context", "")
+            res_intent = intent or vr_dict.get("metadata", {}).get("intent")
+            resp_type = vr_dict.get("response_type")
+            res_val = vr_dict.get("raw_content") or vr_dict.get("primary_value")
+            ctx = vr_dict.get("metadata", {})
+
+            if not should_show_visual_surface(
+                intent=res_intent,
+                response_type=resp_type,
+                user_request=req,
+                result=res_val,
+                context=ctx
+            ):
+                return
+        except Exception as e:
+            print(f"[CORE] Visual surface policy check error: {e}")
 
         for callback in listeners:
             try:
@@ -254,7 +284,7 @@ class AssistantCore:
         self.set_state("thinking")
         try:
             from legacy.assistant import process_input
-            response = process_input(text.strip())
+            response = process_input(text.strip(), user_id=effective_uid)
             self.set_state("idle")
             return response or "Command executed."
         except Exception as e:

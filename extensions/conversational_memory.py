@@ -29,7 +29,7 @@ _DB_CONFIG = {
     "port":     int(os.getenv("DB_PORT", "5432")),
     "dbname":   os.getenv("DB_NAME", "nova_assistant"),
     "user":     os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", "ramsathvik"),
+    "password": os.getenv("DB_PASSWORD", ""),
 }
 
 MEMORY_LIMIT = 30   # max entries in the in-memory deque
@@ -65,16 +65,28 @@ recent_memory: deque = deque(maxlen=MEMORY_LIMIT)
 _lock = threading.Lock()   # protect deque writes from concurrent threads
 
 # ──────────────────────────────────────────────
-#  DATABASE CONNECTION
+#  DATABASE CONNECTION (Pooled via canonical core.db_pool)
 # ──────────────────────────────────────────────
 _conn = None
 
 def _get_connection():
-    """Return a cached psycopg2 connection, creating it if needed."""
+    """Return a database connection via canonical core.db_pool, falling back safely."""
+    try:
+        from core.db_pool import get_db_pool
+        pool = get_db_pool()
+        if pool.is_healthy():
+            raw_conn = pool.getconn()
+            raw_conn.autocommit = True
+            return raw_conn
+    except Exception as e:
+        print(f"[CONV_MEMORY] [INFO] Canonical db_pool unavailable: {e}")
+
     global _conn
     if _conn is None or _conn.closed:
         try:
             import psycopg2
+            if not _DB_CONFIG.get("password"):
+                return None
             _conn = psycopg2.connect(**_DB_CONFIG)
             _conn.autocommit = True
             print("[CONV_MEMORY] PostgreSQL connection established.")
@@ -84,16 +96,26 @@ def _get_connection():
     return _conn
 
 
-def close_connection():
-    """Gracefully close the database connection (call on Nova shutdown)."""
+def close_connection(conn=None):
+    """Gracefully close or return the database connection to the pool."""
     global _conn
-    if _conn and not _conn.closed:
+    target_conn = conn or _conn
+    if target_conn and not getattr(target_conn, 'closed', False):
         try:
-            _conn.close()
+            from core.db_pool import get_db_pool
+            pool = get_db_pool()
+            if pool.is_healthy() and pool._pool:
+                pool.putconn(target_conn)
+                return
+        except Exception:
+            pass
+        try:
+            target_conn.close()
             print("[CONV_MEMORY] PostgreSQL connection closed.")
         except Exception as e:
             print(f"[CONV_MEMORY] Error closing DB connection: {e}")
-    _conn = None
+    if target_conn == _conn:
+        _conn = None
 
 
 # ──────────────────────────────────────────────

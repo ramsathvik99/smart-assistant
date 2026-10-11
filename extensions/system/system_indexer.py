@@ -32,13 +32,25 @@ NON_APP_EXTENSIONS = (
     '.chm', '.hlp', '.htm', '.html', '.xml', '.json', '.zip', '.rar', '.7z', '.tar', '.gz'
 )
 
-# Skip keywords for utility/documentation links
-SKIP_NAME_KEYWORDS = (
-    "uninstall", "documentation", "release notes", "whatsnew", "what's new",
-    "readme", "license", "help", "manual", "guide", "feedback"
+# Skip keywords for utility/documentation links, uninstallers, installers, and package caches
+SKIP_KEYWORDS = (
+    "uninstall", "unins000", "unins", "documentation", "release notes", "whatsnew", "what's new",
+    "readme", "license", "help", "manual", "guide", "feedback",
+    "package cache", "setup.exe", "prereq", "prerequisites", "installer", "install.exe",
+    "update.exe", "updater", "crashreporter", "helper.exe"
 )
 
+# Common English stopwords that must NEVER match application acronyms or single-token shortcuts
+STOPWORD_ACRONYMS = {
+    "up", "on", "in", "to", "it", "at", "as", "by", "or", "an", "is",
+    "my", "no", "so", "we", "he", "me", "do", "go", "be", "if", "us",
+    "am", "the", "and", "but", "for", "out", "app", "run", "get", "see"
+}
+
 class SystemIndexer:
+    STOPWORD_ACRONYMS = STOPWORD_ACRONYMS
+    SKIP_KEYWORDS = SKIP_KEYWORDS
+
     def __init__(self):
         self.index_file = os.path.join(os.path.dirname(__file__), "system_index.json")
         self.system_index: Dict[str, str] = {}
@@ -56,7 +68,7 @@ class SystemIndexer:
         return cleaned.strip()
 
     def _is_legitimate_app(self, name: str, target: str) -> bool:
-        """Validate that an entry is a genuine application, not an image/doc/file"""
+        """Validate that an entry is a genuine standalone application, not an uninstaller, installer, setup, or package cache item"""
         n_low = name.lower()
         t_low = target.lower()
 
@@ -64,8 +76,12 @@ class SystemIndexer:
         if any(n_low.endswith(ext) or t_low.endswith(ext) for ext in NON_APP_EXTENSIONS):
             return False
 
-        # Disallow documentation / uninstallers
-        if any(kw in n_low for kw in SKIP_NAME_KEYWORDS):
+        # Disallow documentation, uninstallers, setup, prereq, installers in name OR target path
+        if any(kw in n_low for kw in SKIP_KEYWORDS) or any(kw in t_low for kw in SKIP_KEYWORDS):
+            return False
+
+        # Disallow package cache directories or uninstaller executables
+        if "package cache" in t_low or "unins" in t_low or "setup" in os.path.basename(t_low):
             return False
 
         # Web URLs and direct non-app file URIs
@@ -73,6 +89,16 @@ class SystemIndexer:
             return False
 
         return True
+
+    def _add_or_upgrade(self, catalog: Dict[str, str], name: str, target: str) -> None:
+        """Add application, ensuring verified disk targets (.exe, .lnk) overwrite shell:AppsFolder."""
+        if not self._is_legitimate_app(name, target):
+            return
+        existing = catalog.get(name)
+        if not existing:
+            catalog[name] = target
+        elif existing.startswith("shell:AppsFolder\\") and not target.startswith("shell:AppsFolder\\"):
+            catalog[name] = target
 
     def build_index(self) -> None:
         """Build generic Windows application index from all discovery sources"""
@@ -84,7 +110,138 @@ class SystemIndexer:
             start_time = time.time()
             catalog: Dict[str, str] = {}
 
-            # 1. Discover via PowerShell Get-StartApps (UWP, Store, packaged desktop apps)
+            # 1. Discover Start Menu Application Shortcuts (.lnk) — All Users & Current User
+            start_menu_paths = [
+                os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), r"Microsoft\Windows\Start Menu\Programs"),
+                os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
+            ]
+            for base in start_menu_paths:
+                if os.path.exists(base):
+                    for root, _, files in os.walk(base):
+                        for f in files:
+                            if f.lower().endswith(".lnk"):
+                                clean_name = self._clean_name(os.path.splitext(f)[0])
+                                full_path = os.path.join(root, f)
+                                self._add_or_upgrade(catalog, clean_name, full_path)
+
+            # 2. Discover Desktop Application Shortcuts (.lnk ONLY)
+            desktop_paths = [
+                os.path.join(os.environ.get("USERPROFILE", ""), r"Desktop"),
+                os.path.join(os.environ.get("USERPROFILE", ""), r"OneDrive", r"Desktop"),
+                os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), r"Desktop"),
+            ]
+            for d_path in desktop_paths:
+                if os.path.exists(d_path):
+                    try:
+                        for f in os.listdir(d_path):
+                            if f.lower().endswith(".lnk"):
+                                clean_name = self._clean_name(os.path.splitext(f)[0])
+                                full_path = os.path.join(d_path, f)
+                                self._add_or_upgrade(catalog, clean_name, full_path)
+                    except Exception:
+                        pass
+
+            # 3. Discover Windows Registry Registered App Paths (HKLM & HKCU)
+            for hive in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
+                for sub in [r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
+                            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths"]:
+                    try:
+                        with winreg.OpenKey(hive, sub) as key:
+                            count = winreg.QueryInfoKey(key)[0]
+                            for i in range(count):
+                                try:
+                                    subkey_name = winreg.EnumKey(key, i)
+                                    val = winreg.QueryValue(key, subkey_name)
+                                    if val:
+                                        clean_val = val.strip('"')
+                                        if os.path.exists(clean_val):
+                                            base_name = self._clean_name(os.path.splitext(subkey_name)[0])
+                                            self._add_or_upgrade(catalog, base_name, clean_val)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+            # 4. Discover user-space installed apps in %LOCALAPPDATA%\Programs
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
+            local_programs = os.path.join(local_app_data, "Programs")
+            if os.path.exists(local_programs):
+                try:
+                    for app_dir in os.listdir(local_programs):
+                        app_dir_path = os.path.join(local_programs, app_dir)
+                        if not os.path.isdir(app_dir_path):
+                            continue
+                        for f in os.listdir(app_dir_path):
+                            if not f.lower().endswith(".exe"):
+                                continue
+                            fl = f.lower()
+                            if any(kw in fl for kw in ["unins", "setup", "update", "helper", "crash", "squirrel"]):
+                                continue
+                            clean_name = self._clean_name(os.path.splitext(f)[0])
+                            folder_name = self._clean_name(app_dir)
+                            full_path = os.path.join(app_dir_path, f)
+                            chosen_name = folder_name if len(folder_name) >= len(clean_name) else clean_name
+                            self._add_or_upgrade(catalog, chosen_name, full_path)
+                            self._add_or_upgrade(catalog, clean_name, full_path)
+                except Exception as e:
+                    print(f"[SYSTEM INDEXER] LocalPrograms discovery note: {e}")
+
+            # 5. Discover WindowsApps execution aliases (%LOCALAPPDATA%\Microsoft\WindowsApps)
+            winapps = os.path.join(local_app_data, "Microsoft", "WindowsApps")
+            if os.path.exists(winapps):
+                try:
+                    for f in os.listdir(winapps):
+                        if f.lower().endswith(".exe"):
+                            base_name = self._clean_name(os.path.splitext(f)[0])
+                            full_path = os.path.join(winapps, f)
+                            self._add_or_upgrade(catalog, base_name, full_path)
+                except Exception:
+                    pass
+
+            # 6. Discover Installed Applications from Registry Uninstall Keys
+            for hive in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
+                for sub in [r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"]:
+                    try:
+                        with winreg.OpenKey(hive, sub) as key:
+                            count = winreg.QueryInfoKey(key)[0]
+                            for i in range(count):
+                                try:
+                                    sk = winreg.OpenKey(key, winreg.EnumKey(key, i))
+                                    display_name = winreg.QueryValueEx(sk, 'DisplayName')[0]
+                                    clean_name = self._clean_name(display_name)
+                                    if not clean_name or not self._is_legitimate_app(clean_name, ""):
+                                        continue
+
+                                    exe_target = None
+                                    try:
+                                        icon_val = winreg.QueryValueEx(sk, 'DisplayIcon')[0].split(',')[0].strip('"')
+                                        if icon_val.lower().endswith(".exe") and os.path.exists(icon_val):
+                                            exe_target = icon_val
+                                    except Exception:
+                                        pass
+
+                                    if not exe_target:
+                                        try:
+                                            install_loc = winreg.QueryValueEx(sk, 'InstallLocation')[0].strip('"')
+                                            if os.path.isdir(install_loc):
+                                                for f in os.listdir(install_loc):
+                                                    if f.lower().endswith(".exe") and not any(kw in f.lower() for kw in ["unins", "setup", "helper"]):
+                                                        cand = os.path.join(install_loc, f)
+                                                        if os.path.exists(cand):
+                                                            exe_target = cand
+                                                            break
+                                        except Exception:
+                                            pass
+
+                                    if exe_target and os.path.exists(exe_target):
+                                        self._add_or_upgrade(catalog, clean_name, exe_target)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+            # 7. Discover via PowerShell Get-StartApps (UWP, Store apps)
             try:
                 cmd = ["powershell", "-NoProfile", "-Command", "Get-StartApps | ConvertTo-Json"]
                 out = subprocess.check_output(cmd, text=True, errors="replace", timeout=12)
@@ -101,163 +258,39 @@ class SystemIndexer:
                         if not self._is_legitimate_app(clean_name, appid):
                             continue
 
-                        # Determine launch target
-                        if "!" in appid or not (os.path.isabs(appid) and os.path.exists(appid)):
-                            catalog[clean_name] = f"shell:AppsFolder\\{appid}"
+                        # If appid has '!', it's a true UWP/packaged app
+                        if "!" in appid:
+                            self._add_or_upgrade(catalog, clean_name, f"shell:AppsFolder\\{appid}")
+                        elif os.path.isabs(appid) and os.path.exists(appid):
+                            self._add_or_upgrade(catalog, clean_name, appid)
                         else:
-                            catalog[clean_name] = appid
+                            # Check if appid or appid.exe exists on path or app paths
+                            w = shutil.which(appid) or shutil.which(f"{appid}.exe")
+                            if w:
+                                self._add_or_upgrade(catalog, clean_name, w)
+                            else:
+                                if clean_name not in catalog:
+                                    catalog[clean_name] = f"shell:AppsFolder\\{appid}"
             except Exception as e:
                 print(f"[SYSTEM INDEXER] Get-StartApps discovery note: {e}")
 
-            # 2. Discover Start Menu Application Shortcuts (.lnk)
-            start_menu_paths = [
-                os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), r"Microsoft\Windows\Start Menu\Programs"),
-                os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
-            ]
-            for base in start_menu_paths:
-                if os.path.exists(base):
-                    for root, _, files in os.walk(base):
-                        for f in files:
-                            if f.lower().endswith(".lnk"):
-                                clean_name = self._clean_name(os.path.splitext(f)[0])
-                                full_path = os.path.join(root, f)
-                                if self._is_legitimate_app(clean_name, full_path) and clean_name not in catalog:
-                                    catalog[clean_name] = full_path
-
-            # 3. Discover Desktop Application Shortcuts (.lnk ONLY)
-            desktop_paths = [
-                os.path.join(os.environ.get("USERPROFILE", ""), r"Desktop"),
-                os.path.join(os.environ.get("USERPROFILE", ""), r"OneDrive", r"Desktop"),
-                os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), r"Desktop"),
-            ]
-            for d_path in desktop_paths:
-                if os.path.exists(d_path):
-                    try:
-                        for f in os.listdir(d_path):
-                            if f.lower().endswith(".lnk"):
-                                clean_name = self._clean_name(os.path.splitext(f)[0])
-                                full_path = os.path.join(d_path, f)
-                                if self._is_legitimate_app(clean_name, full_path) and clean_name not in catalog:
-                                    catalog[clean_name] = full_path
-                    except Exception:
-                        pass
-
-            # 4. Discover Windows Registry Registered App Paths (HKLM & HKCU)
-            for hive in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
-                for sub in [r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
-                            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths"]:
-                    try:
-                        with winreg.OpenKey(hive, sub) as key:
-                            count = winreg.QueryInfoKey(key)[0]
-                            for i in range(count):
-                                try:
-                                    subkey_name = winreg.EnumKey(key, i)
-                                    val = winreg.QueryValue(key, subkey_name)
-                                    if val:
-                                        clean_val = val.strip('"')
-                                        if os.path.exists(clean_val):
-                                            base_name = self._clean_name(os.path.splitext(subkey_name)[0])
-                                            if self._is_legitimate_app(base_name, clean_val):
-                                                if base_name not in catalog and base_name.title() not in catalog:
-                                                    catalog[base_name] = clean_val
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-
-            # 5. Discover WindowsApps execution aliases (%LOCALAPPDATA%\Microsoft\WindowsApps)
-            local_app_data = os.environ.get("LOCALAPPDATA", "")
-            winapps = os.path.join(local_app_data, "Microsoft", "WindowsApps")
-            if os.path.exists(winapps):
-                try:
-                    for f in os.listdir(winapps):
-                        if f.lower().endswith(".exe"):
-                            base_name = self._clean_name(os.path.splitext(f)[0])
-                            full_path = os.path.join(winapps, f)
-                            if self._is_legitimate_app(base_name, full_path):
-                                if base_name not in catalog and base_name.title() not in catalog:
-                                    catalog[base_name] = full_path
-                except Exception:
-                    pass
-
-            # 6. Discover Installed Applications from Registry Uninstall Keys
-            for hive in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
-                for sub in [r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-                            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"]:
-                    try:
-                        with winreg.OpenKey(hive, sub) as key:
-                            count = winreg.QueryInfoKey(key)[0]
-                            for i in range(count):
-                                try:
-                                    sk = winreg.OpenKey(key, winreg.EnumKey(key, i))
-                                    display_name = winreg.QueryValueEx(sk, 'DisplayName')[0]
-                                    clean_name = self._clean_name(display_name)
-                                    if not clean_name or clean_name in catalog or clean_name.title() in catalog:
-                                        continue
-                                    if not self._is_legitimate_app(clean_name, ""):
-                                        continue
-
-                                    # Try DisplayIcon first
-                                    exe_target = None
-                                    try:
-                                        icon_val = winreg.QueryValueEx(sk, 'DisplayIcon')[0].split(',')[0].strip('"')
-                                        if icon_val.lower().endswith(".exe") and os.path.exists(icon_val):
-                                            exe_target = icon_val
-                                    except Exception:
-                                        pass
-
-                                    # Try InstallLocation if no DisplayIcon
-                                    if not exe_target:
-                                        try:
-                                            install_loc = winreg.QueryValueEx(sk, 'InstallLocation')[0].strip('"')
-                                            if os.path.isdir(install_loc):
-                                                # Look for direct exe matching app name
-                                                for f in os.listdir(install_loc):
-                                                    if f.lower().endswith(".exe") and not any(kw in f.lower() for kw in ["unins", "setup", "helper"]):
-                                                        exe_target = os.path.join(install_loc, f)
-                                                        break
-                                        except Exception:
-                                            pass
-
-                                    if exe_target and os.path.exists(exe_target):
-                                        catalog[clean_name] = exe_target
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-
-            # 8. Discover user-space installed apps in %LOCALAPPDATA%\Programs
-            #    (e.g. Opera, VS Code, Cursor, Ollama, Kiro, Devin, Trae, Windsurf, GIMP …)
-            local_programs = os.path.join(local_app_data, "Programs")
-            if os.path.exists(local_programs):
-                try:
-                    for app_dir in os.listdir(local_programs):
-                        app_dir_path = os.path.join(local_programs, app_dir)
-                        if not os.path.isdir(app_dir_path):
-                            continue
-                        # Walk one level deep only to stay fast
-                        for f in os.listdir(app_dir_path):
-                            if not f.lower().endswith(".exe"):
-                                continue
-                            # Skip known non-main helpers
-                            fl = f.lower()
-                            if any(kw in fl for kw in ["unins", "setup", "update", "helper", "crash", "squirrel"]):
-                                continue
-                            clean_name = self._clean_name(os.path.splitext(f)[0])
-                            # Also try the folder name as a display name
-                            folder_name = self._clean_name(app_dir)
-                            full_path = os.path.join(app_dir_path, f)
-                            if not self._is_legitimate_app(clean_name, full_path):
-                                continue
-                            # Prefer folder name if it's more descriptive
-                            chosen_name = folder_name if len(folder_name) >= len(clean_name) else clean_name
-                            if chosen_name not in catalog and chosen_name.title() not in catalog:
-                                catalog[chosen_name] = full_path
-                            # Also register by exe base name in case of mismatch
-                            if clean_name not in catalog and clean_name.title() not in catalog:
-                                catalog[clean_name] = full_path
-                except Exception as e:
-                    print(f"[SYSTEM INDEXER] LocalPrograms discovery note: {e}")
+            # 8. Common aliases mapping (ensures short names resolve to canonical installed apps)
+            alias_map = {
+                "Google Chrome": ["Chrome"],
+                "Microsoft Edge": ["Edge", "MS Edge"],
+                "Visual Studio Code": ["VS Code", "VSCode", "Code"],
+                "Telegram Desktop": ["Telegram"],
+                "VLC media player": ["VLC"],
+                "Brave": ["Brave Browser"],
+                "Firefox": ["Mozilla Firefox"],
+                "Opera Browser": ["Opera"],
+            }
+            for full_app, aliases in alias_map.items():
+                t = catalog.get(full_app)
+                if t:
+                    for al in aliases:
+                        if al not in catalog:
+                            catalog[al] = t
 
             # 9. Core Windows standard executables & protocol URIs
             system_tools = {
@@ -482,58 +515,79 @@ class SystemIndexer:
         # Tier 1: Exact match on normalized or alphanumeric
         for dname, target, n_name, a_name, words, acronym in self._catalog_cache:
             if q_norm == n_name or q_alnum == a_name:
-                return (dname, target, "exact")
+                if self._is_legitimate_app(dname, target):
+                    return (dname, target, "exact")
 
         # Tier 2: Acronym / special alias match
         if q_alnum in ["vscode", "vsc"]:
             for dname, target, n_name, a_name, words, acronym in self._catalog_cache:
                 if "visual studio code" in n_name:
-                    return (dname, target, "special_alias")
+                    if self._is_legitimate_app(dname, target):
+                        return (dname, target, "special_alias")
 
-        for dname, target, n_name, a_name, words, acronym in self._catalog_cache:
-            if len(q_alnum) >= 2 and q_alnum == acronym:
-                return (dname, target, "acronym")
+        if q_alnum not in STOPWORD_ACRONYMS and len(q_alnum) >= 2:
+            for dname, target, n_name, a_name, words, acronym in self._catalog_cache:
+                if q_alnum == acronym:
+                    if self._is_legitimate_app(dname, target):
+                        return (dname, target, "acronym")
 
         # Tier 3: User query is one of the exact standalone words in app name
         # e.g. "chrome" in "Google Chrome", "edge" in "Microsoft Edge", "explorer" in "File Explorer"
-        word_matches = []
-        for dname, target, n_name, a_name, words, acronym in self._catalog_cache:
-            if q_alnum in words:
-                # Rank by relevance: prefer fewer total words and shorter name
-                word_matches.append((len(words), len(a_name), dname, target))
-        if word_matches:
-            word_matches.sort()
-            best = word_matches[0]
-            return (best[2], best[3], "word_match")
+        # Stopwords (e.g. 'up', 'the', 'on') must NEVER resolve as standalone word matches
+        if q_alnum not in STOPWORD_ACRONYMS:
+            word_matches = []
+            for dname, target, n_name, a_name, words, acronym in self._catalog_cache:
+                if q_alnum in words:
+                    if self._is_legitimate_app(dname, target):
+                        word_matches.append((len(words), len(a_name), dname, target))
+            if word_matches:
+                word_matches.sort()
+                best = word_matches[0]
+                return (best[2], best[3], "word_match")
 
         # Tier 4: Prefix match (e.g. "calc" -> "Calculator", "note" -> "Notepad")
-        if len(q_alnum) >= 3:
+        if len(q_alnum) >= 3 and q_alnum not in STOPWORD_ACRONYMS:
             prefix_matches = []
             for dname, target, n_name, a_name, words, acronym in self._catalog_cache:
                 if a_name.startswith(q_alnum):
-                    prefix_matches.append((len(a_name), dname, target))
+                    if self._is_legitimate_app(dname, target):
+                        prefix_matches.append((len(a_name), dname, target))
             if prefix_matches:
                 prefix_matches.sort()
                 best = prefix_matches[0]
                 return (best[1], best[2], "prefix")
 
-        # Tier 5: Safe fuzzy match for minor typos (e.g. "whattsapp" / "whatts app" -> "WhatsApp")
-        fuzzy_matches = []
-        for dname, target, n_name, a_name, words, acronym in self._catalog_cache:
-            r1 = difflib.SequenceMatcher(None, q_alnum, a_name).ratio()
-            r2 = max((difflib.SequenceMatcher(None, q_alnum, w).ratio() for w in words), default=0.0)
-            best_r = max(r1, r2)
-            if best_r >= 0.82:
-                fuzzy_matches.append((best_r, dname, target))
-        if fuzzy_matches:
-            fuzzy_matches.sort(key=lambda x: x[0], reverse=True)
-            best = fuzzy_matches[0]
-            return (best[1], best[2], f"fuzzy ({best[0]:.2f})")
+        # Tier 5: Safe fuzzy match for minor typos (e.g. "whattsapp" -> "WhatsApp")
+        # Strict confidence threshold: >= 0.88 required.
+        # Ambiguity rule: if multiple distinct candidates are close (<0.05 delta), do not guess; require clarification.
+        if len(q_alnum) >= 3 and q_alnum not in STOPWORD_ACRONYMS:
+            fuzzy_matches = []
+            for dname, target, n_name, a_name, words, acronym in self._catalog_cache:
+                if not self._is_legitimate_app(dname, target):
+                    continue
+                r1 = difflib.SequenceMatcher(None, q_alnum, a_name).ratio()
+                r2 = max((difflib.SequenceMatcher(None, q_alnum, w).ratio() for w in words), default=0.0)
+                best_r = max(r1, r2)
+                if best_r >= 0.88:
+                    fuzzy_matches.append((best_r, dname, target))
+            if fuzzy_matches:
+                fuzzy_matches.sort(key=lambda x: x[0], reverse=True)
+                # Ambiguity guard: check if top 2 candidates are close
+                if len(fuzzy_matches) > 1:
+                    score1, name1, _ = fuzzy_matches[0]
+                    score2, name2, _ = fuzzy_matches[1]
+                    if (score1 - score2) < 0.05 and name1.lower() != name2.lower():
+                        # Multiple close candidates: DO NOT execute, signal ambiguity
+                        print(f"[SYSTEM INDEXER] Ambiguous application match between '{name1}' ({score1:.2f}) and '{name2}' ({score2:.2f}) for '{q_raw}'.")
+                        return None
+                best = fuzzy_matches[0]
+                return (best[1], best[2], f"fuzzy ({best[0]:.2f})")
 
         # Tier 6: Dynamic on-demand discovery if not found in pre-built catalog
-        on_demand_match = self._discover_on_demand(q_raw)
-        if on_demand_match:
-            return on_demand_match
+        if q_alnum not in STOPWORD_ACRONYMS:
+            on_demand_match = self._discover_on_demand(q_raw)
+            if on_demand_match and self._is_legitimate_app(on_demand_match[0], on_demand_match[1]):
+                return on_demand_match
 
         return None
 
@@ -543,6 +597,10 @@ class SystemIndexer:
         if detailed:
             return detailed[1]
         return None
+
+    def find_app(self, name: str) -> Optional[str]:
+        """Find application by name or alias."""
+        return self.resolve(name)
 
     def get_index_size(self) -> int:
         """Get number of indexed applications"""
@@ -555,3 +613,7 @@ class SystemIndexer:
 
 # Global instance
 system_indexer = SystemIndexer()
+
+def get_system_indexer() -> SystemIndexer:
+    """Return the global SystemIndexer instance."""
+    return system_indexer

@@ -26,26 +26,33 @@ class ReminderHandler:
     conflict detection, and database persistence.
     """
     
-    def __init__(self, db_manager):
+    def __init__(self, db_manager=None):
         """
         Initialize the reminder handler.
         
         Args:
-            db_manager: DatabaseManager instance for persistence
+            db_manager: DatabaseManager instance for persistence (optional)
         """
         self.db_manager = db_manager
         self.logger = logging.getLogger(__name__)
         
         # Compile regex patterns for performance
         self._compile_patterns()
+
+    def parse_reminder_input(self, user_input: str, user_id: int = 1) -> Dict[str, Any]:
+        """Convenience alias for parse_reminder_command."""
+        return self.parse_reminder_command(user_input, user_id)
     
     def _compile_patterns(self):
         """Compile regex patterns for natural language parsing."""
         
         # Action detection patterns
+        # Action detection patterns
         self.action_patterns = {
             ReminderAction.CREATE: [
                 r'\bremind\s+me\s+(?:to\s+)?',
+                r'\bremember\s+to\s+',
+                r'\bschedule\s+(?:a\s+)?reminder\s+(?:to\s+|for\s+)?',
                 r'\bset\s+(?:a\s+)?reminder\s+(?:to\s+)?',
                 r'\balert\s+me\s+(?:to\s+)?',
                 r'\breminder\s+(?:to\s+)?',
@@ -78,14 +85,14 @@ class ReminderHandler:
             # Relative time: "in 10 seconds", "in 5 minutes", "in 2 hours"
             'relative': re.compile(r'\bin\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', re.IGNORECASE),
             
-            # Specific time: "at 6 PM", "at 14:30", "at 2pm"
-            'specific': re.compile(r'\bat\s+(\d{1,2}):?(\d{2})?\s*(am|pm)?\b', re.IGNORECASE),
+            # Specific time: "at 6 PM", "at 14:30", "at 2pm", "1:00 pm", "1 pm"
+            'specific': re.compile(r'(?:\bat\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b', re.IGNORECASE),
             
-            # Today/tomorrow: "today at 5 PM", "tomorrow at 9 AM"
-            'today_tomorrow': re.compile(r'\b(today|tomorrow)\s*(?:at\s+(\d{1,2}):?(\d{2})?\s*(am|pm)?)?\b', re.IGNORECASE),
+            # Today/tomorrow/tonight: "today at 5 PM", "tomorrow at 9 AM", "tomorrow 1:00 pm", "tonight"
+            'today_tomorrow': re.compile(r'\b(today|tomorrow|tonight)\s*(?:(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?\b', re.IGNORECASE),
             
             # Weekdays: "Monday at 10 AM", "next Friday"
-            'weekday': re.compile(r'\b(?:next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:at\s+(\d{1,2}):?(\d{2})?\s*(am|pm)?)?\b', re.IGNORECASE),
+            'weekday': re.compile(r'\b(?:next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?\b', re.IGNORECASE),
             
             # Meeting reminder: "remind me 15 minutes before my meeting"
             'meeting_before': re.compile(r'\b(\d+)\s+minutes?\s+before\s+(?:my\s+)?(.+?)\s*(?:meeting|event|appointment)\b', re.IGNORECASE),
@@ -98,6 +105,16 @@ class ReminderHandler:
             'monthly': re.compile(r'\b(?:every\s+month|monthly)\b', re.IGNORECASE),
         }
     
+    def _normalize_input(self, text: str) -> str:
+        """Normalize common speech recognition typos, shorthand, and punctuation in times."""
+        t = text
+        t = re.sub(r'\bshedule\b', 'schedule', t, flags=re.IGNORECASE)
+        t = re.sub(r'\bmeting\b', 'meeting', t, flags=re.IGNORECASE)
+        t = re.sub(r'\bmeet\b', 'meeting', t, flags=re.IGNORECASE)
+        t = re.sub(r'(\d+)\s*p\.m\.', r'\1 pm', t, flags=re.IGNORECASE)
+        t = re.sub(r'(\d+)\s*a\.m\.', r'\1 am', t, flags=re.IGNORECASE)
+        return t
+
     def parse_reminder_command(self, user_input: str, user_id: int) -> Dict[str, Any]:
         """
         Parse a natural language reminder command.
@@ -109,7 +126,8 @@ class ReminderHandler:
         Returns:
             Dict with action, parameters, and any conflicts found
         """
-        user_input_lower = user_input.lower().strip()
+        user_input_norm = self._normalize_input(user_input)
+        user_input_lower = user_input_norm.lower().strip()
         
         # Detect the action type
         action = self._detect_action(user_input_lower)
@@ -252,25 +270,57 @@ class ReminderHandler:
                 "message": "When should I remind you? Please specify a time like 'at 6 PM' or 'in 30 minutes'.",
                 "action": ReminderAction.CREATE
             }
+        if time_result.get("is_past"):
+            return {
+                "status": "error",
+                "error_type": "temporal_failure",
+                "message": time_result.get("error_message", "The requested time has already passed today."),
+                "action": ReminderAction.CREATE
+            }
         
         result["due_at"] = time_result["due_at"]
         
         # Check for conflicts
-        conflicts = self.db_manager.check_reminder_conflicts(user_id, result["due_at"])
-        if conflicts:
-            result["conflicts"] = conflicts
-            result["status"] = "conflict"
-            conflict_texts = [f"'{c['task_text']}' at {c['due_at']}" for c in conflicts]
-            return {
-                "status": "conflict",
-                "message": f"You already have {', '.join(conflict_texts)}. Would you like to reschedule one of them?",
-                "action": ReminderAction.CREATE,
-                "proposed_reminder": result,
-                "conflicts": conflicts
-            }
+        if self.db_manager:
+            conflicts = self.db_manager.check_reminder_conflicts(user_id, result["due_at"])
+            if conflicts:
+                result["conflicts"] = conflicts
+                result["status"] = "conflict"
+                conflict_texts = [f"'{c['task_text']}' at {c['due_at']}" for c in conflicts]
+                return {
+                    "status": "conflict",
+                    "message": f"You already have {', '.join(conflict_texts)}. Would you like to reschedule one of them?",
+                    "action": "CREATE",
+                    "proposed_reminder": result,
+                    "conflicts": conflicts
+                }
         
         # Check for recurrence
         result["recurrence"] = self._parse_recurrence(text)
+        
+        # Normalized structured reminder fields
+        due_str = result.get("due_at") or ""
+        time_formatted = None
+        if len(due_str) >= 16:
+            try:
+                time_formatted = datetime.strptime(due_str[11:16], "%H:%M").strftime("%I:%M %p")
+            except Exception:
+                time_formatted = due_str[11:]
+        result["operation"] = "create"
+        result["action"] = "CREATE"
+        result["task"] = result["task_text"]
+        result["subject"] = result["task_text"]
+        result["date"] = due_str[:10] if due_str else None
+        result["time"] = time_formatted or (due_str[11:] if due_str else None)
+        result["timezone"] = "Asia/Kolkata"
+        result["structured"] = {
+            "operation": "create",
+            "subject": result["task_text"],
+            "date": result["date"],
+            "time": time_formatted or result["time"],
+            "recurrence": result.get("recurrence"),
+            "timezone": result["timezone"]
+        }
         
         result["status"] = "ready"
         return result
@@ -475,6 +525,8 @@ class ReminderHandler:
             r'\b(?:delete|remove|cancel|change|update|modify|move|reschedule)\s+the\s+reminders?\s+(?:to\s+|for\s+|about\s+)?',
             r'\b(?:delete|remove|cancel|change|update|modify|move|reschedule)\s+(?:my\s+)?',
             r'\bremind\s+me\s+(?:to\s+)?',
+            r'\bremember\s+to\s+',
+            r'\bschedule\s+(?:a\s+)?reminder\s+(?:to\s+|for\s+)?',
             r'\bset\s+(?:a\s+)?reminder\s+(?:for\s+|to\s+)?',
             r'\balert\s+me\s+(?:to\s+)?',
             r'\breminders?\s+(?:to\s+|for\s+|about\s+)?',
@@ -486,13 +538,14 @@ class ReminderHandler:
         
         # Remove time-related phrases (more comprehensive)
         task_text = re.sub(r'\bin\s+\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'\bat\s+\d{1,2}:?\d{0,2}\s*(?:am|pm)?\b', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'\b(?:today|tomorrow)\s*(?:at\s+\d{1,2}:?\d{0,2}\s*(?:am|pm)?)?\b', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:at\s+\d{1,2}:?\d{0,2}\s*(?:am|pm)?)?\b', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\b(?:today|tomorrow|tonight)\s*(?:(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b)?', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\b(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\bat\s+\d{1,2}(?::\d{2})?\b', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*(?:(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b)?', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\b(?:every\s+day|every\s+week|every\s+month|daily|weekly|monthly)\b', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\b(?:next\s+)?(?:day|week|month)\b', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'\bfor\s+(?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', '', task_text, flags=re.IGNORECASE)
-        task_text = re.sub(r'\b(?:tomorrow|today)\b', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\bfor\s+(?:tomorrow|today|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\b(?:tomorrow|today|tonight)\b', '', task_text, flags=re.IGNORECASE)
         
         # Remove leading "to" or "for" if present
         task_text = re.sub(r'^\s*(?:to|for)\s+', '', task_text, flags=re.IGNORECASE)
@@ -502,7 +555,7 @@ class ReminderHandler:
         task_text = re.sub(r'[.!?]+$', '', task_text)
         task_text = re.sub(r'\s+', ' ', task_text)  # Normalize whitespace
         
-        if not task_text and any(k in original_input.lower() for k in ["reminder", "remind me"]):
+        if not task_text and any(k in original_input.lower() for k in ["reminder", "remind me", "remember to"]):
             return "Reminder"
         return task_text if task_text else None
     
@@ -531,17 +584,17 @@ class ReminderHandler:
             
             return {"due_at": due_at.strftime("%Y-%m-%d %H:%M:%S"), "type": "relative"}
         
-        # 2. Check for today/tomorrow
+        # 2. Check for today/tomorrow/tonight
         today_tomorrow_match = self.time_patterns['today_tomorrow'].search(text)
         if today_tomorrow_match:
             day_ref = today_tomorrow_match.group(1).lower()
             base_date = now + timedelta(days=1) if day_ref == "tomorrow" else now
             
-            # If time is specified directly with today/tomorrow
+            # If time is specified directly with today/tomorrow/tonight
             if today_tomorrow_match.group(2):
                 hour = int(today_tomorrow_match.group(2))
                 minute = int(today_tomorrow_match.group(3)) if today_tomorrow_match.group(3) else 0
-                ampm = today_tomorrow_match.group(4) or ("pm" if hour <= 6 else "am")
+                ampm = today_tomorrow_match.group(4) or ("pm" if (hour <= 6 or day_ref == "tonight") else "am")
                 
                 if ampm.lower() == "pm" and hour != 12:
                     hour += 12
@@ -553,17 +606,28 @@ class ReminderHandler:
                 # Check if specific time appears elsewhere in text, e.g. "at 2pm tomorrow"
                 specific_match = self.time_patterns['specific'].search(text)
                 if specific_match:
-                    hour = int(specific_match.group(1))
-                    minute = int(specific_match.group(2)) if specific_match.group(2) else 0
-                    ampm = specific_match.group(3) or ("pm" if hour <= 6 else "am")
+                    h_val = specific_match.group(1) or specific_match.group(4)
+                    m_val = specific_match.group(2) or specific_match.group(5)
+                    ap_val = specific_match.group(3) or specific_match.group(6)
+                    hour = int(h_val) if h_val else 9
+                    minute = int(m_val) if m_val else 0
+                    ampm = ap_val or ("pm" if (hour <= 6 or day_ref == "tonight") else "am")
                     if ampm.lower() == "pm" and hour != 12:
                         hour += 12
                     elif ampm.lower() == "am" and hour == 12:
                         hour = 0
                     due_at = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 else:
-                    due_at = base_date.replace(hour=9, minute=0, second=0, microsecond=0)
+                    default_h = 20 if day_ref == "tonight" else 9
+                    due_at = base_date.replace(hour=default_h, minute=0, second=0, microsecond=0)
             
+            if day_ref in ("today", "tonight") and due_at < now:
+                time_str = due_at.strftime("%I:%M %p").lstrip("0")
+                return {
+                    "is_past": True,
+                    "error_type": "temporal_failure",
+                    "error_message": f"The requested time ({time_str}) has already passed today."
+                }
             return {"due_at": due_at.strftime("%Y-%m-%d %H:%M:%S"), "type": "day"}
         
         # Check for specific time: "at 6 PM"
@@ -651,3 +715,6 @@ def get_handler(db_manager) -> ReminderHandler:
     if _handler is None:
         _handler = ReminderHandler(db_manager)
     return _handler
+
+
+EnhancedReminderHandler = ReminderHandler

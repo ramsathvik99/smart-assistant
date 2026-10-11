@@ -5,8 +5,63 @@ import hashlib
 from instance.config import settings as CONFIG
 
 
+class PooledConnectionWrapper:
+    """
+    Transparent connection wrapper for legacy code.
+    Calls to .close() return the connection back to the canonical ThreadedConnectionPool
+    instead of terminating the underlying TCP socket.
+    """
+    def __init__(self, raw_conn, pool):
+        self._raw_conn = raw_conn
+        self._pool = pool
+        self._closed = False
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            if self._pool is not None and self._raw_conn is not None:
+                try:
+                    self._pool.putconn(self._raw_conn)
+                except Exception:
+                    try:
+                        self._raw_conn.close()
+                    except Exception:
+                        pass
+            elif self._raw_conn is not None:
+                try:
+                    self._raw_conn.close()
+                except Exception:
+                    pass
+
+    def __getattr__(self, name):
+        return getattr(self._raw_conn, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
 # ---------------- DB CONNECTION ---------------- #
 def get_connection():
+    """
+    Acquire a database connection routed strictly through the canonical core.db_pool.
+    Returns a PooledConnectionWrapper whose .close() returns the connection to the pool.
+    """
+    try:
+        from core.db_pool import get_db_pool
+        pool = get_db_pool()
+        if pool.is_healthy():
+            raw_conn = pool.getconn()
+            return PooledConnectionWrapper(raw_conn, pool)
+    except Exception as e:
+        print(f"[MEMORY_MGR] [INFO] Canonical db_pool connection failed: {e}. Falling back to direct connection.")
+
+    # Direct connection fallback if pool unavailable
+    if not CONFIG.get("DB_PASSWORD"):
+        raise ConnectionError("DB_PASSWORD is not configured. Cannot establish database connection.")
+
     conn = psycopg2.connect(
         host=CONFIG["DB_HOST"],
         database=CONFIG["DB_NAME"],
@@ -114,29 +169,34 @@ def authenticate_user(username, password):
     Authenticate an existing user from the canonical users table.
     Returns (user_id, 'LOGIN_SUCCESS'), (None, 'WRONG_PASSWORD'), or (None, 'USER_NOT_FOUND').
     """
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("SELECT id, password FROM users WHERE username=%s", (username,))
-    row = cur.fetchone()
-
-    if not row:
-        cur.close()
-        conn.close()
+    try:
+        from core.auth_service import authenticate_user_credentials
+        res = authenticate_user_credentials(username, password)
+        if res.get("success"):
+            return res.get("user_id"), "LOGIN_SUCCESS"
+        code = res.get("code", "USER_NOT_FOUND")
+        if code == "WRONG_PASSWORD":
+            return None, "WRONG_PASSWORD"
         return None, "USER_NOT_FOUND"
-
-    user_id, stored_pass = row
-    entered_hash = hashlib.sha256(password.encode()).hexdigest()
-    print("[AUTH] User authentication verification completed")
-
-    if stored_pass != entered_hash:
+    except Exception:
+        # Direct fallback
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, password, password_hash FROM users WHERE username=%s", (username,))
+        row = cur.fetchone()
+        if not row:
+            cur.close()
+            conn.close()
+            return None, "USER_NOT_FOUND"
+        user_id, stored_pass, stored_hash = row[0], row[1], row[2]
+        from core.auth_service import verify_password
+        target = stored_hash or stored_pass
+        is_val, _ = verify_password(password, target)
         cur.close()
         conn.close()
+        if is_val:
+            return user_id, "LOGIN_SUCCESS"
         return None, "WRONG_PASSWORD"
-
-    cur.close()
-    conn.close()
-    return user_id, "LOGIN_SUCCESS"
 
 
 def register_user(username, password):
@@ -144,30 +204,37 @@ def register_user(username, password):
     Register a new user account using the canonical users table and schema.
     Returns (user_id, 'NEW_USER') or (None, 'USER_EXISTS').
     """
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("SELECT id FROM users WHERE username=%s", (username,))
-    if cur.fetchone():
+    try:
+        from core.auth_service import register_user as core_reg
+        res = core_reg(username, password)
+        if res.get("success"):
+            print(f"[AUTH] New user account registered: {username} (ID: {res.get('user_id')})")
+            return res.get("user_id"), "NEW_USER"
+        if "already taken" in str(res.get("error", "")).lower():
+            return None, "USER_EXISTS"
+        return None, "USER_EXISTS"
+    except Exception:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username=%s", (username,))
+        if cur.fetchone():
+            cur.close()
+            conn.close()
+            return None, "USER_EXISTS"
+        from core.auth_service import hash_password
+        pw_hash = hash_password(password)
+        cur.execute(
+            "INSERT INTO users (username, password, password_hash) VALUES (%s, %s, %s) RETURNING id",
+            (username, pw_hash, pw_hash)
+        )
+        user_id = cur.fetchone()[0]
+        conn.commit()
+        cur.execute("INSERT INTO user_memory (user_id, memory) VALUES (%s, '{}'::jsonb)", (user_id,))
+        conn.commit()
         cur.close()
         conn.close()
-        return None, "USER_EXISTS"
-
-    password_hash = hashlib.sha256(password.encode()).hexdigest()
-    cur.execute(
-        "INSERT INTO users (username, password) VALUES (%s, %s) RETURNING id",
-        (username, password_hash)
-    )
-    user_id = cur.fetchone()[0]
-    conn.commit()
-
-    cur.execute("INSERT INTO user_memory (user_id, memory) VALUES (%s, '{}'::jsonb)", (user_id,))
-    conn.commit()
-
-    cur.close()
-    conn.close()
-    print(f"[AUTH] New user account registered: {username} (ID: {user_id})")
-    return user_id, "NEW_USER"
+        print(f"[AUTH] New user account registered: {username} (ID: {user_id})")
+        return user_id, "NEW_USER"
 
 
 def get_or_create_user(username, password):

@@ -17,6 +17,7 @@ SerpAPI web search changes (repair):
 """
 
 import os
+import time
 import requests
 import json as _json
 
@@ -28,6 +29,27 @@ from legacy.memory_manager import get_chat_history, get_or_create_user
 # Using a set so we never retry a dead key within the same process lifetime.
 _exhausted_serpapi_slots: set = set()
 _exhausted_tavily_slots: set = set()
+_search_provider_cooldowns: dict = {}
+
+
+def is_search_provider_healthy(provider: str) -> bool:
+    """Check if search provider is currently healthy (not in cooldown)."""
+    p = provider.lower()
+    exp = _search_provider_cooldowns.get(p)
+    if not exp:
+        return True
+    if time.time() > exp:
+        _search_provider_cooldowns.pop(p, None)
+        return True
+    return False
+
+
+def mark_search_provider_unhealthy(provider: str, cooldown: float = 300.0) -> None:
+    """Mark search provider unhealthy with a short cooldown period."""
+    p = provider.lower()
+    _search_provider_cooldowns[p] = time.time() + cooldown
+    print(f"[RAG RETRIEVER] Marked provider '{provider}' unhealthy (cooldown {cooldown:.1f}s).")
+
 
 
 class RAGRetriever:
@@ -113,18 +135,23 @@ class RAGRetriever:
 
     def _retrieve_web_search(self, query: str):
         """
-        Fetch live data with provider & per-key retry/failover:
-          1. Primary provider (SerpAPI by default).
-          2. Multiple key slots per provider.
-          3. If primary provider keys fail/exhausted, attempt configured fallback provider (e.g. Tavily).
-          4. Returns normalized search documents/snippets with sources.
+        Fetch live data with provider health checks, fast-skip cooldowns, and failover:
+          1. Healthy provider used immediately.
+          2. Unhealthy provider (timed out / errored recently) fast-skipped to fallback.
+          3. Multiple key slots per provider.
+          4. Returns normalized search documents/snippets with sources and direct answers.
           5. Never logs secrets.
         """
         providers_order = ["serpapi", "tavily"] if self.search_provider == "serpapi" else ["tavily", "serpapi"]
 
         last_error = "no search provider succeeded"
 
+        # Pass 1: Try only healthy providers
         for provider in providers_order:
+            if not is_search_provider_healthy(provider):
+                print(f"[RAG RETRIEVER] Provider '{provider}' is in cooldown (unhealthy). Fast-skipping to healthy fallback.")
+                continue
+
             if provider == "serpapi":
                 result = self._search_serpapi(query)
             elif provider == "tavily":
@@ -136,6 +163,19 @@ class RAGRetriever:
                 return result
             elif result and "error" in result:
                 last_error = result["error"]
+
+        # Pass 2: If all providers were skipped (all in cooldown), try fallback provider as last resort
+        print(f"[RAG RETRIEVER] All configured providers were in cooldown or failed. Attempting fallback.")
+        fallback_prov = "tavily" if self.search_provider == "serpapi" else "serpapi"
+        if fallback_prov == "tavily":
+            result = self._search_tavily(query)
+        else:
+            result = self._search_serpapi(query)
+
+        if result and "error" not in result:
+            return result
+        elif result and "error" in result:
+            last_error = result["error"]
 
         print(f"[RAG ERROR] All search providers failed. Last error: {last_error}")
         return {"error": f"All search providers failed. Last: {last_error}"}
@@ -165,10 +205,11 @@ class RAGRetriever:
                     f"[RAG RETRIEVER] SerpAPI attempt — slot {slot_idx}, "
                     f"timeout={self.serpapi_timeout}s, query='{query[:80]}'"
                 )
+                call_timeout = min(self.serpapi_timeout, 4.0)
                 response = requests.get(
                     "https://serpapi.com/search",
                     params=params,
-                    timeout=(4, self.serpapi_timeout),
+                    timeout=(2.0, call_timeout),
                 )
 
                 if response.status_code == 429:
@@ -273,6 +314,14 @@ class RAGRetriever:
                     f"knowledge_graph={'yes' if knowledge_graph else 'no'}, organic_results={len(organic_snippets)}"
                 )
 
+                direct_ans = ""
+                if answer_box and isinstance(answer_box, dict):
+                    direct_ans = answer_box.get("answer") or answer_box.get("result") or answer_box.get("snippet") or ""
+                if not direct_ans and ai_snippets:
+                    direct_ans = ai_snippets[0]
+                if not direct_ans and knowledge_graph and isinstance(knowledge_graph, dict):
+                    direct_ans = knowledge_graph.get("description", "")
+
                 return {
                     "provider": "serpapi",
                     "ai_overview": ai_snippets,
@@ -281,18 +330,19 @@ class RAGRetriever:
                     "organic_results": organic_snippets,
                     "organic_titles": organic_titles,
                     "organic_items": organic_items,
+                    "direct_answer": direct_ans,
                     "_search_slot": slot_idx,
                 }
 
             except requests.exceptions.Timeout:
-                print(f"[RAG RETRIEVER] SerpAPI slot {slot_idx}: timed out after {self.serpapi_timeout}s. Trying next key slot.")
-                last_error = f"slot {slot_idx} timeout"
-                continue
+                print(f"[RAG RETRIEVER] SerpAPI slot {slot_idx}: timed out after {call_timeout}s. Marking provider in cooldown (300s).")
+                mark_search_provider_unhealthy("serpapi", cooldown=300.0)
+                return {"error": "SerpAPI timed out; marked unhealthy."}
 
             except requests.exceptions.ConnectionError as conn_err:
-                print(f"[RAG RETRIEVER] SerpAPI slot {slot_idx}: connection error: {conn_err}. Trying next key slot.")
-                last_error = f"slot {slot_idx} connection error"
-                continue
+                print(f"[RAG RETRIEVER] SerpAPI slot {slot_idx}: connection error ({conn_err}). Marking provider in cooldown (300s).")
+                mark_search_provider_unhealthy("serpapi", cooldown=300.0)
+                return {"error": f"SerpAPI connection error: {conn_err}"}
 
             except Exception as exc:
                 print(f"[RAG RETRIEVER] SerpAPI slot {slot_idx}: unexpected exception: {exc}. Trying next key slot.")
@@ -378,13 +428,19 @@ class RAGRetriever:
                     "organic_results": organic_snippets,
                     "organic_titles": organic_titles,
                     "organic_items": tavily_items,
+                    "direct_answer": tavily_answer,
                     "_search_slot": slot_idx,
                 }
 
             except requests.exceptions.Timeout:
-                print(f"[RAG RETRIEVER] Tavily slot {slot_idx}: timed out. Trying next key slot.")
+                print(f"[RAG RETRIEVER] Tavily slot {slot_idx}: timed out. Marking provider in cooldown (300s).")
+                mark_search_provider_unhealthy("tavily", cooldown=300.0)
                 last_error = f"Tavily slot {slot_idx} timeout"
-                continue
+                return {"error": "Tavily timed out; marked unhealthy."}
+            except requests.exceptions.ConnectionError as conn_err:
+                print(f"[RAG RETRIEVER] Tavily slot {slot_idx}: connection error ({conn_err}). Marking provider in cooldown (300s).")
+                mark_search_provider_unhealthy("tavily", cooldown=300.0)
+                return {"error": f"Tavily connection error: {conn_err}"}
             except Exception as exc:
                 print(f"[RAG RETRIEVER] Tavily slot {slot_idx}: exception: {exc}")
                 last_error = f"Tavily slot {slot_idx} exception: {exc}"

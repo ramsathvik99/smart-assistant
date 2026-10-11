@@ -29,8 +29,23 @@ class RAGSystem:
         Returns a dictionary: {"intent": str, "response": str, "data": dict}
         """
         print(f"\n==============================================")
-        print(f"[PIPELINE - INPUT] Received: {query}")
-        
+        # RAG GUARD: Hard routing guard against querying RAG/web for local machine/environment/state queries
+        try:
+            from core.semantic_understanding import SemanticUnderstandingEngine
+            if SemanticUnderstandingEngine.is_local_environment_query(query):
+                print(f"[RAG GUARD] Intercepted local computer environment/state query: '{query}' -> Bypassing RAG to authoritative local state.")
+                from core.universal_computer_access import get_universal_computer_access
+                uca = get_universal_computer_access()
+                resp = uca.explain_system_visibility(user_id=user_id or 1)
+                return {
+                    "intent": "CURRENT_ENVIRONMENT_QUERY",
+                    "response": resp,
+                    "data": {"status": "success", "handled": True},
+                    "handled": True,
+                }
+        except Exception as e:
+            print(f"[RAG GUARD ERROR] Local environment check failed: {e}")
+
         # Check global RAG/retrieval bypass
         if not self.enable_rag or not self.enable_retrieval:
             print("[RAG SYSTEM] RAG or retrieval disabled globally. Bypassing to direct general generation.")
@@ -111,7 +126,13 @@ class RAGSystem:
              data = self.retriever.retrieve("current_time_query", query)
              
         elif core_intent == "dynamic_fact_query":
-             if not self.enable_web_search or not self.enable_live_data:
+             from core.unified_command_router import should_use_external_retrieval
+             if not should_use_external_retrieval(original_unified_intent, query):
+                 print(f"[RAG SYSTEM] Hard gate: Query '{query}' does not require external retrieval. Bypassing SerpAPI/Tavily.")
+                 core_intent = "chat"
+                 final_intent = "chat"
+                 data = None
+             elif not self.enable_web_search or not self.enable_live_data:
                  print("[RAG SYSTEM] Web search or live data disabled by configuration. Bypassing dynamic fact lookup.")
                  data = {"error": "Web search or live data disabled by configuration."}
              else:
@@ -181,7 +202,13 @@ class RAGSystem:
                  print("[PIPELINE - VALIDATION] DB data valid. Proceeding to generation.")
                  
         if core_intent == "web_search":
-             if not self.enable_web_search or not self.enable_live_data:
+             from core.unified_command_router import should_use_external_retrieval
+             if not should_use_external_retrieval(original_unified_intent, query):
+                 print(f"[RAG SYSTEM] Hard gate: Query '{query}' does not require external web search. Bypassing.")
+                 core_intent = "chat"
+                 final_intent = "chat"
+                 data = None
+             elif not self.enable_web_search or not self.enable_live_data:
                  print("[RAG SYSTEM] Web search or live data disabled by configuration. Bypassing external web knowledge lookup.")
                  data = {"error": "Web search or live data disabled by configuration."}
              else:

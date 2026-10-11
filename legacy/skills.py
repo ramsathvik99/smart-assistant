@@ -488,13 +488,55 @@ def solve_math(text):
 
         if not expr:
             speak("Sorry, I couldn't calculate that.")
-            return
+            return None
 
-        result = eval(expr)
+        import ast
+        import operator
+        import math
+
+        _OP_MAP = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.FloorDiv: operator.floordiv,
+            ast.Mod: operator.mod,
+            ast.Pow: operator.pow,
+            ast.USub: operator.neg,
+            ast.UAdd: operator.pos,
+        }
+
+        def _eval_ast_node(node):
+            if isinstance(node, ast.Expression):
+                return _eval_ast_node(node.body)
+            elif isinstance(node, ast.Constant):
+                if isinstance(node.value, (int, float)):
+                    return node.value
+                raise ValueError("Disallowed constant")
+            elif isinstance(node, ast.BinOp):
+                left = _eval_ast_node(node.left)
+                right = _eval_ast_node(node.right)
+                op_fn = _OP_MAP.get(type(node.op))
+                if op_fn is None:
+                    raise ValueError(f"Disallowed operator {type(node.op)}")
+                return op_fn(left, right)
+            elif isinstance(node, ast.UnaryOp):
+                operand = _eval_ast_node(node.operand)
+                op_fn = _OP_MAP.get(type(node.op))
+                if op_fn is None:
+                    raise ValueError(f"Disallowed unary operator {type(node.op)}")
+                return op_fn(operand)
+            raise ValueError(f"Disallowed syntax node {type(node)}")
+
+        parsed_ast = ast.parse(expr, mode='eval')
+        result = _eval_ast_node(parsed_ast)
         msg = f"The result is {result}."
         speak(msg)
         return msg
 
+    except ZeroDivisionError:
+        speak("Division by zero is undefined.")
+        return None
     except Exception:
         speak("Sorry, I couldn’t calculate that.")
         return None
@@ -672,15 +714,14 @@ def take_screenshot():
 
 
 def lock_system():
-    speak("Locking the system now.")
     try:
-        import ctypes
-        ctypes.windll.user32.LockWorkStation()
-    except ImportError:
-        # Fallback for systems without ctypes
-        import subprocess
-        subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"], check=False)
-    return "System locked."
+        from legacy.skills_utilities import lock_system as _lu
+        res = _lu()
+        speak("Locking the system now.")
+        return res or "System locked."
+    except Exception as e:
+        print("[Lock Error]", e)
+        return "Failed to lock system."
 
 
 # ======================================================
@@ -688,7 +729,7 @@ def lock_system():
 # ======================================================
 
 def get_weather(location):
-    api_key = "d29b7232620736a06c781aaea43a14c5"
+    api_key = os.getenv("OPENWEATHER_API_KEY", "")
     if not api_key:
         speak("Weather service not configured.")
         return
@@ -1589,8 +1630,8 @@ def suggest_movies(language="en", genre=None):
         # Using public endpoint
         url = "https://api.themoviedb.org/3/discover/movie"
         
-        # Free API key for demo (replace with your own for production)
-        api_key = "8265bd1679663a7ea12ac168da84d2e8"  # Public demo key
+        # TMDb API key from environment
+        api_key = os.getenv("TMDB_API_KEY", "")
         
         params = {
             "api_key": api_key,
@@ -2047,150 +2088,63 @@ def _get_confirmation(question, timeout=15):
         return False
 
 def shutdown_system():
-    """Shutdown the system with confirmation."""
-    if not _get_confirmation("Are you sure you want to shut down the system?"):
-        return
-    
-    speak("Shutting down the system now.")
-    
-    
-    
-    try:
-        system = platform.system()
-        if system == "Windows":
-            subprocess.run(["shutdown", "/s", "/t", "5"], check=True)
-        elif system == "Darwin":  # macOS
-            subprocess.run(["sudo", "shutdown", "-h", "now"], check=True)
-        else:  # Linux
-            subprocess.run(["shutdown", "-h", "now"], check=True)
-    except Exception as e:
-        print(f"[Shutdown Error] {e}")
-        speak("I couldn't shut down the system.")
+    """Shutdown the system via safe OS gateway."""
+    from legacy.skills_utilities import shutdown_system as _lu
+    res = _lu()
+    speak(res or "System shutdown initiated.")
+    return res
 
 def restart_system():
-    """Restart the system with confirmation."""
-    if not _get_confirmation("Are you sure you want to restart the system?"):
-        return
-    
-    speak("Restarting the system now.")
-    
-    import platform
-    import subprocess
-    
-    try:
-        system = platform.system()
-        if system == "Windows":
-            subprocess.run(["shutdown", "/r", "/t", "5"], check=True)
-        elif system == "Darwin":  # macOS
-            subprocess.run(["sudo", "shutdown", "-r", "now"], check=True)
-        else:  # Linux
-            subprocess.run(["shutdown", "-r", "now"], check=True)
-    except Exception as e:
-        print(f"[Restart Error] {e}")
-        speak("I couldn't restart the system.")
+    """Restart the system via safe OS gateway."""
+    from legacy.skills_utilities import restart_system as _lu
+    res = _lu()
+    speak(res or "System restart initiated.")
+    return res
 
 def sleep_system():
-    """Put the system to sleep with confirmation."""
-    if not _get_confirmation("Are you sure you want to put the system to sleep?"):
-        return
-    
-    speak("Putting the system to sleep now.")
-    
-    import platform
-    import subprocess
-    
-    try:
-        system = platform.system()
-        if system == "Windows":
-            subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"], check=True)
-        elif system == "Darwin":  # macOS
-            subprocess.run(["pmset", "sleepnow"], check=True)
-        else:  # Linux
-            subprocess.run(["systemctl", "suspend"], check=True)
-    except Exception as e:
-        print(f"[Sleep Error] {e}")
-        speak("I couldn't put the system to sleep.")
+    """Put the system to sleep via safe OS gateway."""
+    from legacy.skills_utilities import sleep_system as _lu
+    res = _lu()
+    speak(res or "System sleep initiated.")
+    return res
 
 def schedule_power_action(action_type, delay_minutes):
     """
-    Schedule a power action for later execution.
+    Schedule a power action for later execution via safe OS gateway.
     action_type: 'shutdown', 'restart', or 'sleep'
     delay_minutes: delay in minutes
     """
     global _scheduled_power_actions
     
-    # Cancel existing action of same type
     if action_type in _scheduled_power_actions:
         _scheduled_power_actions[action_type].cancel()
     
     speak(f"Okay, I'll {action_type} the system in {delay_minutes} minutes.")
     
-    # Map action types to functions
     action_map = {
         'shutdown': lambda: shutdown_system_immediate(),
         'restart': lambda: restart_system_immediate(),
         'sleep': lambda: sleep_system_immediate()
     }
     
-    # Schedule the action
     timer = threading.Timer(delay_minutes * 60, action_map[action_type])
     timer.start()
-    
     _scheduled_power_actions[action_type] = timer
 
 def shutdown_system_immediate():
-    """Shutdown without confirmation (for scheduled actions)."""
-    speak("Shutting down the system now.")
-    
-    import platform
-    import subprocess
-    
-    try:
-        system = platform.system()
-        if system == "Windows":
-            subprocess.run(["shutdown", "/s", "/t", "5"], check=True)
-        elif system == "Darwin":
-            subprocess.run(["sudo", "shutdown", "-h", "now"], check=True)
-        else:
-            subprocess.run(["shutdown", "-h", "now"], check=True)
-    except Exception as e:
-        print(f"[Shutdown Error] {e}")
+    """Shutdown via safe OS gateway."""
+    from legacy.skills_utilities import shutdown_system as _lu
+    return _lu()
 
 def restart_system_immediate():
-    """Restart without confirmation (for scheduled actions)."""
-    speak("Restarting the system now.")
-    
-    import platform
-    import subprocess
-    
-    try:
-        system = platform.system()
-        if system == "Windows":
-            subprocess.run(["shutdown", "/r", "/t", "5"], check=True)
-        elif system == "Darwin":
-            subprocess.run(["sudo", "shutdown", "-r", "now"], check=True)
-        else:
-            subprocess.run(["shutdown", "-r", "now"], check=True)
-    except Exception as e:
-        print(f"[Restart Error] {e}")
+    """Restart via safe OS gateway."""
+    from legacy.skills_utilities import restart_system as _lu
+    return _lu()
 
 def sleep_system_immediate():
-    """Sleep without confirmation (for scheduled actions)."""
-    speak("Putting the system to sleep now.")
-    
-    import platform
-    import subprocess
-    
-    try:
-        system = platform.system()
-        if system == "Windows":
-            subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"], check=True)
-        elif system == "Darwin":
-            subprocess.run(["pmset", "sleepnow"], check=True)
-        else:
-            subprocess.run(["systemctl", "suspend"], check=True)
-    except Exception as e:
-        print(f"[Sleep Error] {e}")
+    """Sleep via safe OS gateway."""
+    from legacy.skills_utilities import sleep_system as _lu
+    return _lu()
 
 def cancel_power_action(action_type):
     """Cancel a scheduled power action."""

@@ -1,10 +1,10 @@
 import os
 import json
 from dotenv import load_dotenv
-load_dotenv()
-_legacy_env = os.path.join(os.path.dirname(__file__), '..', 'legacy', '.env')
-if os.path.exists(_legacy_env):
-    load_dotenv(_legacy_env, override=True)
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+root_env_path = os.path.join(project_root, '.env')
+load_dotenv(root_env_path)
 
 # Path to store local runtime settings (like remembered user)
 CONFIG_FILE = "runtime_config.json"

@@ -29,6 +29,8 @@ def get_battery_status() -> Dict[str, Any]:
         battery = psutil.sensors_battery()
         if battery is None:
             return {
+                "success": True,
+                "status": "success",
                 "available": False,
                 "percent": None,
                 "charging": None,
@@ -52,6 +54,8 @@ def get_battery_status() -> Dict[str, Any]:
         speech_text = f"Battery is at {percent}%, currently {status_text}.{time_str}"
         
         return {
+            "success": True,
+            "status": "success",
             "available": True,
             "percent": percent,
             "charging": is_charging,
@@ -61,6 +65,8 @@ def get_battery_status() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"[SYSTEM] Failed to read battery status: {e}")
         return {
+            "success": False,
+            "status": "error",
             "available": False,
             "message": f"Unable to check battery status: {e}"
         }
@@ -89,6 +95,8 @@ def get_disk_space(drive: str = "C:") -> Dict[str, Any]:
         )
 
         return {
+            "success": True,
+            "status": "success",
             "drive": drive,
             "total_gb": round(total_gb, 1),
             "free_gb": round(free_gb, 1),
@@ -99,6 +107,8 @@ def get_disk_space(drive: str = "C:") -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"[SYSTEM] Failed to get disk space for {drive}: {e}")
         return {
+            "success": False,
+            "status": "error",
             "drive": drive,
             "message": f"Unable to retrieve disk usage for {drive}: {e}"
         }
@@ -135,6 +145,8 @@ def get_top_processes(n: int = 5, sort_by: str = "memory") -> Dict[str, Any]:
             speech_text = f"Top {len(top_list)} processes by memory: {summary}."
 
         return {
+            "success": True,
+            "status": "success",
             "processes": top_list,
             "sort_by": sort_by,
             "message": speech_text
@@ -142,6 +154,8 @@ def get_top_processes(n: int = 5, sort_by: str = "memory") -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"[SYSTEM] Failed to get top processes: {e}")
         return {
+            "success": False,
+            "status": "error",
             "processes": [],
             "message": f"Unable to list top processes: {e}"
         }
@@ -174,34 +188,84 @@ def get_brightness() -> Dict[str, Any]:
 
 def set_brightness(level: int) -> Dict[str, Any]:
     """
-    Set display brightness percentage (0-100).
+    Set display brightness percentage (0-100) and verify the actual resulting brightness.
     """
+    target = max(0, min(100, int(level)))
+    cur_res = get_brightness()
+    if cur_res.get("success") and cur_res.get("level") is not None:
+        curr_lvl = cur_res["level"]
+        if abs(curr_lvl - target) <= 5:
+            return {
+                "success": True,
+                "already_satisfied": True,
+                "level": curr_lvl,
+                "target": target,
+                "message": f"Screen brightness is already at {curr_lvl}%."
+            }
+
+    sbc_ok = False
     try:
         import screen_brightness_control as sbc
-        target = max(0, min(100, int(level)))
         sbc.set_brightness(target)
-        return {
-            "success": True,
-            "level": target,
-            "message": f"Screen brightness set to {target}%."
-        }
+        sbc_ok = True
     except Exception as e:
-        logger.warning(f"[SYSTEM] Failed to set brightness to {level}: {e}")
-        return {
-            "success": False,
-            "message": f"Could not adjust brightness on this display: {e}"
-        }
+        logger.debug(f"[SYSTEM] screen_brightness_control set_brightness failed: {e}")
+
+    if not sbc_ok:
+        try:
+            import wmi
+            w = wmi.WMI(namespace='wmi')
+            for bm in w.WmiMonitorBrightnessMethods():
+                bm.WmiSetBrightness(Timeout=1, Brightness=target)
+        except Exception as we:
+            logger.debug(f"[SYSTEM] WMI WmiSetBrightness fallback failed: {we}")
+
+    # Read and verify the actual brightness afterward
+    import time
+    time.sleep(0.1)
+    actual_res = get_brightness()
+    actual_level = actual_res.get("level")
+
+    if actual_level is not None:
+        # Hardware step granularity tolerance (within 5%)
+        if abs(actual_level - target) <= 5:
+            return {
+                "success": True,
+                "level": actual_level,
+                "target": target,
+                "message": f"Screen brightness set to {actual_level}%."
+            }
+        else:
+            return {
+                "success": False,
+                "level": actual_level,
+                "target": target,
+                "message": f"The brightness change could not be verified; the system still reports {actual_level}%."
+            }
+
+    return {
+        "success": False,
+        "level": None,
+        "target": target,
+        "message": "Screen brightness cannot be adjusted or verified on this display."
+    }
 
 
 def adjust_brightness(delta: int) -> Dict[str, Any]:
     """
-    Increase or decrease brightness by delta (e.g. +10, -20).
+    Increase or decrease brightness by delta (e.g. +10, -20) and verify the change.
     """
     try:
         current_res = get_brightness()
-        current_level = current_res.get("level") or 50
-        target = max(10, min(100, current_level + delta))
-        return set_brightness(target)
+        current_level = current_res.get("level") if current_res.get("success") else None
+        if current_level is None:
+            current_level = 50
+        target = max(0, min(100, current_level + delta))
+        res = set_brightness(target)
+        if res.get("success"):
+            direction = "Increased" if delta > 0 else "Decreased"
+            res["message"] = f"{direction} screen brightness to {res.get('level')}%."
+        return res
     except Exception as e:
         return {
             "success": False,
@@ -305,6 +369,124 @@ def get_ram_metrics() -> Dict[str, Any]:
             "success": False,
             "status": "error",
             "message": f"Unable to read RAM metrics: {e}"
+        }
+
+
+def get_detailed_cpu_info() -> Dict[str, Any]:
+    """
+    Get comprehensive local CPU hardware details: model/name, manufacturer,
+    physical/logical cores, current utilization, clock speeds, and architecture.
+    """
+    try:
+        import platform
+        overall_pct = psutil.cpu_percent(interval=0.1)
+        per_core = psutil.cpu_percent(interval=0.1, percpu=True)
+        logical_cores = psutil.cpu_count(logical=True) or len(per_core)
+        physical_cores = psutil.cpu_count(logical=False) or (logical_cores // 2 if logical_cores else 1)
+        arch = platform.machine() or "x86_64"
+
+        cpu_name = None
+        manufacturer = None
+        base_clock_mhz = None
+        max_clock_mhz = None
+        try:
+            import wmi
+            c = wmi.WMI()
+            for p in c.Win32_Processor():
+                cpu_name = getattr(p, "Name", None) or cpu_name
+                manufacturer = getattr(p, "Manufacturer", None) or manufacturer
+                max_clock_mhz = getattr(p, "MaxClockSpeed", None) or max_clock_mhz
+                base_clock_mhz = getattr(p, "CurrentClockSpeed", None) or base_clock_mhz
+        except Exception as we:
+            logger.debug(f"[SYSTEM] WMI processor query: {we}")
+
+        if not cpu_name:
+            cpu_name = platform.processor() or "Unknown CPU Model"
+        if not manufacturer:
+            manufacturer = "GenuineIntel" if "Intel" in cpu_name else ("AuthenticAMD" if "AMD" in cpu_name else "Unknown Vendor")
+
+        freq = psutil.cpu_freq()
+        current_freq_mhz = round(freq.current, 1) if freq and freq.current else None
+        if not max_clock_mhz and freq and freq.max:
+            max_clock_mhz = round(freq.max, 1)
+
+        clock_str = f" running at {current_freq_mhz} MHz (Base/Max: {max_clock_mhz or base_clock_mhz or 'N/A'} MHz)" if current_freq_mhz else ""
+        speech_text = (
+            f"Detailed CPU Information: {cpu_name} (Manufacturer: {manufacturer}, Architecture: {arch}). "
+            f"Hardware Cores: {physical_cores} physical, {logical_cores} logical processors{clock_str}. "
+            f"Current utilization is {overall_pct:.1f}% across all cores."
+        )
+
+        return {
+            "success": True,
+            "status": "success",
+            "cpu_name": cpu_name,
+            "manufacturer": manufacturer,
+            "architecture": arch,
+            "physical_cores": physical_cores,
+            "logical_processors": logical_cores,
+            "logical_cores": logical_cores,
+            "overall_percent": overall_pct,
+            "per_core": per_core,
+            "current_frequency_mhz": current_freq_mhz,
+            "base_clock_mhz": base_clock_mhz,
+            "max_clock_mhz": max_clock_mhz,
+            "message": speech_text
+        }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to read detailed CPU info: {e}")
+        return {
+            "success": False,
+            "status": "error",
+            "message": f"Unable to read detailed CPU information: {e}"
+        }
+
+
+def get_detailed_ram_metrics() -> Dict[str, Any]:
+    """
+    Get detailed local RAM metrics: total, used, available, free, percentage,
+    plus Windows virtual/swap pagefile metrics.
+    """
+    try:
+        mem = psutil.virtual_memory()
+        total_gb = mem.total / (1024 ** 3)
+        available_gb = mem.available / (1024 ** 3)
+        used_gb = mem.used / (1024 ** 3)
+        free_gb = mem.free / (1024 ** 3)
+        percent = mem.percent
+
+        swap = psutil.swap_memory()
+        swap_total_gb = swap.total / (1024 ** 3)
+        swap_used_gb = swap.used / (1024 ** 3)
+        swap_free_gb = swap.free / (1024 ** 3)
+        swap_percent = swap.percent
+
+        speech_text = (
+            f"Detailed RAM Information: Total physical memory is {total_gb:.2f} GB, with {used_gb:.2f} GB used "
+            f"({percent:.1f}%) and {available_gb:.2f} GB available (free: {free_gb:.2f} GB). "
+            f"Virtual swap memory: {swap_used_gb:.2f} GB used out of {swap_total_gb:.2f} GB total ({swap_percent:.1f}%)."
+        )
+
+        return {
+            "success": True,
+            "status": "success",
+            "total_gb": round(total_gb, 2),
+            "used_gb": round(used_gb, 2),
+            "available_gb": round(available_gb, 2),
+            "free_gb": round(free_gb, 2),
+            "percent": percent,
+            "swap_total_gb": round(swap_total_gb, 2),
+            "swap_used_gb": round(swap_used_gb, 2),
+            "swap_free_gb": round(swap_free_gb, 2),
+            "swap_percent": swap_percent,
+            "message": speech_text
+        }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to read detailed RAM metrics: {e}")
+        return {
+            "success": False,
+            "status": "error",
+            "message": f"Unable to read detailed RAM metrics: {e}"
         }
 
 
@@ -580,8 +762,199 @@ VK_VOLUME_DOWN = 0xAE
 VK_VOLUME_UP = 0xAF
 
 
+def _get_master_volume_endpoint():
+    """Retrieve Windows Core Audio master endpoint volume interface via comtypes."""
+    try:
+        import comtypes
+        from comtypes import CLSCTX_ALL, CoCreateInstance, GUID
+        from ctypes import c_float, POINTER, c_ulong, c_int, c_uint
+
+        CLSID_MMDeviceEnumerator = GUID('{BCDE0395-E52F-467C-8E3D-C4579291692E}')
+        IID_IMMDeviceEnumerator = GUID('{A95664D2-9614-4F35-A746-DE8DB63617E6}')
+        IID_IAudioEndpointVolume = GUID('{5CDF2C82-841E-4546-9722-0CF74078229A}')
+
+        class _IAudioEndpointVolume(comtypes.IUnknown):
+            _iid_ = IID_IAudioEndpointVolume
+            _methods_ = [
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'RegisterControlChangeNotify', (['in'], ctypes.c_void_p, 'pNotify')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'UnregisterControlChangeNotify', (['in'], ctypes.c_void_p, 'pNotify')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'GetChannelCount', (['out'], POINTER(c_uint), 'pnChannelCount')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'SetMasterVolumeLevel', (['in'], c_float, 'fLevelDB'), (['in'], ctypes.c_void_p, 'pguidEventContext')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'SetMasterVolumeLevelScalar', (['in'], c_float, 'fLevel'), (['in'], ctypes.c_void_p, 'pguidEventContext')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'GetMasterVolumeLevel', (['out'], POINTER(c_float), 'pfLevelDB')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'GetMasterVolumeLevelScalar', (['out'], POINTER(c_float), 'pfLevel')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'SetChannelVolumeLevel', (['in'], c_uint, 'nChannel'), (['in'], c_float, 'fLevelDB'), (['in'], ctypes.c_void_p, 'pguidEventContext')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'SetChannelVolumeLevelScalar', (['in'], c_uint, 'nChannel'), (['in'], c_float, 'fLevel'), (['in'], ctypes.c_void_p, 'pguidEventContext')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'GetChannelVolumeLevel', (['in'], c_uint, 'nChannel'), (['out'], POINTER(c_float), 'pfLevelDB')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'GetChannelVolumeLevelScalar', (['in'], c_uint, 'nChannel'), (['out'], POINTER(c_float), 'pfLevel')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'SetMute', (['in'], c_int, 'bMute'), (['in'], ctypes.c_void_p, 'pguidEventContext')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'GetMute', (['out'], POINTER(c_int), 'pbMute')),
+            ]
+
+        class _IMMDevice(comtypes.IUnknown):
+            _iid_ = GUID('{D666063F-1587-4E43-81F1-B948E807363F}')
+            _methods_ = [
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'Activate', (['in'], POINTER(GUID), 'iid'), (['in'], c_ulong, 'dwClsCtx'), (['in'], ctypes.c_void_p, 'pActivationParams'), (['out'], POINTER(POINTER(_IAudioEndpointVolume)), 'ppInterface')),
+            ]
+
+        class _IMMDeviceEnumerator(comtypes.IUnknown):
+            _iid_ = IID_IMMDeviceEnumerator
+            _methods_ = [
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'EnumAudioEndpoints', (['in'], c_int, 'dataFlow'), (['in'], c_ulong, 'dwStateMask'), (['out'], POINTER(ctypes.c_void_p), 'ppDevices')),
+                comtypes.COMMETHOD([], comtypes.HRESULT, 'GetDefaultAudioEndpoint', (['in'], c_int, 'dataFlow'), (['in'], c_int, 'role'), (['out'], POINTER(POINTER(_IMMDevice)), 'ppEndpoint')),
+            ]
+
+        enumerator = CoCreateInstance(CLSID_MMDeviceEnumerator, _IMMDeviceEnumerator, CLSCTX_ALL)
+        endpoint = enumerator.GetDefaultAudioEndpoint(0, 1)  # eRender=0, eMultimedia=1
+        pEndpointVolume = endpoint.Activate(ctypes.byref(IID_IAudioEndpointVolume), CLSCTX_ALL, None)
+        return pEndpointVolume
+    except Exception as e:
+        logger.debug(f"[SYSTEM] Master volume COM endpoint access failed: {e}")
+        return None
+
+
+def get_volume() -> Dict[str, Any]:
+    """Get current master audio volume percentage and mute status on Windows."""
+    ep = _get_master_volume_endpoint()
+    if ep is not None:
+        try:
+            scalar = ep.GetMasterVolumeLevelScalar()
+            level = round(scalar * 100)
+            is_muted = bool(ep.GetMute())
+            mute_str = " (Muted)" if is_muted else ""
+            return {
+                "success": True,
+                "level": level,
+                "muted": is_muted,
+                "is_muted": is_muted,
+                "message": f"System volume is currently at {level}%{mute_str}."
+            }
+        except Exception as e:
+            logger.warning(f"[SYSTEM] Failed to read volume scalar: {e}")
+
+    return {
+        "success": False,
+        "level": None,
+        "muted": None,
+        "is_muted": None,
+        "message": "I couldn't read the volume because the audio device interface is unavailable."
+    }
+
+
+def set_volume(level: int) -> Dict[str, Any]:
+    """Set master audio volume percentage (0-100) and verify the actual resulting volume."""
+    target = max(0, min(100, int(level)))
+    cur_res = get_volume()
+    if cur_res.get("success") and cur_res.get("level") is not None:
+        curr_lvl = cur_res["level"]
+        if abs(curr_lvl - target) <= 2:
+            return {
+                "success": True,
+                "already_satisfied": True,
+                "level": curr_lvl,
+                "target": target,
+                "message": f"Volume is already at {curr_lvl}%."
+            }
+
+    ep = _get_master_volume_endpoint()
+    if ep is not None:
+        try:
+            ep.SetMasterVolumeLevelScalar(target / 100.0, None)
+            import time
+            time.sleep(0.05)
+            actual_res = get_volume()
+            actual_level = actual_res.get("level")
+            if actual_level is not None and abs(actual_level - target) <= 2:
+                return {
+                    "success": True,
+                    "level": actual_level,
+                    "target": target,
+                    "message": f"Volume set to {actual_level}%."
+                }
+            else:
+                return {
+                    "success": False,
+                    "level": actual_level,
+                    "target": target,
+                    "message": f"Volume change could not be verified; the system reports {actual_level}%."
+                }
+        except Exception as e:
+            logger.warning(f"[SYSTEM] Failed to set volume via COM: {e}")
+            return {
+                "success": False,
+                "level": None,
+                "message": f"I couldn't change the volume because the audio device interface is unavailable: {e}"
+            }
+
+    return {
+        "success": False,
+        "level": None,
+        "message": "I couldn't change the volume because the audio device interface is unavailable."
+    }
+
+
+def volume_up(steps: int = 10) -> Dict[str, Any]:
+    """Increase system volume by the specified percentage (default 10%) and verify."""
+    cur_res = get_volume()
+    if cur_res.get("success") and cur_res.get("level") is not None:
+        target = min(100, cur_res["level"] + steps)
+        res = set_volume(target)
+        if res.get("success"):
+            res["message"] = f"Volume increased to {res.get('level')}%."
+        return res
+
+    # Fallback to key events if COM endpoint is not available
+    try:
+        user32 = ctypes.windll.user32
+        presses = max(1, min(25, steps // 2))
+        for _ in range(presses):
+            user32.keybd_event(VK_VOLUME_UP, 0, 0, 0)
+            user32.keybd_event(VK_VOLUME_UP, 0, KEYEVENTF_KEYUP, 0)
+        return {"success": True, "message": "Volume increased."}
+    except Exception as e:
+        return {"success": False, "message": f"I couldn't change the volume: {e}"}
+
+
+def volume_down(steps: int = 10) -> Dict[str, Any]:
+    """Decrease system volume by the specified percentage (default 10%) and verify."""
+    cur_res = get_volume()
+    if cur_res.get("success") and cur_res.get("level") is not None:
+        target = max(0, cur_res["level"] - steps)
+        res = set_volume(target)
+        if res.get("success"):
+            res["message"] = f"Volume decreased to {res.get('level')}%."
+        return res
+
+    # Fallback to key events if COM endpoint is not available
+    try:
+        user32 = ctypes.windll.user32
+        presses = max(1, min(25, steps // 2))
+        for _ in range(presses):
+            user32.keybd_event(VK_VOLUME_DOWN, 0, 0, 0)
+            user32.keybd_event(VK_VOLUME_DOWN, 0, KEYEVENTF_KEYUP, 0)
+        return {"success": True, "message": "Volume decreased."}
+    except Exception as e:
+        return {"success": False, "message": f"I couldn't change the volume: {e}"}
+
+
 def volume_mute_toggle() -> Dict[str, Any]:
-    """Toggle audio mute on the Windows master device."""
+    """Toggle audio mute on the Windows master device and verify."""
+    ep = _get_master_volume_endpoint()
+    if ep is not None:
+        try:
+            curr_mute = bool(ep.GetMute())
+            new_mute = not curr_mute
+            ep.SetMute(int(new_mute), None)
+            verified_mute = bool(ep.GetMute())
+            state_str = "muted" if verified_mute else "unmuted"
+            return {
+                "success": True,
+                "muted": verified_mute,
+                "message": f"Volume {state_str}."
+            }
+        except Exception as e:
+            logger.warning(f"[SYSTEM] Failed to toggle mute via COM: {e}")
+
     try:
         user32 = ctypes.windll.user32
         user32.keybd_event(VK_VOLUME_MUTE, 0, 0, 0)
@@ -591,28 +964,40 @@ def volume_mute_toggle() -> Dict[str, Any]:
         return {"success": False, "message": f"Failed to toggle mute: {e}"}
 
 
-def volume_up(steps: int = 5) -> Dict[str, Any]:
-    """Increase system volume by sending volume up key events."""
-    try:
-        user32 = ctypes.windll.user32
-        for _ in range(max(1, min(25, steps))):
-            user32.keybd_event(VK_VOLUME_UP, 0, 0, 0)
-            user32.keybd_event(VK_VOLUME_UP, 0, KEYEVENTF_KEYUP, 0)
-        return {"success": True, "message": f"Increased volume by {steps} steps."}
-    except Exception as e:
-        return {"success": False, "message": f"Failed to adjust volume: {e}"}
+def set_mute(is_muted: bool) -> Dict[str, Any]:
+    """Set master audio mute state idempotently and verify."""
+    ep = _get_master_volume_endpoint()
+    if ep is not None:
+        try:
+            curr_mute = bool(ep.GetMute())
+            if curr_mute == is_muted:
+                state_str = "muted" if is_muted else "unmuted"
+                return {
+                    "success": True,
+                    "already_satisfied": True,
+                    "muted": is_muted,
+                    "message": f"Volume is already {state_str}."
+                }
+            ep.SetMute(int(is_muted), None)
+            verified_mute = bool(ep.GetMute())
+            state_str = "muted" if verified_mute else "unmuted"
+            return {
+                "success": True,
+                "muted": verified_mute,
+                "message": f"Volume {state_str}."
+            }
+        except Exception as e:
+            logger.warning(f"[SYSTEM] Failed to set mute via COM: {e}")
 
-
-def volume_down(steps: int = 5) -> Dict[str, Any]:
-    """Decrease system volume by sending volume down key events."""
     try:
+        # Fallback via keybd_event if endpoint is unavailable
         user32 = ctypes.windll.user32
-        for _ in range(max(1, min(25, steps))):
-            user32.keybd_event(VK_VOLUME_DOWN, 0, 0, 0)
-            user32.keybd_event(VK_VOLUME_DOWN, 0, KEYEVENTF_KEYUP, 0)
-        return {"success": True, "message": f"Decreased volume by {steps} steps."}
+        user32.keybd_event(VK_VOLUME_MUTE, 0, 0, 0)
+        user32.keybd_event(VK_VOLUME_MUTE, 0, KEYEVENTF_KEYUP, 0)
+        state_str = "muted" if is_muted else "unmuted"
+        return {"success": True, "muted": is_muted, "message": f"Volume {state_str}."}
     except Exception as e:
-        return {"success": False, "message": f"Failed to adjust volume: {e}"}
+        return {"success": False, "message": f"Failed to set mute: {e}"}
 
 
 def get_clipboard_text() -> Dict[str, Any]:
@@ -695,8 +1080,8 @@ def get_toggle_key_states() -> Dict[str, Any]:
 def toggle_key(key: str) -> Dict[str, Any]:
     """
     Toggle a keyboard lock key: 'caps', 'num', or 'scroll'.
+    Uses set_key to guarantee SendInput dispatch, synchronization, and state verification.
     """
-    import time
     key_map = {
         "caps":   (VK_CAPITAL, "Caps Lock"),
         "num":    (VK_NUMLOCK, "Num Lock"),
@@ -709,18 +1094,8 @@ def toggle_key(key: str) -> Dict[str, Any]:
     vk_code, key_name = vk_info
     try:
         user32 = ctypes.windll.user32
-        user32.keybd_event(vk_code, 0, 0, 0)
-        user32.keybd_event(vk_code, 0, KEYEVENTF_KEYUP, 0)
-        # Brief wait for OS to update toggle key state before re-reading
-        time.sleep(0.08)
-        new_state = bool(user32.GetKeyState(vk_code) & 0x0001)
-        state_str = "ON" if new_state else "OFF"
-        return {
-            "success": True,
-            "key": key_name,
-            "state": new_state,
-            "message": f"{key_name} is now {state_str}.",
-        }
+        current_state = bool(user32.GetKeyState(vk_code) & 0x0001)
+        return set_key(key, not current_state)
     except Exception as e:
         logger.error(f"[SYSTEM] Failed to toggle {key}: {e}")
         return {"success": False, "message": f"Could not toggle {key_name}: {e}"}
@@ -974,6 +1349,31 @@ def get_bluetooth_status() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"[SYSTEM] Failed to get Bluetooth status: {e}")
         return {"success": False, "message": f"Could not read Bluetooth status: {e}"}
+
+
+def set_bluetooth_state(enable: bool) -> Dict[str, Any]:
+    """
+    Enable or disable the Bluetooth adapter using PowerShell PnpDevice / Radio.
+    """
+    try:
+        import subprocess
+        action = "Enable" if enable else "Disable"
+        cmd = f"Get-PnpDevice -Class Bluetooth | {action}-PnpDevice -Confirm:$false"
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True, timeout=12
+        )
+        state_str = "enabled" if enable else "disabled"
+        if result.returncode == 0:
+            return {"success": True, "message": f"Bluetooth has been {state_str}."}
+        err = result.stderr.strip() or result.stdout.strip()
+        return {
+            "success": False,
+            "message": f"Could not {action.lower()} Bluetooth: {err or 'Administrator privileges may be required.'}"
+        }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to set Bluetooth state: {e}")
+        return {"success": False, "message": f"Bluetooth control failed: {e}"}
 
 
 def get_network_adapters() -> Dict[str, Any]:
@@ -1343,46 +1743,53 @@ def initiate_system_power(action: str, delay_seconds: int = 0) -> Dict[str, Any]
     Perform safe power management action: lock, sleep, hibernate, shutdown, restart, abort.
     """
     act = action.lower().strip()
+
+    # CANONICAL ROUTING: Power operations MUST route strictly via UniversalOSGateway
     try:
-        import subprocess
-        import ctypes
-        
-        if act == "lock":
-            ctypes.windll.user32.LockWorkStation()
-            return {"success": True, "status": "success", "action": "lock", "message": "Workstation locked."}
-        
-        elif act == "sleep":
-            subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"], check=False)
-            return {"success": True, "status": "success", "action": "sleep", "message": "System entering sleep mode."}
-            
-        elif act == "hibernate":
-            subprocess.run(["shutdown", "/h"], check=False)
-            return {"success": True, "status": "success", "action": "hibernate", "message": "System hibernating."}
-            
-        elif act in ("shutdown", "poweroff"):
-            sec = max(0, int(delay_seconds))
-            subprocess.run(["shutdown", "/s", "/t", str(sec)], check=False)
-            msg = f"System shutdown scheduled in {sec} seconds." if sec > 0 else "System shutting down now."
-            return {"success": True, "status": "success", "action": "shutdown", "delay": sec, "message": msg}
-            
-        elif act in ("restart", "reboot"):
-            sec = max(0, int(delay_seconds))
-            subprocess.run(["shutdown", "/r", "/t", str(sec)], check=False)
-            msg = f"System restart scheduled in {sec} seconds." if sec > 0 else "System restarting now."
-            return {"success": True, "status": "success", "action": "restart", "delay": sec, "message": msg}
-            
-        elif act in ("abort", "cancel"):
-            subprocess.run(["shutdown", "/a"], check=False)
-            return {"success": True, "status": "success", "action": "abort", "message": "Scheduled shutdown/restart cancelled."}
-            
-        else:
+        from core.os_gateway import get_os_gateway
+        from core.os_gateway.operation_model import OSOperation, OSCapability, OSOperationType, OSRiskLevel
+
+        op_map = {
+            "lock": OSOperationType.LOCK,
+            "sleep": OSOperationType.SLEEP,
+            "hibernate": OSOperationType.HIBERNATE,
+            "shutdown": OSOperationType.SHUTDOWN,
+            "poweroff": OSOperationType.SHUTDOWN,
+            "restart": OSOperationType.RESTART,
+            "reboot": OSOperationType.RESTART,
+            "sign_out": OSOperationType.SIGN_OUT,
+            "signout": OSOperationType.SIGN_OUT,
+        }
+        if act not in op_map:
+            if act in ("abort", "cancel"):
+                import subprocess
+                subprocess.run(["shutdown", "/a"], check=False)
+                return {"success": True, "status": "success", "action": "abort", "message": "Scheduled shutdown/restart cancelled."}
             return {"success": False, "status": "error", "message": f"Unknown power action '{action}'."}
+
+        op = OSOperation(
+            capability=OSCapability.SYSTEM_POWER,
+            operation_type=op_map[act],
+            target="system",
+            risk_level=OSRiskLevel.SYSTEM_CRITICAL if act in ("shutdown", "poweroff", "restart", "reboot", "hibernate") else OSRiskLevel.MODIFYING,
+            requires_confirmation=act in ("shutdown", "poweroff", "restart", "reboot", "hibernate"),
+            original_goal=f"{act} system",
+            parameters={"delay_seconds": delay_seconds}
+        )
+        res = get_os_gateway().execute(op, user_id=1, confirmed_by_user=False)
+        return {
+            "success": res.success,
+            "status": res.status,
+            "action": act,
+            "message": res.message,
+            "data": res.data
+        }
     except Exception as e:
         logger.error(f"[SYSTEM] Power action failed: {e}")
         return {"success": False, "status": "error", "message": f"System power action failed: {e}"}
 
 
-def get_gpu_telemetry() -> Dict[str, Any]:
+def get_gpu_telemetry(detailed: bool = False) -> Dict[str, Any]:
     """
     Get GPU utilization, memory usage, and temperature via NVML / nvidia-smi / WMI.
     """
@@ -1410,7 +1817,7 @@ def get_gpu_telemetry() -> Dict[str, Any]:
             })
         if gpus:
             msg = f"GPU: {gpus[0]['name']} at {gpus[0]['gpu_util_percent']}% load, {gpus[0]['temperature_c']}°C, {gpus[0]['memory_used_mb']}MB VRAM used."
-            return {"success": True, "available": True, "gpus": gpus, "message": msg}
+            return {"success": True, "status": "success", "available": True, "gpus": gpus, "message": msg}
     except Exception:
         pass
 
@@ -1436,15 +1843,126 @@ def get_gpu_telemetry() -> Dict[str, Any]:
                     })
             if gpus:
                 msg = f"GPU: {gpus[0]['name']} at {gpus[0]['gpu_util_percent']}% load, {gpus[0]['temperature_c']}°C."
-                return {"success": True, "available": True, "gpus": gpus, "message": msg}
+                return {"success": True, "status": "success", "available": True, "gpus": gpus, "message": msg}
     except Exception:
         pass
 
+    try:
+        import wmi
+        c = wmi.WMI()
+        wmi_gpus = c.Win32_VideoController()
+        if wmi_gpus:
+            gpus = []
+            for idx, vg in enumerate(wmi_gpus):
+                name = getattr(vg, "Name", f"GPU {idx}")
+                vram_bytes = getattr(vg, "AdapterRAM", None)
+                vram_mb = round(int(vram_bytes) / (1024 * 1024), 1) if vram_bytes else None
+                driver_ver = getattr(vg, "DriverVersion", "Unknown")
+                proc = getattr(vg, "VideoProcessor", "") or "Integrated Video Processor"
+                mfg = getattr(vg, "AdapterCompatibility", "") or "Generic"
+                res_h = getattr(vg, "CurrentHorizontalResolution", None)
+                res_v = getattr(vg, "CurrentVerticalResolution", None)
+                res_str = f"{res_h}x{res_v}" if res_h and res_v else None
+                
+                # Rank real physical GPUs over virtual mirror drivers (like Sharing Monitor)
+                is_virtual = "sharing" in name.lower() or vram_bytes is None
+                priority = 1 if is_virtual else 0
+
+                gpus.append({
+                    "priority": priority,
+                    "index": idx,
+                    "name": name,
+                    "manufacturer": mfg,
+                    "vram_mb": vram_mb,
+                    "driver_version": driver_ver,
+                    "processor": proc,
+                    "resolution": res_str,
+                    "gpu_util_percent": None,
+                    "gpu_type": "Virtual Adapter" if is_virtual else "Integrated GPU"
+                })
+
+            # Sort physical GPUs first
+            gpus.sort(key=lambda g: g["priority"])
+            primary = gpus[0]
+            vram_str = f"{primary['vram_mb']} MB VRAM" if primary['vram_mb'] else "shared memory"
+
+            if detailed:
+                msg = (
+                    f"Detailed GPU Information: {primary['name']} (Manufacturer: {primary['manufacturer']}, "
+                    f"Processor: {primary['processor']}, Driver: {primary['driver_version']}, Dedicated VRAM: {vram_str}). "
+                    f"Live GPU utilization and dynamic VRAM usage telemetry are unavailable on this integrated graphics system."
+                )
+            else:
+                msg = f"GPU: {primary['name']} ({vram_str}, Driver {primary['driver_version']}). Integrated GPU active; dedicated GPU telemetry unavailable."
+
+            return {
+                "success": True,
+                "status": "success",
+                "available": True,
+                "primary_gpu": primary,
+                "gpus": gpus,
+                "message": msg
+            }
+    except Exception as e:
+        logger.debug(f"[SYSTEM] WMI GPU detection fallback failed: {e}")
+
     return {
         "success": True,
+        "status": "success",
         "available": False,
         "gpus": [],
         "message": "No dedicated NVIDIA GPU telemetry available (integrated graphics or drivers not active)."
+    }
+
+
+def get_gpu_memory() -> Dict[str, Any]:
+    """
+    Query dedicated GPU memory metrics.
+    If dynamic GPU memory telemetry is unavailable on this machine, truthfully reports so.
+    """
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        device_count = pynvml.nvmlDeviceGetCount()
+        if device_count > 0:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode('utf-8')
+            used_mb = round(mem.used / (1024 * 1024), 1)
+            total_mb = round(mem.total / (1024 * 1024), 1)
+            free_mb = round(mem.free / (1024 * 1024), 1)
+            pct = round((mem.used / mem.total) * 100, 1) if mem.total else 0.0
+            return {
+                "success": True,
+                "status": "success",
+                "memory_telemetry_available": True,
+                "gpu_name": name,
+                "used_mb": used_mb,
+                "total_mb": total_mb,
+                "free_mb": free_mb,
+                "percent": pct,
+                "message": f"GPU memory usage: {used_mb} MB used out of {total_mb} MB ({pct}% used)."
+            }
+    except Exception:
+        pass
+
+    # Check primary GPU identity from WMI to provide a truthful system-specific report
+    gpu_res = get_gpu_telemetry()
+    primary = gpu_res.get("primary_gpu") or {}
+    primary_name = primary.get("name", "Integrated Graphics")
+    vram_mb = primary.get("vram_mb")
+    vram_desc = f" (Dedicated VRAM: {vram_mb} MB)" if vram_mb else ""
+
+    return {
+        "success": True,
+        "status": "unavailable",
+        "memory_telemetry_available": False,
+        "gpu_name": primary_name,
+        "total_vram_mb": vram_mb,
+        "used_mb": None,
+        "message": f"GPU memory usage telemetry is unavailable on this system ({primary_name}{vram_desc})."
     }
 
 

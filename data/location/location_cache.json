@@ -5,10 +5,10 @@
   "region": "Andhra Pradesh",
   "country": "India",
   "display_name": "Guntur, Andhra Pradesh, 522001, India",
-  "latitude": 16.3110075402953,
-  "longitude": 80.4208509247573,
-  "accuracy_m": 108.0,
+  "latitude": 16.3109937499839,
+  "longitude": 80.4208775846528,
+  "accuracy_m": 94.0,
   "is_device_location": true,
   "source": "windows_hardware_location",
-  "timestamp": 1790446399.3256567
+  "timestamp": 1791562880.0733716
 }

@@ -411,15 +411,21 @@ class VisualResponsePanel(QWidget):
 
     def _position_panel(self, anchor_widget: Optional[QWidget] = None):
         """Position the panel cleanly adjacent to anchor widget or bottom-right."""
-        screen = QApplication.primaryScreen().availableGeometry()
-        w = self.width()
-        h = self.height()
+        primary_screen = QApplication.primaryScreen()
+        screen = primary_screen.availableGeometry() if primary_screen else QRect(0, 0, 1920, 1080)
+
+        hint = self.sizeHint()
+        w = max(380, hint.width(), self.width())
+        h = max(100, hint.height(), self.height())
+        w = min(w, max(380, screen.width() - 40))
+        h = min(h, max(100, screen.height() - 40))
 
         if anchor_widget and anchor_widget.isVisible():
-            ax = anchor_widget.x()
-            ay = anchor_widget.y()
-            aw = anchor_widget.width()
-            ah = anchor_widget.height()
+            anchor_geo = anchor_widget.geometry()
+            ax = anchor_geo.x()
+            ay = anchor_geo.y()
+            aw = anchor_geo.width()
+            ah = anchor_geo.height()
 
             # Place to the left of the button if room, else right
             px = ax - w - 12
@@ -432,12 +438,12 @@ class VisualResponsePanel(QWidget):
             # Center vertically with anchor
             py = ay + (ah - h) // 2
             py = min(max(screen.top() + 10, py), screen.bottom() - h - 10)
-            self.move(px, py)
         else:
             # Default bottom-right corner
-            px = screen.right() - w - 24
-            py = screen.bottom() - h - 120
-            self.move(max(screen.left() + 10, px), max(screen.top() + 10, py))
+            px = max(screen.left() + 10, screen.right() - w - 24)
+            py = max(screen.top() + 10, screen.bottom() - h - 120)
+
+        self.setGeometry(int(px), int(py), int(w), int(h))
 
     # ── Dismissal & Outside-Click Handling ───────────────────────────────────
     def _install_outside_click_filter(self):

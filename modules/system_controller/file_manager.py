@@ -584,71 +584,90 @@ def copy_file(src_path: str, dst_path: str, user_id: Optional[int] = None) -> Di
 
 
 def move_file(src_path: str, dst_path: str, user_id: Optional[int] = None) -> Dict[str, Any]:
-    """Move a file safely and register an undo rollback closure."""
+    """Move a file or folder safely and register an undo rollback closure."""
     try:
-        if not os.path.exists(src_path):
-            return {"success": False, "message": f"Source file does not exist: {src_path}"}
-        if not is_safe_file_path(src_path) or not is_safe_file_path(dst_path):
+        actual_src = src_path
+        if not os.path.exists(actual_src):
+            for std_dir in [get_desktop_path(), str(Path.home() / "Downloads"), str(Path.home() / "Documents")]:
+                cand = Path(std_dir) / os.path.basename(src_path)
+                if cand.exists():
+                    actual_src = str(cand)
+                    break
+
+        if not os.path.exists(actual_src):
+            return {"success": False, "message": f"Source does not exist: {src_path}"}
+        if not is_safe_file_path(actual_src) or not is_safe_file_path(dst_path):
             return {"success": False, "message": "Paths must be within safe user directories."}
 
         target_dst = dst_path
         if os.path.isdir(dst_path):
-            target_dst = os.path.join(dst_path, os.path.basename(src_path))
+            target_dst = os.path.join(dst_path, os.path.basename(actual_src))
 
         os.makedirs(os.path.dirname(os.path.abspath(target_dst)), exist_ok=True)
-        shutil.move(src_path, target_dst)
+        shutil.move(actual_src, target_dst)
+
+        is_dir = os.path.isdir(target_dst)
+        item_type = "folder" if is_dir else "file"
 
         uid = _resolve_uid(user_id)
         try:
             from skills.undo.undo_manager import get_undo_manager
             def _rollback():
-                if os.path.exists(target_dst) and not os.path.exists(src_path):
-                    shutil.move(target_dst, src_path)
-                    return f"Restored '{os.path.basename(target_dst)}' back to '{src_path}'"
-                raise RuntimeError("Cannot undo move: destination file state has changed.")
+                if os.path.exists(target_dst) and not os.path.exists(actual_src):
+                    shutil.move(target_dst, actual_src)
+                    return f"Restored '{os.path.basename(target_dst)}' back to '{actual_src}'"
+                raise RuntimeError("Cannot undo move: destination state has changed.")
 
             get_undo_manager().push_undo(
                 user_id=uid,
-                label=f"Move '{os.path.basename(src_path)}' to '{target_dst}'",
+                label=f"Move '{os.path.basename(actual_src)}' to '{target_dst}'",
                 undo_fn=_rollback
             )
         except Exception as undo_err:
             logger.warning(f"Failed to register undo: {undo_err}")
 
-        return {"success": True, "message": f"Moved '{os.path.basename(src_path)}' to '{target_dst}'."}
+        return {
+            "success": True,
+            "target_path": target_dst,
+            "is_dir": is_dir,
+            "message": f"Moved {item_type} '{os.path.basename(actual_src)}' to '{target_dst}'."
+        }
     except Exception as e:
-        return {"success": False, "message": f"Failed to move file: {e}"}
+        return {"success": False, "message": f"Failed to move: {e}"}
 
 
 def rename_file(file_path: str, new_name: str, user_id: Optional[int] = None) -> Dict[str, Any]:
-    """Rename a file safely within its current parent directory and register an undo rollback closure."""
+    """Rename a file or folder safely within its current parent directory and register an undo rollback closure."""
     try:
         actual_path = file_path
         if not os.path.exists(actual_path):
-            found = find_file_in_desktop(os.path.basename(file_path))
-            if found:
-                actual_path = found
-            else:
-                for std_dir in ["Downloads", "Documents"]:
-                    cand = Path.home() / std_dir / os.path.basename(file_path)
-                    if cand.exists():
-                        actual_path = str(cand)
-                        break
+            for std_dir in [get_desktop_path(), str(Path.home() / "Downloads"), str(Path.home() / "Documents")]:
+                cand = Path(std_dir) / os.path.basename(file_path)
+                if cand.exists():
+                    actual_path = str(cand)
+                    break
+            if not os.path.exists(actual_path):
+                found = find_file_in_desktop(os.path.basename(file_path))
+                if found:
+                    actual_path = found
 
         if not os.path.exists(actual_path):
-            return {"success": False, "message": f"File not found: {file_path}"}
+            return {"success": False, "message": f"File or folder not found: {file_path}"}
         if not is_safe_file_path(actual_path):
-            return {"success": False, "message": "File is outside allowed directories."}
+            return {"success": False, "message": "Target is outside allowed directories."}
 
         parent = os.path.dirname(os.path.abspath(actual_path))
         clean_new = os.path.basename(new_name.strip())
         new_path = os.path.join(parent, clean_new)
 
         if os.path.exists(new_path):
-            return {"success": False, "message": f"A file named '{clean_new}' already exists."}
+            return {"success": False, "message": f"An item named '{clean_new}' already exists."}
 
         orig_basename = os.path.basename(actual_path)
         os.rename(actual_path, new_path)
+
+        is_dir = os.path.isdir(new_path)
+        item_type = "folder" if is_dir else "file"
 
         uid = _resolve_uid(user_id)
         try:
@@ -657,7 +676,7 @@ def rename_file(file_path: str, new_name: str, user_id: Optional[int] = None) ->
                 if os.path.exists(new_path) and not os.path.exists(actual_path):
                     os.rename(new_path, actual_path)
                     return f"Restored '{clean_new}' back to '{orig_basename}'"
-                raise RuntimeError(f"Cannot undo rename: file state at '{new_path}' has changed.")
+                raise RuntimeError(f"Cannot undo rename: state at '{new_path}' has changed.")
 
             get_undo_manager().push_undo(
                 user_id=uid,
@@ -667,9 +686,15 @@ def rename_file(file_path: str, new_name: str, user_id: Optional[int] = None) ->
         except Exception as undo_err:
             logger.warning(f"Failed to register undo: {undo_err}")
 
-        return {"success": True, "new_path": new_path, "message": f"Renamed '{orig_basename}' to '{clean_new}'."}
+        return {
+            "success": True,
+            "new_path": new_path,
+            "is_dir": is_dir,
+            "message": f"Renamed {item_type} '{orig_basename}' to '{clean_new}'."
+        }
     except Exception as e:
         return {"success": False, "message": f"Failed to rename file: {e}"}
+
 
 
 def safe_delete_file(file_path: str, use_trash: bool = True) -> Dict[str, Any]:

@@ -36,8 +36,12 @@ class CalendarIntentHandler:
     @classmethod
     def get_intent(cls, user_input: str) -> dict:
         """Processes user input and returns structured intent and entities."""
+        import re
+        user_input_norm = re.sub(r'\bshedule\b', 'schedule', user_input, flags=re.IGNORECASE)
+        user_input_norm = re.sub(r'\bmeting\b', 'meeting', user_input_norm, flags=re.IGNORECASE)
+        user_input_norm = re.sub(r'\bmeet\b', 'meeting', user_input_norm, flags=re.IGNORECASE)
         # Check deterministic keyword fallback first for high speed and offline reliability
-        fast_intent = cls._keyword_fallback(user_input)
+        fast_intent = cls._keyword_fallback(user_input_norm)
         if fast_intent.get("action") not in ("unknown", None):
             return fast_intent
 
@@ -76,6 +80,9 @@ class CalendarIntentHandler:
     def _keyword_fallback(cls, text: str) -> dict:
         """Minimal deterministic fallback when LLM is unavailable or disabled."""
         import re
+        text = re.sub(r'\bshedule\b', 'schedule', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bmeting\b', 'meeting', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bmeet\b', 'meeting', text, flags=re.IGNORECASE)
         text_lower = text.lower().strip()
         now = datetime.now()
         

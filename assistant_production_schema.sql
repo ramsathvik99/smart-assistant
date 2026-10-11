@@ -1,33 +1,19 @@
 -- =============================================================================
--- NOVA CANONICAL DATABASE SCHEMA
--- SCHEMA-CODE CONTRACT RECONCILIATION
+-- NOVA CANONICAL DATABASE SCHEMA (REFERENCE ONLY)
+-- AUTHORITATIVE SOURCE OF TRUTH: migrations/ directory via core/migration_runner.py
 -- =============================================================================
--- This schema matches the ACTUAL runtime expectations of legacy + intelligence code
--- 
+-- This file documents canonical tables for reference.
+-- ALL DATABASE MODIFICATIONS MUST BE APPLIED VIA MIGRATIONS (000 to 014+).
+--
 -- CANONICAL DECISIONS:
 -- 1. User ID Type: INTEGER (SERIAL PRIMARY KEY) - No UUID anywhere
 -- 2. Memory Model: DUAL SUPPORT (legacy JSONB + intelligence fact-based)
 -- 3. All FKs: INTEGER REFERENCES users(id)
 -- =============================================================================
 
--- CLEAN SLATE: Drop everything to eliminate UUID/INTEGER conflicts
-DROP SCHEMA IF EXISTS auth CASCADE;
-DROP SCHEMA IF EXISTS extensions CASCADE;
-DROP SCHEMA IF EXISTS task_agent CASCADE;
-DROP SCHEMA IF EXISTS legacy CASCADE;
-DROP SCHEMA IF EXISTS core CASCADE;
-DROP TABLE IF EXISTS users CASCADE;
-DROP TABLE IF EXISTS user_memory CASCADE;
-DROP TABLE IF EXISTS user_preferences CASCADE;
-DROP TABLE IF EXISTS system_memory CASCADE;
-DROP TABLE IF EXISTS plugins CASCADE;
-DROP TABLE IF EXISTS plugin_logs CASCADE;
-DROP TABLE IF EXISTS decision_logs CASCADE;
-DROP TABLE IF EXISTS security_audit_logs CASCADE;
-DROP TABLE IF EXISTS reminders CASCADE;
-DROP TABLE IF EXISTS messages CASCADE;
-DROP TABLE IF EXISTS notes CASCADE;
-DROP TABLE IF EXISTS active_contexts CASCADE;
+-- NOTE: Destructive DROP commands have been neutralized to preserve existing data.
+-- Run migrations via: python core/migration_runner.py
+
 
 -- =============================================================================
 -- CANONICAL TABLES (No schema prefixes for backward compatibility)

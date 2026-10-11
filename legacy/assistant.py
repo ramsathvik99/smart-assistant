@@ -211,6 +211,13 @@ if threading.current_thread() is threading.main_thread():
 # CONVERSATION MEMORY FIXES
 # ======================================================
 
+from collections import defaultdict
+
+# User-scoped conversation memory
+last_response_by_user = {}
+conversation_history_by_user = defaultdict(list)
+
+# Backward-compatibility handles
 last_response = ""
 conversation_history = []
 
@@ -222,7 +229,12 @@ IGNORED_RESPONSES = [
     ""
 ]
 
-def get_last_response():
+def get_last_response(user_id=None):
+    from instance.config import settings
+    uid = user_id or getattr(settings, 'CURRENT_USER_ID', None) or 1
+    resp = last_response_by_user.get(uid)
+    if resp:
+        return resp
     return last_response if last_response else "Nothing to repeat."
 
 def is_repeat_request(user_input):
@@ -238,26 +250,35 @@ def is_repeat_request(user_input):
     ]
     return text in exact_triggers
 
-def store_interaction(user_input, response):
+def store_interaction(user_input, response, user_id=None):
     global last_response
+    from instance.config import settings
+    uid = user_id or getattr(settings, 'CURRENT_USER_ID', None) or 1
 
     clean_response = response.lower().strip() if response else ""
 
     # Only store meaningful responses
     if clean_response not in IGNORED_RESPONSES:
+        last_response_by_user[uid] = response
         last_response = response
 
-    # Always keep history
-    conversation_history.append({
+    # User-scoped conversation history
+    entry = {
         "user": user_input,
-        "response": response
-    })
+        "response": response,
+        "user_id": uid
+    }
+    conversation_history_by_user[uid].append(entry)
+    conversation_history.append(entry)
 
-def search_history(query):
-    query = query.lower().strip().split()
-    for item in reversed(conversation_history):
+def search_history(query, user_id=None):
+    from instance.config import settings
+    uid = user_id or getattr(settings, 'CURRENT_USER_ID', None) or 1
+    query_words = query.lower().strip().split()
+    user_history = conversation_history_by_user.get(uid, [])
+    for item in reversed(user_history):
         combined = (item["user"] + " " + item["response"]).lower()
-        if any(word in combined for word in query):
+        if any(word in combined for word in query_words):
             return item["response"]
     return None
 
@@ -280,6 +301,14 @@ def extract_history_query(user_input):
 # 1) MAIN COMMAND PROCESSOR
 # ======================================================
 
+# ── Utterance deduplication & concurrency controls ───────────
+_last_utterance_text: str = ""
+_last_utterance_time: float = 0.0
+_last_utterance_response: str = ""
+_utterance_lock = threading.Lock()
+_current_turn_epoch: int = 0
+
+
 def process_input(text, user_id=None):
     """Main entry point for processing user input. Routes strictly via Unified Command Router."""
     # Update proactive activity tracking
@@ -290,13 +319,49 @@ def process_input(text, user_id=None):
         pass
         
     if not text or not text.strip():
-        return
+        return ""
+
+    clean_text = text.strip()
+    norm_text = clean_text.lower()
+    now_mono = time.monotonic()
+
+    # Utterance Deduplication & Atomic Epoch Transition (Requirement 4)
+    with _utterance_lock:
+        global _last_utterance_text, _last_utterance_time, _last_utterance_response, _current_turn_epoch
+        from instance.config import settings as _cfg_dup
+        suppression_window = float(_cfg_dup.get("DUPLICATE_UTTERANCE_WINDOW", 0.75))
+        if norm_text == _last_utterance_text and (now_mono - _last_utterance_time) < suppression_window:
+            print(f"[DEDUPLICATION] Suppressed duplicate utterance '{clean_text}' within {now_mono - _last_utterance_time:.3f}s window.")
+            return _last_utterance_response
+
+        _current_turn_epoch += 1
+        my_epoch = _current_turn_epoch
+        _last_utterance_text = norm_text
+        _last_utterance_time = now_mono
+
+    # Performance instrumentation: Start monotonic latency tracker with unique correlation ID (Requirement 7)
+    correlation_id = f"turn_{int(now_mono * 1000)}_{my_epoch}"
+    tracker = None
+    try:
+        from core.latency_instrumentation import start_new_tracker
+        tracker = start_new_tracker(correlation_id)
+        tracker.record("transcription_complete_timestamp", now_mono)
+        tracker.record("routing_start_timestamp", time.monotonic())
+    except Exception:
+        tracker = None
+
+    # Preemption / Interruption: cancel obsolete in-progress speech from earlier turns
+    try:
+        from extensions.system.tts_coordinator import get_tts_coordinator
+        get_tts_coordinator().interrupt_speech()
+    except Exception:
+        pass
 
     try:
-        print(f"[ASSISTANT DEBUG] Command: {text}")
+        print(f"[ASSISTANT DEBUG] Command [{correlation_id}]: {clean_text}")
     except Exception:
-        safe_text = str(text).encode("ascii", errors="backslashreplace").decode("ascii")
-        print(f"[ASSISTANT DEBUG] Command: {safe_text}")
+        safe_text = str(clean_text).encode("ascii", errors="backslashreplace").decode("ascii")
+        print(f"[ASSISTANT DEBUG] Command [{correlation_id}]: {safe_text}")
 
     # Forward to Brain (PHASE 6: multi-intent + dialogue state + goal planner)
     # Falls back transparently to unified_command_router for single-intent commands.
@@ -311,44 +376,78 @@ def process_input(text, user_id=None):
 
         try:
             from core.brain import brain_route_and_execute
-            result = brain_route_and_execute(text, user_id=effective_uid)
+            result = brain_route_and_execute(clean_text, user_id=effective_uid)
         except Exception as brain_err:
             # If Brain fails for any reason, fall back to direct single-intent router
             print(f"[BRAIN FALLBACK] {brain_err}")
             from core.unified_command_router import route_and_execute
-            result = route_and_execute(text, user_id=effective_uid)
+            result = route_and_execute(clean_text, user_id=effective_uid)
 
-        response = str(result.get("response") or "")
-        
+        if tracker:
+            tracker.record("routing_complete_timestamp", time.monotonic())
+            tracker.record("text_answer_available_timestamp", time.monotonic())
+
+        raw_output = str(result.get("response") or "")
+        try:
+            from extensions.system.conversational_response import sanitize_user_response
+            response = sanitize_user_response(raw_output, clean_text)
+        except Exception:
+            response = raw_output
+
+        # Concurrency check: If a newer request has started during generation, discard speech
+        with _utterance_lock:
+            if my_epoch != _current_turn_epoch:
+                print(f"[SUPERSEDED] Turn {my_epoch} superseded by turn {_current_turn_epoch} — discarding speech.")
+                return response
+            _last_utterance_response = response
+
         # CRITICAL: Check if the request was properly handled to prevent incorrect fallbacks
-        # If the request is marked as handled, do not attempt any additional processing
-        if result.get("handled", False):
-            print(f"[ASSISTANT DEBUG] Request was properly handled by subsystem. Response: {response}")
-            if response:
-                # Use TTS Coordinator with COMMAND priority
-                speak(response, priority=TTSPriority.COMMAND)
-                # Store in conversational memory
-                try:
-                    from extensions.conversational_memory import store_interaction
-                    store_interaction(text, response, user_id=effective_uid)
-                except Exception as e:
-                    print(f"[MEMORY ERROR] {e}")
-            return response
-        
-        # If not marked as handled, process normally
         if response:
-            # Use TTS Coordinator with COMMAND priority
-            speak(response, priority=TTSPriority.COMMAND)
+            try:
+                from extensions.system.conversational_response import compose_conversational_response
+                conv_resp = compose_conversational_response(
+                    user_input=clean_text,
+                    raw_response=response,
+                    intent=result.get("intent"),
+                    action_result=result,
+                    context={"user_id": effective_uid, "command": clean_text},
+                    user_id=effective_uid,
+                    is_proactive=False,
+                )
+                final_ui_text = conv_resp.text or response
+                spoken_response = conv_resp.speech_text or conv_resp.text or response
+                meta = conv_resp.to_dict()
+                meta["ui_text"] = final_ui_text
+                print(f"[SPEECH PIPELINE] Final UI Text: {final_ui_text[:120]!r}")
+                print(f"[SPEECH PIPELINE] Speech Text: {spoken_response!r}")
+                print(f"[SPEECH PIPELINE] Words: {len(spoken_response.split())} | Chars: {len(spoken_response)}")
+            except Exception as c_err:
+                print(f"[CONVERSATIONAL COMPOSER ERROR] {c_err}")
+                spoken_response = response
+                meta = {"ui_text": response}
+
+            if tracker:
+                tracker.record("tts_request_timestamp", time.monotonic())
+
+            # Use TTS Coordinator with COMMAND priority and conversational metadata
+            speak(spoken_response, priority=TTSPriority.COMMAND, metadata=meta)
+
             # Store in conversational memory
             try:
                 from extensions.conversational_memory import store_interaction
-                store_interaction(text, response, user_id=effective_uid)
+                store_interaction(clean_text, response, user_id=effective_uid)
             except Exception as e:
                 print(f"[MEMORY ERROR] {e}")
+
+        if tracker:
+            tracker.print_breakdown()
 
         return response
     except Exception as e:
         err = f"Execution failed: {str(e)}"
         print(f"[ASSISTANT ERROR] {err}")
         speak("I encountered an error executing that command.", priority=TTSPriority.COMMAND)
+        if tracker:
+            tracker.set_reason(fallback=str(e))
+            tracker.print_breakdown()
         return err

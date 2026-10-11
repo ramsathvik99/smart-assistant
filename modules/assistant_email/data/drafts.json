@@ -1,0 +1,81 @@
+{
+    "ram": [
+        {
+            "id": "draft_1791566324_fd5dc1",
+            "recipient": "colleague@example.com",
+            "cc": "",
+            "bcc": "",
+            "subject": "Project Status",
+            "body": "All on track.",
+            "attachments": [],
+            "saved_at": "2026-10-09 22:48:44",
+            "updated_at": "2026-10-09 22:48:44"
+        },
+        {
+            "id": "draft_1791566715_48fcc7",
+            "recipient": "colleague@example.com",
+            "cc": "",
+            "bcc": "",
+            "subject": "Project Status",
+            "body": "All on track.",
+            "attachments": [],
+            "saved_at": "2026-10-09 22:55:15",
+            "updated_at": "2026-10-09 22:55:15"
+        },
+        {
+            "id": "draft_1791567225_8a06c3",
+            "recipient": "colleague@example.com",
+            "cc": "",
+            "bcc": "",
+            "subject": "Project Status",
+            "body": "All on track.",
+            "attachments": [],
+            "saved_at": "2026-10-09 23:03:45",
+            "updated_at": "2026-10-09 23:03:45"
+        },
+        {
+            "id": "draft_1791567241_4022b2",
+            "recipient": "colleague@example.com",
+            "cc": "",
+            "bcc": "",
+            "subject": "Project Status",
+            "body": "All on track.",
+            "attachments": [],
+            "saved_at": "2026-10-09 23:04:01",
+            "updated_at": "2026-10-09 23:04:01"
+        },
+        {
+            "id": "draft_1791567268_c56b01",
+            "recipient": "colleague@example.com",
+            "cc": "",
+            "bcc": "",
+            "subject": "Project Status",
+            "body": "All on track.",
+            "attachments": [],
+            "saved_at": "2026-10-09 23:04:28",
+            "updated_at": "2026-10-09 23:04:28"
+        },
+        {
+            "id": "draft_1791605104_abbde1",
+            "recipient": "colleague@example.com",
+            "cc": "",
+            "bcc": "",
+            "subject": "Project Status",
+            "body": "All on track.",
+            "attachments": [],
+            "saved_at": "2026-10-10 09:35:04",
+            "updated_at": "2026-10-10 09:35:04"
+        },
+        {
+            "id": "draft_1791636933_5960b5",
+            "recipient": "colleague@example.com",
+            "cc": "",
+            "bcc": "",
+            "subject": "Project Status",
+            "body": "All on track.",
+            "attachments": [],
+            "saved_at": "2026-10-10 18:25:33",
+            "updated_at": "2026-10-10 18:25:33"
+        }
+    ]
+}

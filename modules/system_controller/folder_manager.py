@@ -64,8 +64,17 @@ def create_folder(folder_name, location="desktop"):
         if not is_safe_path(folder_path, base_path):
             logger.warning(f"Unsafe folder creation attempted: {folder_path}")
             return "Error: Folder path is outside allowed user directories."
-        
+
+        if os.path.exists(folder_path):
+            if os.path.isdir(folder_path):
+                logger.info(f"Folder already exists: {folder_path}")
+                return f"Folder '{folder_name}' already exists at {base_path}."
+            else:
+                return f"Error: A file named '{folder_name}' already exists at {base_path}."
+
         os.makedirs(folder_path, exist_ok=True)
+        if not os.path.isdir(folder_path):
+            return f"Error: Failed to verify creation of folder '{folder_name}'."
         logger.info(f"Folder created: {folder_path}")
         return f"Folder '{folder_name}' created at {base_path}"
         

@@ -233,41 +233,18 @@ def switch_tab():
 # ======================================================
 
 def system_action(action):
-    """Perform basic system control actions: shutdown, restart, lock, sleep."""
+    """Perform basic system control actions via safe OS gateway."""
     action = action.lower()
+    from legacy.skills_utilities import shutdown_system, restart_system, lock_system, sleep_system
 
     if action == "shutdown":
-        speak("Shutting down your system. Goodbye.")
-        try:
-            ctypes.windll.user32.InitiateSystemShutdownExW(None, None, 3, 1, 0, 0x00050010)
-        except Exception:
-            subprocess.run(["shutdown", "/s", "/t", "3"], check=False)
-        return "Shutting down system."
-
+        return shutdown_system() or "Shutting down system."
     elif action == "restart":
-        speak("Restarting your system.")
-        try:
-            ctypes.windll.user32.InitiateSystemShutdownExW(None, None, 3, 1, 1, 0x00050010)
-        except Exception:
-            subprocess.run(["shutdown", "/r", "/t", "3"], check=False)
-        return "Restarting system."
-
+        return restart_system() or "Restarting system."
     elif action == "lock":
-        speak("Locking your computer now.")
-        try:
-            ctypes.windll.user32.LockWorkStation()
-        except Exception:
-            subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"], check=False)
-        return "System locked."
-
+        return lock_system() or "System locked."
     elif action in ["sleep", "suspend", "standby"]:
-        speak("Putting your computer to sleep.")
-        try:
-            ctypes.windll.powrprof.SetSuspendState(0, 1, 0)
-        except Exception:
-            subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"], check=False)
-        return "Putting system to sleep."
-
+        return sleep_system() or "Putting system to sleep."
     else:
         speak("I'm not sure which system action you meant.")
         return "Unknown system action."
@@ -311,36 +288,94 @@ def close_app(app_name):
         speak("WhatsApp closed.")
         return "WhatsApp closed."
 
+    # ---- Generic Browser handling ----
+    if app_name in ["browser", "the browser", "web browser", "internet", "default browser"]:
+        browser_exes = ["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe", "opera.exe"]
+        closed_any = False
+        for exe in browser_exes:
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                closed_any = True
+            except Exception:
+                pass
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                pn = (proc.info['name'] or "").lower()
+                if any(b in pn for b in ["chrome", "msedge", "brave", "firefox", "opera"]):
+                    proc.kill()
+                    closed_any = True
+            except Exception:
+                pass
+        if closed_any:
+            speak("Browser closed.")
+            return "Browser closed."
+        else:
+            return "No running browser was found."
+
     # ---- Process name map ----
     process_map = {
-        "chrome":      ["chrome.exe"],
-        "brave":       ["brave.exe"],
-        "notepad":     ["notepad.exe", "Notepad.exe"],
-        "calculator":  ["calc.exe", "CalculatorApp.exe", "Calculator.exe"],
-        "calc":        ["calc.exe", "CalculatorApp.exe", "Calculator.exe"],
-        "paint":       ["mspaint.exe", "Paint.exe"],
-        "mspaint":     ["mspaint.exe", "Paint.exe"],
-        "vscode":      ["Code.exe", "code.exe"],
-        "vs code":     ["Code.exe", "code.exe"],
-        "vlc":         ["vlc.exe"],
-        "camera":      ["WindowsCamera.exe", "ApplicationFrameHost.exe"],
-        "spotify":     ["Spotify.exe"],
-        "discord":     ["Discord.exe"],
-        "telegram":    ["Telegram.exe"],
-        "edge":        ["msedge.exe"],
-        "firefox":     ["firefox.exe"],
-        "settings":    ["SystemSettings.exe"],
-        "task manager":["taskmgr.exe", "Taskmgr.exe"],
-        "taskmgr":     ["taskmgr.exe", "Taskmgr.exe"],
-        "cmd":         ["cmd.exe"],
-        "terminal":    ["WindowsTerminal.exe", "wt.exe"],
-        "explorer":    ["explorer.exe"],
+        "chrome":              ["chrome.exe"],
+        "google chrome":       ["chrome.exe"],
+        "brave":               ["brave.exe"],
+        "brave browser":       ["brave.exe"],
+        "notepad":             ["notepad.exe", "Notepad.exe"],
+        "calculator":          ["calc.exe", "CalculatorApp.exe", "Calculator.exe"],
+        "calc":                ["calc.exe", "CalculatorApp.exe", "Calculator.exe"],
+        "paint":               ["mspaint.exe", "Paint.exe"],
+        "mspaint":             ["mspaint.exe", "Paint.exe"],
+        "vscode":              ["Code.exe", "code.exe"],
+        "vs code":             ["Code.exe", "code.exe"],
+        "visual studio code":  ["Code.exe", "code.exe"],
+        "code":                ["Code.exe", "code.exe"],
+        "vlc":                 ["vlc.exe"],
+        "vlc media player":    ["vlc.exe"],
+        "camera":              ["WindowsCamera.exe", "ApplicationFrameHost.exe"],
+        "spotify":             ["Spotify.exe"],
+        "discord":             ["Discord.exe"],
+        "telegram":            ["Telegram.exe"],
+        "telegram desktop":    ["Telegram.exe"],
+        "edge":                ["msedge.exe"],
+        "microsoft edge":      ["msedge.exe"],
+        "ms edge":             ["msedge.exe"],
+        "firefox":             ["firefox.exe"],
+        "mozilla firefox":     ["firefox.exe"],
+        "opera":               ["opera.exe"],
+        "opera browser":       ["opera.exe"],
+        "settings":            ["SystemSettings.exe"],
+        "task manager":        ["taskmgr.exe", "Taskmgr.exe"],
+        "taskmgr":             ["taskmgr.exe", "Taskmgr.exe"],
+        "cmd":                 ["cmd.exe"],
+        "terminal":            ["WindowsTerminal.exe", "wt.exe"],
+        "explorer":            ["explorer.exe"],
+        "file explorer":       ["explorer.exe"],
+        "postman":             ["Postman.exe"],
+        "steam":               ["steam.exe"],
+        "anydesk":             ["AnyDesk.exe"],
+        "zoom":                ["Zoom.exe"],
+        "cursor":              ["Cursor.exe"],
     }
 
-    exes = process_map.get(app_name, [app_name + ".exe"])
+    candidate_exes = list(process_map.get(app_name, []))
+    if not candidate_exes:
+        try:
+            from extensions.system.smart_opener import smart_opener
+            resolved = smart_opener.resolve_detailed(app_name)
+            if resolved:
+                target_path = resolved[1]
+                if target_path.lower().endswith(".exe"):
+                    candidate_exes.append(os.path.basename(target_path))
+                elif target_path.lower().endswith(".lnk"):
+                    base = os.path.splitext(os.path.basename(target_path))[0]
+                    candidate_exes.append(f"{base}.exe")
+        except Exception:
+            pass
+    if not candidate_exes:
+        candidate_exes.append(app_name + ".exe")
+        candidate_exes.append(app_name.replace(" ", "") + ".exe")
+
     closed_any = False
 
-    for exe in exes:
+    for exe in candidate_exes:
         try:
             subprocess.run(
                 ["taskkill", "/F", "/IM", exe],
@@ -355,11 +390,15 @@ def close_app(app_name):
     # Fallback to psutil process search if not yet closed
     if not closed_any:
         try:
-            clean_target = app_name.replace(" ", "").lower()
+            clean_target = re.sub(r'[^a-z0-9]', '', app_name)
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
-                    pname = proc.info['name'].lower()
-                    if clean_target in pname or pname in clean_target:
+                    pname = (proc.info['name'] or "").lower()
+                    pclean = re.sub(r'[^a-z0-9]', '', pname)
+                    if any(ce.lower() == pname for ce in candidate_exes):
+                        proc.kill()
+                        closed_any = True
+                    elif clean_target and (clean_target in pclean or pclean.startswith(clean_target)):
                         proc.kill()
                         closed_any = True
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -368,7 +407,8 @@ def close_app(app_name):
             pass
 
     if closed_any:
-        speak(f"{app_name} closed.")
+        display_name = app_name.capitalize()
+        speak(f"{display_name} closed.")
         
         # Clear context via canonical ContextManager
         try:
@@ -379,9 +419,10 @@ def close_app(app_name):
                 print(f"[COMMAND INTELLIGENCE] Cleared context for {app_name}")
         except Exception as e:
             print(f"[CONTEXT ERROR] Failed to clear context for {app_name}: {e}")
-        return f"{app_name} closed."
+        return f"{display_name} closed."
     else:
-        msg = f"I could not find or close {app_name}."
+        display_name = app_name.capitalize()
+        msg = f"I could not find or close {display_name}."
         speak(msg)
         return msg
 

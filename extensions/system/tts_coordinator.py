@@ -49,15 +49,16 @@ class TTSPriority(Enum):
 
 
 class TTSRequest:
-    """Represents a single TTS request"""
+    """Represents a single TTS request with priority and speech metadata"""
 
     _counter     = 0
     _counter_lock = threading.Lock()
 
-    def __init__(self, text: str, priority: TTSPriority, lang_hint: str = "en"):
+    def __init__(self, text: str, priority: TTSPriority, lang_hint: str = "en", metadata: Optional[dict] = None):
         self.text      = text
         self.priority  = priority
         self.lang_hint = lang_hint
+        self.metadata  = metadata or {}
         self.timestamp = time.time()
         with TTSRequest._counter_lock:
             self.sequence = TTSRequest._counter
@@ -82,6 +83,8 @@ class TTSCoordinator:
         self.worker_thread: Optional[threading.Thread] = None
         self.speak_func: Optional[Callable] = None
         self._init_lock    = threading.Lock()
+        self._current_request: Optional[TTSRequest] = None
+        self._request_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Initialization
@@ -130,8 +133,9 @@ class TTSCoordinator:
 
     def speak(self, text: str,
               priority: TTSPriority = TTSPriority.COMMAND,
-              lang_hint: str = "en") -> None:
-        """Queue a TTS request.
+              lang_hint: str = "en",
+              metadata: Optional[dict] = None) -> None:
+        """Queue a TTS request with natural speech adaptation and priority preemption.
 
         If the coordinator has not been initialized yet (speak_func is
         None), the request is passed DIRECTLY to legacy.tts.speak() as
@@ -141,8 +145,20 @@ class TTSCoordinator:
             text:      Text to speak.
             priority:  Priority tier.
             lang_hint: BCP-47 language code hint.
+            metadata:  Optional response type and speech metadata.
         """
         if not text or not text.strip():
+            return
+
+        # Adapt text for natural spoken conversation
+        try:
+            from extensions.system.speech_adapter import adapt_for_speech
+            adapted_text, meta = adapt_for_speech(text, metadata)
+        except Exception:
+            adapted_text = text
+            meta = metadata or {}
+
+        if not adapted_text.strip():
             return
 
         if self.speak_func is None:
@@ -156,16 +172,28 @@ class TTSCoordinator:
                 logger.warning(
                     "[TTS COORDINATOR] speak_func not yet set and auto-init failed (%s) — "
                     "falling back to legacy.tts.speak() directly for: %r",
-                    e, text[:60]
+                    e, adapted_text[:60]
                 )
                 try:
                     from legacy.tts import speak as _direct_speak
-                    _direct_speak(text, lang_hint=lang_hint, block=False)
+                    _direct_speak(adapted_text, lang_hint=lang_hint, block=False)
                 except Exception as exc:
                     logger.error("[TTS COORDINATOR] Direct fallback also failed: %s", exc)
                 return
 
-        request = TTSRequest(text, priority, lang_hint)
+        # Preemption check: user command or emergency preempts lower priority background/proactive speech
+        if priority.value >= TTSPriority.COMMAND.value:
+            with self._request_lock:
+                cur = self._current_request
+                if cur and cur.priority.value < priority.value:
+                    print(f"[TTS COORDINATOR] INTERRUPTION: Preempting active {cur.priority.name} speech for {priority.name}")
+                    try:
+                        from legacy.tts import stop_speaking
+                        stop_speaking(interrupted=True)
+                    except Exception:
+                        pass
+
+        request = TTSRequest(adapted_text, priority, lang_hint, metadata=meta)
         self.queue.put(request)
         logger.debug("[TTS COORDINATOR] Queued: %s", request)
 
@@ -236,6 +264,17 @@ class TTSCoordinator:
                 continue
 
             try:
+                with self._request_lock:
+                    self._current_request = request
+
+                try:
+                    from extensions.system.tts_backend import get_tts_backend_manager
+                    _active_be = get_tts_backend_manager().get_backend()
+                    _engine_label = f"Neural ({_active_be.name})" if _active_be.name != "sapi" else "Windows SAPI"
+                except Exception:
+                    _engine_label = "Windows SAPI/pyttsx3"
+
+                print(f"[TTS COORDINATOR] SPEECH START (Priority: {request.priority.name}, Engine: {_engine_label}): {request.text[:60]!r}")
                 logger.info(
                     "[TTS COORDINATOR] Speaking (%s): %r",
                     request.priority.name,
@@ -246,9 +285,20 @@ class TTSCoordinator:
                 self.speak_func(request.text,
                                 lang_hint=request.lang_hint,
                                 block=False)
+
+                # Wait for utterance to finish or be preempted
+                try:
+                    from legacy.tts import wait_for_silence
+                    wait_for_silence(timeout=30.0)
+                except Exception:
+                    pass
+
+                print(f"[TTS COORDINATOR] SPEECH END: {request.text[:60]!r}")
             except Exception as exc:
                 logger.error("[TTS COORDINATOR] Error dispatching request: %s", exc)
             finally:
+                with self._request_lock:
+                    self._current_request = None
                 self.queue.task_done()
 
         logger.info("[TTS COORDINATOR WORKER] Stopped")
@@ -290,7 +340,8 @@ def initialize_tts_coordinator(speak_func: Callable) -> None:
 def speak(text: str,
           priority: TTSPriority = TTSPriority.COMMAND,
           lang_hint: str = "en",
-          block: bool = False) -> None:
+          block: bool = False,
+          metadata: Optional[dict] = None) -> None:
     """Queue text for speaking through the coordinator.
 
     This is the ONLY function application code should call for TTS.
@@ -303,12 +354,14 @@ def speak(text: str,
         lang_hint: BCP-47 language code.
         block:     If True, wait until all queued speech is done.
                    Use sparingly — can delay the calling thread.
+        metadata:  Optional response type and conversational metadata.
     """
     coordinator = get_tts_coordinator()
-    coordinator.speak(text, priority, lang_hint)
+    coordinator.speak(text, priority, lang_hint, metadata=metadata)
 
     if block:
         coordinator.wait_until_spoken()
+
 
 
 def is_speaking() -> bool:

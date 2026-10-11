@@ -5,7 +5,7 @@ Provides conversational commands for inspecting and analyzing clipboard technica
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 from .clipboard_analyzer import analyze_clipboard
 
 

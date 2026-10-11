@@ -1,0 +1,63 @@
+{
+  "user_id": 8,
+  "accounts": {},
+  "devices": {
+    "hue_e589fe": {
+      "device_id": "hue_e589fe",
+      "user_id": 8,
+      "provider_key": "hue",
+      "external_id": "hue_bulb_bedroom",
+      "name": "Bedroom Light",
+      "manufacturer": "Philips Hue",
+      "room": "Bedroom",
+      "device_type": "light",
+      "image_key": "light",
+      "is_on": true,
+      "traits": {
+        "brightness": 70,
+        "color_temp": 3000,
+        "is_on": true
+      },
+      "online": true,
+      "created_at": 1790597154.1818762,
+      "updated_at": 1790658037.9203773
+    },
+    "daikin_3e7313": {
+      "device_id": "daikin_3e7313",
+      "user_id": 8,
+      "provider_key": "daikin",
+      "external_id": "daikin_ac_bedroom",
+      "name": "Bedroom AC",
+      "manufacturer": "Daikin Inverter",
+      "room": "Bedroom",
+      "device_type": "ac",
+      "image_key": "ac",
+      "is_on": true,
+      "traits": {
+        "temperature": 24,
+        "mode": "Cool",
+        "is_on": true
+      },
+      "online": true,
+      "created_at": 1790597154.1864226,
+      "updated_at": 1791441717.1310804
+    },
+    "tuya_163e29": {
+      "device_id": "tuya_163e29",
+      "user_id": 8,
+      "provider_key": "tuya",
+      "external_id": "tuya_plug_study",
+      "name": "Study Room Plug",
+      "manufacturer": "TP-Link Kasa",
+      "room": "Study Room",
+      "device_type": "plug",
+      "image_key": "plug",
+      "is_on": false,
+      "traits": {},
+      "online": true,
+      "created_at": 1790597154.188727,
+      "updated_at": 1790658015.6429377
+    }
+  },
+  "updated_at": 1791441717.1310804
+}

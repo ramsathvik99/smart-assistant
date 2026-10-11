@@ -12,5 +12,11 @@
     "karthikeya": {
         "email": "karthikeyakumara3@gmail.com",
         "aliases": []
+    },
+    "professor": {
+        "email": "professor@university.edu",
+        "aliases": [
+            "my professor"
+        ]
     }
 }

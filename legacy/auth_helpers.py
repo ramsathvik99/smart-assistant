@@ -70,3 +70,10 @@ def login_success(user_id, username):
         proactive_coordinator.start(str(user_id))
     except Exception as e:
         print(f"[SYSTEM] Proactive observer startup error on login: {e}")
+
+    try:
+        from core.environment import get_environment_coordinator
+        get_environment_coordinator().ensure_running(str(user_id))
+    except Exception as e:
+        print(f"[SYSTEM] Environment observer startup error on login: {e}")
+

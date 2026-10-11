@@ -1018,6 +1018,8 @@ def _process_utterance(audio_data: np.ndarray):
             process_input(text)
             
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"[CONTINUOUS AUDIO] Utterance processing error: {e}")
 
 
@@ -1065,7 +1067,7 @@ def stop_continuous_audio_stream():
     
     if not _continuous_audio_state['running']:
         print("[CONTINUOUS AUDIO] Not running")
-        return False
+        return True
     
     _continuous_audio_state['stop_requested'] = True
     _continuous_audio_state['running'] = False

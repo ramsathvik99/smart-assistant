@@ -18,7 +18,11 @@ from .content_helper import (
     extract_topic_from_query,
     build_document_content,
     build_presentation_slides,
-    build_spreadsheet_spec
+    build_spreadsheet_spec,
+    ArtifactContentSpec,
+    construct_content_spec,
+    verify_artifact_quality,
+    refine_artifact
 )
 
 __all__ = [
@@ -37,5 +41,9 @@ __all__ = [
     'extract_topic_from_query',
     'build_document_content',
     'build_presentation_slides',
-    'build_spreadsheet_spec'
+    'build_spreadsheet_spec',
+    'ArtifactContentSpec',
+    'construct_content_spec',
+    'verify_artifact_quality',
+    'refine_artifact'
 ]

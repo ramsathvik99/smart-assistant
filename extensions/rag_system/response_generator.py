@@ -1,4 +1,5 @@
 # extensions/rag_system/response_generator.py
+from typing import Optional
 from extensions.llm_engine import LLMEngine
 
 class RAGResponseGenerator:
@@ -102,8 +103,71 @@ class RAGResponseGenerator:
 
         return "\n\n".join(sections)
 
+    def extract_direct_answer(self, data: dict) -> Optional[str]:
+        """
+        Extract clean, validated direct retrieval answer with citations if available.
+        Does NOT require LLM synthesis when provider supplied a validated direct answer.
+        """
+        if not data or not isinstance(data, dict):
+            return None
+
+        direct_text = ""
+        # 1. Explicit direct_answer field
+        if data.get("direct_answer") and isinstance(data["direct_answer"], str) and len(data["direct_answer"].strip()) >= 15:
+            direct_text = data["direct_answer"].strip()
+
+        # 2. Answer Box
+        if not direct_text:
+            ans_box = data.get("answer_box")
+            if ans_box and isinstance(ans_box, dict):
+                cand = ans_box.get("answer") or ans_box.get("result") or ans_box.get("snippet") or ""
+                if len(str(cand).strip()) >= 15:
+                    direct_text = str(cand).strip()
+
+        # 3. AI Overview
+        if not direct_text:
+            ai_ov = data.get("ai_overview")
+            if isinstance(ai_ov, list) and ai_ov:
+                cand = " ".join(s.strip() for s in ai_ov if s and len(s.strip()) > 15)
+                if len(cand) >= 15:
+                    direct_text = cand
+            elif isinstance(ai_ov, str) and len(ai_ov.strip()) >= 15:
+                direct_text = ai_ov.strip()
+
+        # 4. Knowledge Graph
+        if not direct_text:
+            kg = data.get("knowledge_graph")
+            if kg and isinstance(kg, dict):
+                cand = kg.get("description") or ""
+                if len(str(cand).strip()) >= 15:
+                    direct_text = str(cand).strip()
+
+        if not direct_text:
+            return None
+
+        # Format clean answer with citations / source links from organic_items
+        sources = []
+        for item in (data.get("organic_items") or [])[:3]:
+            title = item.get("title", "").strip()
+            link = item.get("link", "").strip()
+            if title and link:
+                sources.append(f"[{len(sources) + 1}] {title} ({link})")
+            elif link:
+                sources.append(f"[{len(sources) + 1}] {link}")
+
+        res = direct_text
+        if sources:
+            res += "\n\nSources:\n" + "\n".join(sources)
+        return res
+
     def generate(self, query, intent, data):
         """Final response generator using LLM as a reasoning layer."""
+        # Check if retrieval already provided a valid direct answer
+        if intent in ["dynamic_fact_query", "real_time_info", "web_search"]:
+            direct_ans = self.extract_direct_answer(data)
+            if direct_ans:
+                print(f"[PIPELINE - GENERATION] Valid direct answer available from retrieval ({data.get('provider', 'retriever')}). Using direct retrieval answer.")
+                return direct_ans
         
         # Format history
         history_context = ""
@@ -120,8 +184,14 @@ class RAGResponseGenerator:
                 msgs.append(f"{role}: {msg.get('content')}")
             history_context = "\n".join(msgs)
 
-        # Build structured factual context
+        # Build structured factual context with canonical runtime temporal anchor
         truth_context = self._format_truth_context(data)
+        try:
+            from core.temporal_context import format_temporal_prompt_block
+            temporal_block = format_temporal_prompt_block()
+            truth_context = f"{temporal_block}\n\n{truth_context}" if truth_context.strip() else temporal_block
+        except Exception:
+            pass
         has_ground_truth = bool(truth_context.strip())
 
         # Base personality — uses per-user configured assistant name; never hardcodes "NOVA"
@@ -133,7 +203,12 @@ class RAGResponseGenerator:
 
         base_personality = (
             f"You are {_asst_name}, a highly intelligent, professional AI assistant developed by Trevon Labs.\n"
-            "Maintain a calm, efficient, confident, and professional tone.\n"
+            "Maintain a calm, efficient, confident, and professional tone.\n\n"
+            "CRITICAL COMMUNICATION RULES:\n"
+            "- Speak naturally, directly, and conversationally like a knowledgeable assistant (or ChatGPT).\n"
+            "- Internal context, memory, RAG results, search results, databases, and tools are invisible implementation details.\n"
+            "- NEVER begin responses with retrieval meta-commentary such as 'Based on the retrieved evidence', 'Based on available information', 'According to my search results', 'Based on your references', 'From your history', 'According to my context', etc.\n"
+            "- Answer the user's question directly without explaining how you retrieved or verified the answer.\n"
         )
 
         # Intent-specific guidance
@@ -142,9 +217,8 @@ class RAGResponseGenerator:
                 intent_instructions = (
                     "CRITICAL GROUNDING REQUIREMENT:\n"
                     "The provided GROUND TRUTH EVIDENCE contains verified, real-time web search results retrieved specifically for this query.\n"
-                    "- You MUST answer the user's question accurately using this retrieved information (check DIRECT ANSWER / AI OVERVIEW, ANSWER BOX, KNOWLEDGE GRAPH, and SEARCH RESULTS).\n"
-                    "- Base your factual statements strictly on the retrieved ground truth evidence.\n"
-                    "- Answer directly, concisely, and factually.\n"
+                    "- You MUST answer the user's question accurately using this information (check DIRECT ANSWER / AI OVERVIEW, ANSWER BOX, KNOWLEDGE GRAPH, and SEARCH RESULTS).\n"
+                    "- State the factual answer directly, concisely, and accurately without referencing the evidence or search process.\n"
                     "- Do NOT rely on outdated pre-training knowledge when fresh search evidence is provided."
                 )
             else:
@@ -164,7 +238,7 @@ class RAGResponseGenerator:
         elif intent == "current_time_query":
             intent_instructions = (
                 "PRIORITY: The provided GROUND TRUTH EVIDENCE contains the exact current date, time, and year from the system clock.\n"
-                "State the time/date/year directly and precisely based on this data. Do not guess."
+                "State the time/date/year directly and precisely. Do not announce sources or data."
             )
         elif intent == "memory_storage":
             intent_instructions = (
@@ -174,7 +248,8 @@ class RAGResponseGenerator:
         elif intent in ["memory_management", "memory_retrieval"]:
             intent_instructions = (
                 "The user is asking about their saved memories or preferences.\n"
-                "Use the provided GROUND TRUTH EVIDENCE to answer their personal memory question accurately."
+                "Use the provided GROUND TRUTH EVIDENCE to answer their personal memory question accurately and directly.\n"
+                "Do NOT say 'According to my memory', 'From your history', or 'Based on stored records'."
             )
         elif intent == "general_knowledge":
             intent_instructions = (
@@ -183,7 +258,7 @@ class RAGResponseGenerator:
             )
         else:
             intent_instructions = (
-                f"Use the GROUND TRUTH EVIDENCE regarding {intent.replace('_', ' ')} to answer.\n"
+                f"Use the GROUND TRUTH EVIDENCE regarding {intent.replace('_', ' ')} to answer directly.\n"
                 "If data is missing or if you are unsure, do not hallucinate; state that you don't have that information."
             )
 
@@ -211,8 +286,28 @@ class RAGResponseGenerator:
             print(f"[PIPELINE - GENERATION] Calling LLM with intent: {intent} (has_ground_truth={has_ground_truth})")
             response = self.llm.get_completion(prompt=query, system_prompt=full_system_prompt)
             if not response:
+                # LLM synthesis unavailable: check if retrieval data has usable direct answer or snippets
+                if data and isinstance(data, dict):
+                    direct_fallback = self.extract_direct_answer(data)
+                    if direct_fallback:
+                        print("[PIPELINE - GENERATION] LLM unavailable; recovered with validated retrieval direct answer.")
+                        return direct_fallback
+                    items = data.get("organic_items") or []
+                    if items:
+                        snippets = [it.get("snippet") for it in items[:2] if it.get("snippet")]
+                        if snippets:
+                            srcs = [f"[{i+1}] {it.get('title', '')} ({it.get('link', '')})" for i, it in enumerate(items[:2]) if it.get("link")]
+                            joined = " ".join(snippets)
+                            if srcs:
+                                joined += "\n\nSources:\n" + "\n".join(srcs)
+                            print("[PIPELINE - GENERATION] LLM unavailable; recovered with top retrieval snippets.")
+                            return joined
                 return "I apologize, but I am currently unable to reach my language model services. Please check your connection or try again in a moment."
             return response
         except Exception as e:
             print(f"[RAG GENERATOR ERROR] {e}")
+            if data and isinstance(data, dict):
+                direct_fallback = self.extract_direct_answer(data)
+                if direct_fallback:
+                    return direct_fallback
             return "I apologize, but I encountered an error while formulating my response."

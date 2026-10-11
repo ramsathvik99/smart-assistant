@@ -54,20 +54,33 @@ class ProactiveInteraction:
         """Reset idle timer on user interaction."""
         self.last_interaction_time = time.time()
         self.idle_interval = self._get_random_interval()
+        try:
+            from core.proactive_observer import proactive_coordinator
+            proactive_coordinator.reset_idle_timer()
+        except Exception:
+            pass
 
     def start(self) -> None:
-        """Start proactive interaction monitoring."""
+        """Start proactive interaction monitoring (delegates to authoritative proactive_coordinator)."""
         if self.is_running:
             return
         self.is_running = True
-        self.thread = threading.Thread(
-            target=self._monitor_idle, daemon=True, name="assistant-proactive"
-        )
-        self.thread.start()
+        try:
+            from core.proactive_observer import proactive_coordinator
+            from instance.config import settings
+            uid = getattr(settings, 'CURRENT_USER_ID', None) or 1
+            proactive_coordinator.start(str(uid))
+        except Exception as e:
+            pass
 
     def stop(self) -> None:
         """Stop proactive interaction monitoring."""
         self.is_running = False
+        try:
+            from core.proactive_observer import proactive_coordinator
+            proactive_coordinator.stop()
+        except Exception:
+            pass
 
     def _is_user_busy(self) -> bool:
         """Return True when the user should not be interrupted."""

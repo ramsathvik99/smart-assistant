@@ -97,3 +97,7 @@ system_enhancements/
 # Instance specific
 instance/__pycache__/
 instance/*.json
+
+# Old version reference and archives
+*.zip
+old_version_reference/

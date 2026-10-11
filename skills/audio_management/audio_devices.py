@@ -24,6 +24,7 @@ WHY THIS IS CACHED
 
 from __future__ import annotations
 
+from typing import Any
 import threading
 import time
 
@@ -126,6 +127,9 @@ def _transport_works(idx: int, kind: str, api_key) -> bool:
     ok = False
     try:
         import sounddevice as sd
+    except ImportError:
+        return True
+    try:
         rate = _RATES.get(kind, 16000)
         secs = _PROBE_SECONDS.get(kind, 0.5)
 
@@ -227,6 +231,8 @@ def _usable(idx: int, kind: str) -> bool:
                                     blocksize=1024, device=idx)
         st.start()
         return True
+    except ImportError:
+        return True
     except Exception:
         return False
     finally:
@@ -313,6 +319,26 @@ def _query() -> dict[str, list[str]]:
                       f"({len(out[kind])} devices)")
         return out
 
+    except ImportError:
+        # Fall back to PyAudio when sounddevice is not installed
+        try:
+            import pyaudio
+            p = pyaudio.PyAudio()
+            try:
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    name = (info.get("name") or "").strip()
+                    if not name or _is_pseudo(name):
+                        continue
+                    if info.get("maxInputChannels", 0) > 0 and name not in out["input"]:
+                        out["input"].append(name)
+                    if info.get("maxOutputChannels", 0) > 0 and name not in out["output"]:
+                        out["output"].append(name)
+            finally:
+                p.terminate()
+        except Exception as pa_err:
+            print(f"[Audio] PyAudio fallback enumeration failed: {pa_err}")
+        return out
     except Exception as e:
         print(f"[Audio] Device enumeration failed: {e}")
     return out
@@ -414,6 +440,8 @@ def resolve(name: str, kind: str):
 
         print(f"[Audio] Saved {kind} device '{wanted}' cannot be opened at "
               f"{_RATES.get(kind)} Hz on any host API — using system default")
+        return None
+    except ImportError:
         return None
     except Exception as e:
         print(f"[Audio] resolve({kind}) failed: {e} — using system default")

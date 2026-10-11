@@ -24,14 +24,26 @@ class MemoryLoaderThread(QThread):
         self.user_id = user_id
 
     def run(self):
+        import sys
         try:
-            from legacy.memory_manager import load_user_memory, get_notes_with_ids_db
-            mem = load_user_memory(self.user_id) if self.user_id else {}
-            notes = get_notes_with_ids_db(self.user_id) if self.user_id else []
-            self.data_loaded.emit(mem, notes)
+            if getattr(sys, 'frozen', False):
+                # Packaged exe: load memories via REST API
+                from core.api_client import get_api_client
+                client = get_api_client()
+                result = client.get_memories()
+                mem = result.get("memories", {}) if result.get("success") else {}
+                notes_result = client._request("/api/notes")
+                notes = notes_result.get("notes", []) if notes_result.get("success") else []
+                self.data_loaded.emit(mem, notes)
+            else:
+                from legacy.memory_manager import load_user_memory, get_notes_with_ids_db
+                mem = load_user_memory(self.user_id) if self.user_id else {}
+                notes = get_notes_with_ids_db(self.user_id) if self.user_id else []
+                self.data_loaded.emit(mem, notes)
         except Exception as e:
             print(f"[MEMORY PAGE] Loader error: {e}")
             self.data_loaded.emit({}, [])
+
 
 
 class MemoryCard(QFrame):

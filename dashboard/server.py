@@ -1,8 +1,8 @@
 """
-Smart Assistant — Decoupled Web Dashboard Server
-Zero-dependency, multi-threaded HTTP presentation & control surface.
-Decoupled from Assistant Core: Assistant never hard-depends on Dashboard.
-All operations route through canonical AssistantCore and existing backend controllers.
+Smart Assistant — Production Multi-User Backend & Web Dashboard Server
+Zero-dependency, multi-threaded HTTP presentation, control surface & REST API.
+Enforces Bearer token authentication, strict multi-user data isolation,
+ChatGPT-style memory retrieval, GDPR data export/deletion, and privacy-preserving observability.
 """
 
 import os
@@ -17,10 +17,46 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 from core.assistant_core import assistant_core
+from core.db_pool import get_db_pool
+from core.auth_service import (
+    register_user as auth_signup,
+    authenticate_user_credentials,
+    change_user_password,
+    revoke_token,
+    verify_token
+)
+from core.user_isolation import (
+    extract_authenticated_user,
+    enforce_ownership,
+    export_user_data,
+    delete_user_account_cascading,
+    AuthorizationError
+)
+from core.chatgpt_memory import get_chatgpt_memory
+from core.admin_metrics import get_admin_metrics
+from core.migration_runner import run_migrations
 
 DEFAULT_PORT = 8000
 DASHBOARD_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(DASHBOARD_DIR, "static")
+
+# Configurable CORS allowed origins (default to localhost/127.0.0.1)
+_RAW_CORS = os.getenv("CORS_ALLOWED_ORIGINS", "")
+CORS_ALLOWED_ORIGINS = [o.strip() for o in _RAW_CORS.split(",") if o.strip()]
+if not CORS_ALLOWED_ORIGINS:
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+PUBLIC_PATHS = {
+    "/api/health", "/health", "/api/admin/metrics", "/api/status", "/api/telemetry", "/api/state",
+    "/api/auth/signup", "/api/auth/login", "/", "/index.html"
+}
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -31,9 +67,8 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 class DashboardHandler(BaseHTTPRequestHandler):
     """
-    HTTP Request Handler for the Smart Assistant Web Dashboard.
-    Acts strictly as a presentation and control surface.
-    All data is read from and written to existing authoritative controllers.
+    HTTP Request Handler for the Smart Assistant Web Dashboard & Production REST API.
+    Acts strictly as an authenticated presentation and control surface.
     """
     protocol_version = "HTTP/1.0"
 
@@ -41,15 +76,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # Suppress noisy standard HTTP access logs
         pass
 
+    def _get_cors_origin(self) -> Optional[str]:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return None
+        clean_origin = origin.rstrip("/")
+        for allowed in CORS_ALLOWED_ORIGINS:
+            if clean_origin == allowed.rstrip("/"):
+                return origin
+        app_env = os.getenv("APP_ENV", "development").lower()
+        if app_env == "development":
+            if clean_origin.startswith("http://localhost:") or clean_origin.startswith("http://127.0.0.1:"):
+                return origin
+        return None
+
+    def _set_cors_headers(self):
+        cors_origin = self._get_cors_origin()
+        if cors_origin:
+            self.send_header("Access-Control-Allow-Origin", cors_origin)
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+            self.send_header("Vary", "Origin")
+
     def _send_json(self, data: dict, status: int = 200):
         try:
             payload = json.dumps(data).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self._set_cors_headers()
             self.end_headers()
             self.wfile.write(payload)
         except Exception:
@@ -61,9 +116,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self._set_cors_headers()
             self.end_headers()
             self.wfile.write(payload)
         except Exception:
@@ -71,41 +124,101 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         """Handle CORS pre-flight requests."""
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.end_headers()
+        cors_origin = self._get_cors_origin()
+        if cors_origin:
+            self.send_response(204)
+            self._set_cors_headers()
+            self.end_headers()
+        else:
+            self.send_response(403)
+            self.end_headers()
+
+    def _get_auth_user(self) -> Optional[Dict[str, Any]]:
+        """Extract and verify authenticated user from Authorization header."""
+        auth_header = self.headers.get("Authorization")
+        if auth_header:
+            user_data = extract_authenticated_user(auth_header)
+            if user_data:
+                return user_data
+        return None
 
     def _resolve_uid(self, q=None, payload=None) -> int:
-        """Resolve authenticated user ID ensuring multi-user isolation."""
-        if q and "user_id" in q:
-            try:
-                val = int(q["user_id"][0])
-                if val > 0:
-                    return val
-            except (ValueError, TypeError):
-                pass
-        if payload and "user_id" in payload and payload["user_id"] is not None:
-            try:
-                val = int(payload["user_id"])
-                if val > 0:
-                    return val
-            except (ValueError, TypeError):
-                pass
+        """
+        Resolve authenticated user ID ensuring multi-user isolation.
+        Strict precedence:
+        1. Verified Bearer token (cannot be forged or spoofed)
+           - If client provides token for User A and attempts to access User B (via user_id param),
+             ownership check rejects with AuthorizationError (HTTP 403) unless user is admin.
+        2. In production without token: returns 0 (triggers 401 Unauthorized for protected paths).
+        3. Local desktop mode fallback (development only): uses assistant_core context.
+           Never trusts unauthenticated user_id from query/payload to switch identities.
+        """
+        auth_user = self._get_auth_user()
+        if auth_user and "sub" in auth_user:
+            token_uid = int(auth_user["sub"])
+            requested_uid = None
+            if q and "user_id" in q:
+                try:
+                    requested_uid = int(q["user_id"][0])
+                except (ValueError, TypeError):
+                    pass
+            elif payload and "user_id" in payload and payload["user_id"] is not None:
+                try:
+                    requested_uid = int(payload["user_id"])
+                except (ValueError, TypeError):
+                    pass
+
+            if requested_uid is not None and requested_uid > 0:
+                user_role = auth_user.get("role", "user")
+                if user_role != "admin" and requested_uid != token_uid:
+                    enforce_ownership(token_uid, requested_uid)
+
+            return token_uid
+
+        app_env = os.getenv("APP_ENV", "development").lower()
+        if app_env == "production":
+            return 0
+
+        # Development fallback: use local desktop context; never trust unauthenticated client user_id params
         uctx = assistant_core.get_user_context()
         return uctx.get("user_id") or 1
 
     def do_GET(self):
+        t0 = time.time()
         url = urlparse(self.path)
         path = url.path
         q = parse_qs(url.query)
-        uid = self._resolve_uid(q=q)
+
+        try:
+            uid = self._resolve_uid(q=q)
+        except AuthorizationError as auth_err:
+            self._send_json({"success": False, "error": str(auth_err)}, 403)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 403)
+            return
+
+        if path not in PUBLIC_PATHS and uid == 0:
+            self._send_json({"success": False, "error": "Authentication required."}, 401)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 401)
+            return
+
+        # ── PUBLIC / OBSERVABILITY / HEALTH ──────────────────────────────────
+        if path == "/api/health" or path == "/health":
+            metrics = get_admin_metrics().get_system_health()
+            self._send_json({"success": True, "status": metrics["status"], "health": metrics})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        elif path == "/api/admin/metrics":
+            metrics = get_admin_metrics().get_system_health()
+            self._send_json({"success": True, "data": metrics})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
 
         # ── CORE / TELEMETRY / STATE ─────────────────────────────────────────
-        if path == "/api/status" or path == "/api/telemetry":
+        elif path == "/api/status" or path == "/api/telemetry":
             telem = assistant_core.get_telemetry()
             self._send_json({"success": True, "data": telem})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         elif path == "/api/state":
@@ -114,11 +227,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "state": assistant_core.get_state(),
                 "audio_level": assistant_core.get_audio_level()
             })
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
-        elif path == "/api/user":
+        elif path == "/api/user" or path == "/api/users/me":
             uctx = assistant_core.get_user_context()
-            self._send_json({"success": True, "user": uctx})
+            self._send_json({"success": True, "user": uctx, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        # ── GDPR DATA EXPORT ──────────────────────────────────────────────────
+        elif path == "/api/users/me/export":
+            export_payload = export_user_data(uid)
+            self._send_json({"success": True, "export": export_payload, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        # ── CHATGPT-STYLE MEMORY & FACTS ──────────────────────────────────────
+        elif path == "/api/memories/facts":
+            mem = get_chatgpt_memory()
+            facts = mem.get_user_facts(uid)
+            self._send_json({"success": True, "facts": facts, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        elif path == "/api/preferences":
+            mem = get_chatgpt_memory()
+            prefs = mem.get_preferences(uid)
+            self._send_json({"success": True, "preferences": prefs, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        elif path == "/api/conversations":
+            mem = get_chatgpt_memory()
+            limit = int(q.get("limit", [15])[0])
+            convs = mem.get_recent_conversation(uid, limit=limit)
+            self._send_json({"success": True, "conversations": convs, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 1. MOBILE / DEVICE MANAGEMENT ─────────────────────────────────────
@@ -137,6 +282,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "devices": devices_data, "user_id": uid})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e), "devices": []})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 2. BACKGROUND TASKS ───────────────────────────────────────────────
@@ -159,6 +305,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "queue": [],
                     "error": str(e)
                 })
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 3. AUDIO / ECHOGUARD ──────────────────────────────────────────────
@@ -184,6 +331,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self._send_json({"success": False, "error": str(e), "inputs": [], "outputs": []})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 4. WINDOW / DESKTOP CONTEXT ───────────────────────────────────────
@@ -195,6 +343,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "data": win_res})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 5. CLIPBOARD (STRICTLY ON-DEMAND) ─────────────────────────────────
@@ -205,6 +354,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "clipboard": clip_res})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 6. LEARNING / PREFERENCES ─────────────────────────────────────────
@@ -216,6 +366,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "rules": rules, "user_id": uid})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e), "rules": []})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 7. UNDO / ROLLBACK ────────────────────────────────────────────────
@@ -232,6 +383,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self._send_json({"success": False, "can_undo": False, "latest": "", "history": []})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 8. SMART HOME ─────────────────────────────────────────────────────
@@ -247,6 +399,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self._send_json({"success": False, "error": str(e), "devices": []})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 9. FILE MANAGEMENT ────────────────────────────────────────────────
@@ -268,6 +421,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self._send_json({"success": False, "error": str(e), "files": []})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 10. GENERATED DOCUMENTS ───────────────────────────────────────────
@@ -293,6 +447,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "directory": doc_dir, "documents": docs})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e), "documents": []})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 11. CALENDAR ──────────────────────────────────────────────────────
@@ -301,7 +456,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 from modules.calendar_manager.calendar_storage import CalendarStorage
                 cs = CalendarStorage()
                 today = time.strftime("%Y-%m-%d")
-                # Look 60 days ahead
                 end_day = time.strftime("%Y-%m-%d", time.localtime(time.time() + 60 * 86400))
                 events_map = cs.get_events_range(uid, today, end_day)
                 flattened = []
@@ -313,6 +467,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "events": flattened, "user_id": uid})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e), "events": []})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 12. MUSIC / MEDIA ─────────────────────────────────────────────────
@@ -324,18 +479,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "music": status})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e), "music": {}})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── REMINDERS / MEMORY (EXISTING AUTHORITATIVE PATHS) ─────────────────
         elif path == "/api/reminders":
             reminders = assistant_core.get_user_reminders(user_id=uid)
             self._send_json({"success": True, "reminders": reminders, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
-        elif path == "/api/memory":
+        elif path == "/api/memory" or path == "/api/memories":
             memory = assistant_core.get_user_memory(user_id=uid)
             notes = assistant_core.get_user_notes(user_id=uid)
-            self._send_json({"success": True, "memory": memory, "notes": notes, "user_id": uid})
+            facts = get_chatgpt_memory().get_user_facts(uid)
+            self._send_json({"success": True, "memory": memory, "notes": notes, "facts": facts, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── STATIC WEB UI ─────────────────────────────────────────────────────
@@ -346,11 +505,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_html(f.read())
             else:
                 self._send_html("<h1>Trevon Labs Dashboard</h1><p>Dashboard UI ready.</p>")
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         self._send_json({"error": "Not Found", "path": path}, 404)
+        get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 404, uid)
 
     def do_POST(self):
+        t0 = time.time()
         url = urlparse(self.path)
         path = url.path
 
@@ -361,16 +523,103 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception:
             payload = {}
 
-        uid = self._resolve_uid(payload=payload)
+        try:
+            uid = self._resolve_uid(payload=payload)
+        except AuthorizationError as auth_err:
+            self._send_json({"success": False, "error": str(auth_err)}, 403)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 403)
+            return
+
+        if path not in PUBLIC_PATHS and uid == 0:
+            self._send_json({"success": False, "error": "Authentication required."}, 401)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 401)
+            return
+
+        # ── AUTHENTICATION ENDPOINTS (PUBLIC) ─────────────────────────────────
+        if path == "/api/auth/signup":
+            username = payload.get("username", "").strip()
+            password = payload.get("password", "").strip()
+            res = auth_signup(username, password)
+            status_code = 200 if res.get("success") else 400
+            self._send_json(res, status=status_code)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, status_code)
+            return
+
+        elif path == "/api/auth/login":
+            username = payload.get("username", "").strip()
+            password = payload.get("password", "").strip()
+            res = authenticate_user_credentials(username, password)
+            status_code = 200 if res.get("success") else 401
+            self._send_json(res, status=status_code)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, status_code)
+            return
+
+        elif path == "/api/auth/logout":
+            token = payload.get("token")
+            auth_header = self.headers.get("Authorization")
+            if not token and auth_header:
+                parts = auth_header.strip().split()
+                token = parts[1] if len(parts) == 2 else parts[0]
+            if token:
+                revoke_token(token)
+            self._send_json({"success": True, "message": "Logged out successfully."})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        elif path == "/api/auth/change_password":
+            old_p = payload.get("old_password", "")
+            new_p = payload.get("new_password", "")
+            res = change_user_password(uid, old_p, new_p)
+            status_code = 200 if res.get("success") else 400
+            self._send_json(res, status=status_code)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, status_code, uid)
+            return
+
+        # ── CHATGPT MEMORY ENDPOINTS ──────────────────────────────────────────
+        elif path == "/api/memories/search":
+            query = payload.get("query", "").strip()
+            mem = get_chatgpt_memory()
+            matches = mem.retrieve_relevant_memories(uid, query, limit=8)
+            self._send_json({"success": True, "results": matches, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        elif path == "/api/memories/facts":
+            key = payload.get("key", "").strip()
+            val = payload.get("value", "")
+            mem = get_chatgpt_memory()
+            success = mem.set_user_fact(uid, key, val, confidence=1.0, source="user_api")
+            self._send_json({"success": success, "key": key, "value": val, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        elif path == "/api/preferences":
+            key = payload.get("key", "").strip()
+            val = payload.get("value", "")
+            mem = get_chatgpt_memory()
+            success = mem.set_preference(uid, key, val)
+            self._send_json({"success": success, "key": key, "value": val, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        elif path == "/api/conversations":
+            u_in = payload.get("user_input", "")
+            a_out = payload.get("assistant_response", "")
+            get_chatgpt_memory().log_interaction(uid, u_in, a_out)
+            self._send_json({"success": True, "message": "Interaction saved.", "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
 
         # ── COMMAND TERMINAL ──────────────────────────────────────────────────
-        if path == "/api/command":
+        elif path == "/api/command":
             cmd = payload.get("command", "").strip()
             if not cmd:
                 self._send_json({"success": False, "error": "Empty command"}, 400)
+                get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 400, uid)
                 return
             response = assistant_core.execute_command(cmd, user_id=uid)
-            self._send_json({"success": True, "response": response})
+            self._send_json({"success": True, "response": response, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 1. MOBILE / DEVICE ACTIONS ────────────────────────────────────────
@@ -382,6 +631,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(pair_res)
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         elif path == "/api/devices/unpair":
@@ -393,6 +643,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": success, "message": f"Device {device_id} revoked." if success else "Failed to revoke device."})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         elif path == "/api/devices/action":
@@ -415,6 +666,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(res)
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 2. BACKGROUND TASK ACTIONS ────────────────────────────────────────
@@ -430,6 +682,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "task_id": task_id, "message": f"Task queued with ID {task_id}"})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         elif path == "/api/task/cancel":
@@ -444,159 +697,88 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_json({"success": True, "cancelled": True, "message": "Active task cancellation signal sent."})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 3. AUDIO ACTIONS ──────────────────────────────────────────────────
         elif path == "/api/audio/switch":
             try:
                 from skills.audio_management.audio_controller import get_audio_controller
-                target = payload.get("device", "")
-                kind = payload.get("kind", "output")
+                ep_type = payload.get("type", "input")
+                idx = int(payload.get("index", 0))
                 ac = get_audio_controller()
-                res = ac.switch_audio_device(target, kind=kind)
+                res = ac.set_audio_endpoint(ep_type, idx)
                 self._send_json(res)
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
-        elif path == "/api/audio/test":
+        elif path == "/api/audio/echoguard/calibrate":
             try:
-                from skills.audio_management.audio_controller import get_audio_controller
-                sound = payload.get("sound", "alert")
-                ac = get_audio_controller()
-                res = ac.play_sound(sound)
-                self._send_json(res)
+                from skills.audio_management.echo_guard import get_echo_guard
+                eg = get_echo_guard()
+                eg.calibrate(ambient_duration=1.0)
+                self._send_json({"success": True, "message": "EchoGuard ambient calibration completed.", "floor": eg.floor, "threshold": eg.threshold})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
-        # ── 4. WINDOW / SCREENSHOT ACTIONS ────────────────────────────────────
-        elif path == "/api/window/action":
-            try:
-                action = payload.get("action", "")
-                if action == "screenshot":
-                    from skills.window_management.window_controller import get_window_controller
-                    res = get_window_controller().capture_screenshot()
-                    self._send_json(res)
-                elif action == "minimize_all":
-                    from modules.system_controller import minimize_all_windows
-                    res = minimize_all_windows()
-                    self._send_json(res)
-                else:
-                    self._send_json({"success": False, "error": f"Unknown action {action}"}, 400)
-            except Exception as e:
-                self._send_json({"success": False, "error": str(e)}, 500)
-            return
-
-        # ── 6. LEARNING / RULES ACTIONS ───────────────────────────────────────
-        elif path == "/api/rules":
+        # ── 6. LEARNING / PREFERENCE ACTIONS ──────────────────────────────────
+        elif path == "/api/rules/add":
             try:
                 from skills.learning.learned_rules import get_learned_rules_engine
-                rule_text = payload.get("rule_text", "").strip()
-                cat = payload.get("category", "general")
+                rule_text = payload.get("rule", "").strip()
                 if not rule_text:
-                    self._send_json({"success": False, "error": "Empty rule text"}, 400)
+                    self._send_json({"success": False, "error": "Missing rule text"}, 400)
                     return
                 lre = get_learned_rules_engine()
-                res = lre.add_rule(uid, rule_text, category=cat)
+                res = lre.learn_rule(uid, rule_text)
                 self._send_json(res)
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
-        elif path == "/api/rules/toggle":
-            try:
-                from skills.learning.learned_rules import get_learned_rules_engine
-                rule_id = payload.get("rule_id", "")
-                lre = get_learned_rules_engine()
-                res = lre.toggle_rule(uid, rule_id)
-                self._send_json(res)
-            except Exception as e:
-                self._send_json({"success": False, "error": str(e)}, 500)
-            return
-
-        elif path == "/api/rules/delete":
-            try:
-                from skills.learning.learned_rules import get_learned_rules_engine
-                rule_id = payload.get("rule_id", "")
-                lre = get_learned_rules_engine()
-                res = lre.delete_rule(uid, rule_id)
-                self._send_json(res)
-            except Exception as e:
-                self._send_json({"success": False, "error": str(e)}, 500)
-            return
-
-        # ── 7. UNDO ACTION ────────────────────────────────────────────────────
-        elif path == "/api/undo":
+        # ── 7. UNDO ACTIONS ───────────────────────────────────────────────────
+        elif path == "/api/undo/execute":
             try:
                 from skills.undo.undo_manager import get_undo_manager
                 um = get_undo_manager()
-                res = um.undo_last(uid)
+                res = um.undo(uid)
                 self._send_json(res)
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 8. SMART HOME ACTIONS ─────────────────────────────────────────────
-        elif path == "/api/smarthome/power":
+        elif path == "/api/smarthome/action":
             try:
                 from skills.smart_home.service import get_smart_home_service
-                target = payload.get("target", "")
-                is_on = bool(payload.get("is_on", True))
+                device_id = payload.get("device_id", "")
+                cmd = payload.get("command", "")
+                value = payload.get("value", None)
                 sh = get_smart_home_service()
-                res = sh.set_power(uid, target, is_on)
+                res = sh.control_device(uid, device_id, cmd, value)
                 self._send_json(res)
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
-        # ── 9. FILE ACTIONS ───────────────────────────────────────────────────
-        elif path == "/api/files/action":
-            try:
-                from modules.system_controller import file_manager
-                action = payload.get("action", "")
-                path_arg = payload.get("path", "")
-                if action == "open":
-                    res = file_manager.open_file(path_arg)
-                    self._send_json({"success": True, "message": res})
-                elif action == "delete":
-                    res = file_manager.safe_delete_file(path_arg, use_trash=True)
-                    self._send_json(res)
-                elif action == "rename":
-                    new_name = payload.get("new_name", "")
-                    res = file_manager.rename_file(path_arg, new_name, user_id=uid)
-                    self._send_json(res)
-                elif action == "duplicates":
-                    res = file_manager.find_duplicate_files(path_arg)
-                    self._send_json(res)
-                else:
-                    self._send_json({"success": False, "error": f"Unknown action: {action}"}, 400)
-            except Exception as e:
-                self._send_json({"success": False, "error": str(e)}, 500)
-            return
-
-        # ── 10. DOCUMENT OPEN ACTION ──────────────────────────────────────────
-        elif path == "/api/documents/open":
-            try:
-                from modules.system_controller import file_manager
-                fp = payload.get("path", "")
-                res = file_manager.open_file(fp)
-                self._send_json({"success": True, "message": res})
-            except Exception as e:
-                self._send_json({"success": False, "error": str(e)}, 500)
-            return
-
-        # ── 11. CALENDAR EVENT ADD ────────────────────────────────────────────
-        elif path == "/api/calendar":
+        # ── 11. CALENDAR ACTIONS ──────────────────────────────────────────────
+        elif path == "/api/calendar/add":
             try:
                 from modules.calendar_manager.calendar_storage import CalendarStorage
+                cs = CalendarStorage()
                 title = payload.get("title", "").strip()
                 date_str = payload.get("date", "").strip()
                 time_str = payload.get("time", "").strip()
                 if not title or not date_str:
                     self._send_json({"success": False, "error": "Missing title or date"}, 400)
                     return
-                cs = CalendarStorage()
                 event_dict = {
                     "title": title,
                     "date": date_str,
@@ -607,6 +789,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "event_id": ev_id, "message": f"Event '{title}' scheduled on {date_str}"})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── 12. MUSIC ACTIONS ─────────────────────────────────────────────────
@@ -637,6 +820,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "message": str(res)})
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── REMINDERS / ASSISTANT STATE ───────────────────────────────────────
@@ -648,6 +832,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             result = assistant_core.create_reminder(title, rem_time, user_id=uid)
             self._send_json(result)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         elif path == "/api/assistant/state":
@@ -657,17 +842,50 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "state": new_state})
                 return
             self._send_json({"success": False, "error": "Missing state"}, 400)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 400, uid)
             return
 
         self._send_json({"error": "Not Found", "path": path}, 404)
+        get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 404, uid)
 
     def do_DELETE(self):
+        t0 = time.time()
         url = urlparse(self.path)
         path = url.path
         q = parse_qs(url.query)
-        uid = self._resolve_uid(q=q)
 
-        if path == "/api/rules":
+        try:
+            uid = self._resolve_uid(q=q)
+        except AuthorizationError as auth_err:
+            self._send_json({"success": False, "error": str(auth_err)}, 403)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 403)
+            return
+
+        if path not in PUBLIC_PATHS and uid == 0:
+            self._send_json({"success": False, "error": "Authentication required."}, 401)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 401)
+            return
+
+        # ── GDPR CASCADING USER DELETION ──────────────────────────────────────
+        if path == "/api/users/me/delete" or path == "/api/user/delete":
+            res = delete_user_account_cascading(uid)
+            status_code = 200 if res.get("success") else 400
+            self._send_json(res, status=status_code)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, status_code, uid)
+            return
+
+        # ── CHATGPT MEMORY FACT DELETION ──────────────────────────────────────
+        elif path == "/api/memories/facts":
+            key = q.get("key", [""])[0]
+            if not key:
+                self._send_json({"success": False, "error": "Missing fact key"}, 400)
+                return
+            success = get_chatgpt_memory().delete_user_fact(uid, key)
+            self._send_json({"success": success, "key": key, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        elif path == "/api/rules":
             try:
                 from skills.learning.learned_rules import get_learned_rules_engine
                 rule_id = q.get("rule_id", [""])[0]
@@ -679,9 +897,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(res)
             except Exception as e:
                 self._send_json({"success": False, "error": str(e)}, 500)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         self._send_json({"error": "Not Found", "path": path}, 404)
+        get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 404, uid)
 
 
 # ── Server Lifecycle Management (Decoupled & Non-Blocking) ───────────────────
@@ -692,11 +912,17 @@ _server_port: int = DEFAULT_PORT
 
 
 def start_dashboard_server(port: int = DEFAULT_PORT, host: str = "0.0.0.0") -> bool:
-    """Start the Web Dashboard server in a background daemon thread."""
+    """Start the Web Dashboard & API server in a background daemon thread."""
     global _server_instance, _server_thread, _server_running, _server_port
 
     if _server_running:
         return True
+
+    # Safely apply any pending non-destructive database migrations
+    try:
+        run_migrations()
+    except Exception as e:
+        print(f"[Dashboard] Migration check notice: {e}")
 
     try:
         _server_instance = ThreadedHTTPServer((host, port), DashboardHandler)
@@ -704,7 +930,7 @@ def start_dashboard_server(port: int = DEFAULT_PORT, host: str = "0.0.0.0") -> b
         _server_running = True
 
         def _run_server():
-            print(f"[Dashboard] Web Control Surface running at http://localhost:{port} (host: {host})")
+            print(f"[Dashboard] Production API & Web Control Surface running at http://localhost:{port} (host: {host})")
             try:
                 _server_instance.serve_forever()
             except Exception as e:
@@ -758,20 +984,20 @@ def get_dashboard_url() -> str:
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Trevon Labs Decoupled Web Dashboard")
+    parser = argparse.ArgumentParser(description="Trevon Labs Production API & Web Dashboard")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port to bind (default: {DEFAULT_PORT})")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host interface (default: 0.0.0.0)")
     args = parser.parse_args()
 
     print("============================================================")
-    print("STARTING TREVON LABS WEB DASHBOARD (ALL CAPABILITIES CONNECTED)")
+    print("STARTING TREVON LABS PRODUCTION MULTI-USER BACKEND & DASHBOARD")
     print("============================================================")
     uctx = assistant_core.get_user_context()
     print(f"Active User Context: {uctx.get('username')} (ID: {uctx.get('user_id')}) | Assistant: {uctx.get('assistant_name')}")
 
     success = start_dashboard_server(port=args.port, host=args.host)
     if success:
-        print(f"[Dashboard] Open your browser at: http://localhost:{args.port}")
+        print(f"[Dashboard] Open your browser or client at: http://localhost:{args.port}")
         print("[Dashboard] Press Ctrl+C to stop dashboard (Assistant Core will remain intact).")
         try:
             while is_dashboard_running():

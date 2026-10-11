@@ -61,12 +61,10 @@ def start_assistant_backend():
     # Initialize core services
     initialize_core()
     
-    # Load environment variables: root .env first, then legacy/.env (legacy overrides)
+    # Load environment variables from canonical root .env
     root_env_path = PROJECT_ROOT / '.env'
-    legacy_env_path = PROJECT_ROOT / 'legacy' / '.env'
     load_dotenv(root_env_path)
-    load_dotenv(legacy_env_path, override=True)
-    print(f"[LAUNCHER] Loaded environment from: {root_env_path} and {legacy_env_path}")
+    print(f"[LAUNCHER] Loaded environment from: {root_env_path}")
     
     # Ensure proper directories are in sys.path with canonical priority
     setup_canonical_sys_path()
@@ -188,12 +186,10 @@ def start_assistant():
     # Initialize core services
     initialize_core()
     
-    # Load environment variables: root .env first, then legacy/.env (legacy overrides)
+    # Load environment variables from canonical root .env
     root_env_path = PROJECT_ROOT / '.env'
-    legacy_env_path = PROJECT_ROOT / 'legacy' / '.env'
     load_dotenv(root_env_path)
-    load_dotenv(legacy_env_path, override=True)
-    print(f"[LAUNCHER] Loaded environment from: {root_env_path} and {legacy_env_path}")
+    print(f"[LAUNCHER] Loaded environment from: {root_env_path}")
     
     # Ensure proper directories are in sys.path with canonical priority
     setup_canonical_sys_path()
@@ -271,9 +267,7 @@ def main():
 
     # Load environment variables
     root_env_path = PROJECT_ROOT / '.env'
-    legacy_env_path = PROJECT_ROOT / 'legacy' / '.env'
     load_dotenv(root_env_path)
-    load_dotenv(legacy_env_path, override=True)
 
     # Add all required directories to sys.path with canonical priority
     setup_canonical_sys_path()
@@ -296,10 +290,8 @@ def initialize_environment():
     
     # Load environment variables
     root_env_path = PROJECT_ROOT / '.env'
-    legacy_env_path = PROJECT_ROOT / 'legacy' / '.env'
     load_dotenv(root_env_path)
-    load_dotenv(legacy_env_path, override=True)
-    print(f"[LAUNCHER] Loaded environment from: {root_env_path} and {legacy_env_path}")
+    print(f"[LAUNCHER] Loaded environment from: {root_env_path}")
     
     # Ensure proper directories are in sys.path with canonical priority
     setup_canonical_sys_path()
@@ -311,9 +303,7 @@ def initialize_backend_only():
     
     # Load environment variables
     root_env_path = PROJECT_ROOT / '.env'
-    legacy_env_path = PROJECT_ROOT / 'legacy' / '.env'
     load_dotenv(root_env_path)
-    load_dotenv(legacy_env_path, override=True)
     
     # Standard sys.path setup with canonical priority
     setup_canonical_sys_path()

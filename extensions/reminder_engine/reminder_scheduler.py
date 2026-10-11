@@ -66,9 +66,27 @@ class ReminderScheduler:
             reminder_id = str(uuid.uuid4())
         reminder_id = str(reminder_id)
         
+        if delay_seconds <= 0:
+            print(f"[REMINDER ENGINE] Rejecting non-positive delay ({delay_seconds}s) for '{text}'")
+            return ""
+
         trigger_time = time.time() + delay_seconds
         
         with self._lock:
+            # Check for duplicate pending reminder (same user, similar text, trigger within 10s)
+            norm_text = text.strip().lower()
+            duplicate = next(
+                (r for r in self.reminders 
+                 if not r.get("triggered") 
+                 and r.get("user_id") == user_id 
+                 and r.get("text", "").strip().lower() == norm_text 
+                 and abs(r.get("trigger_time", 0) - trigger_time) < 10),
+                None
+            )
+            if duplicate:
+                print(f"[REMINDER ENGINE] Deduplicated reminder '{text}' for user {user_id}")
+                return duplicate["id"]
+
             existing = next((r for r in self.reminders if str(r["id"]) == reminder_id), None)
             if existing:
                 existing["text"] = text
@@ -115,7 +133,7 @@ class ReminderScheduler:
         now = datetime.datetime.now()
         if target_time <= now:
             # If time is in the past, schedule for tomorrow
-            target_time = target_time.replace(day=target_time.day + 1)
+            target_time = target_time + datetime.timedelta(days=1)
         
         delay_seconds = (target_time - now).total_seconds()
         return self.add_reminder(text, int(delay_seconds), reminder_id, user_id)

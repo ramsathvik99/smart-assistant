@@ -180,10 +180,16 @@ def contains_sensitive_data(text_or_dict: Union[str, Dict[str, Any]]) -> bool:
 # EXPLICIT "SHOW ME" & VISUAL PRESENTATION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 _EXPLICIT_SHOW_PATTERNS = [
-    r'\b(?:show\s+me|show\s+it|show\s+that|display|let\s+me\s+see|put\s+on\s+screen|put\b.*\bon\s+screen)\b',
-    r'\b(?:show\s+to\s+me|bring\s+up|pop\s+up|visually\s+show)\b',
-    r'^(?:can\s+(?:you|i)\s+|could\s+(?:you|i)\s+|please\s+)?show\b',
+    r'\b(?:show\s+me\s+the\s+details|show\s+me\s+details|show\s+the\s+details|open\s+the\s+details|open\s+details)\b',
+    r'\b(?:show\s+that\s+again|show\s+that|show\s+it\s+again|show\s+it|display\s+that\s+again|display\s+that|bring\s+that\s+back|bring\s+it\s+back)\b',
+    r'\b(?:display\s+(?:the\s+)?result|show\s+(?:the\s+)?result|visualize\s+this|visualize\s+that|visualize\b|what\s+does\s+this\s+look\s+like\??)\b',
+    r'\b(?:show\s+me\s+the\s+information|show\s+the\s+information|show\s+me\s+the\s+info|show\s+info)\b',
     r'\b(?:on\s+(?:the\s+)?screen|on\s+my\s+screen|visually|on\s+display)\b',
+    r'\b(?:put\s+(?:that\s+)?on\s+screen|let\s+me\s+see\s+(?:it|that|the|this))\b',
+    r'\b(?:show\s+visual\s+response|visual\s+surface|visual\s+response)\b',
+    r'\b(?:open\s+(?:the\s+)?dashboard|show\s+(?:the\s+)?dashboard|show\s+(?:the\s+)?assistant\s+panel|open\s+system\s+monitor)\b',
+    r'\b(?:show|display)\s+(?:my\s+|the\s+)?(?:cpu(?:\s+usage)?|system\s+stat(?:istic)?s?|calendar|files|route|graph|chart|calculation|table|pairing\s+code|code)\b',
+    r'\b(?:show\s+me\s+something\s+visual|make\s+it\s+visual)\b',
 ]
 
 def is_explicit_visual_request(user_input: str) -> bool:
@@ -191,9 +197,133 @@ def is_explicit_visual_request(user_input: str) -> bool:
     if not user_input or not isinstance(user_input, str):
         return False
     text = user_input.strip().lower()
+
+    # Conversational questions or greetings with assistant name are never explicit visual requests
+    if re.search(r'\bshow\s+(?:friday|trevon|nova|jarvis|assistant)\b', text) and not any(k in text for k in ["detail", "result", "cpu", "graph", "table", "chart", "screen", "code"]):
+        return False
+
     for pat in _EXPLICIT_SHOW_PATTERNS:
         if re.search(pat, text):
             return True
+    return False
+
+
+def should_show_visual_surface(
+    intent: Any = None,
+    response_type: Any = None,
+    user_request: Optional[str] = None,
+    result: Any = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Authoritative centralized policy: determine if visual popup/surface should appear.
+
+    Default policy:
+        Voice response + Normal chat feed + NO popup.
+    The detailed visual surface should ONLY open when there is a genuine reason:
+    1. User explicitly asks to see something ("show me details", "show that", "display result", "visualize this", etc.)
+    2. Visual information is inherently useful ("show CPU usage", "show system stats", pairing code, verification code)
+    3. Large structured output (TABLE, graph, chart, system dashboard)
+    4. Explicit UI/dashboard requests ("open dashboard", "show assistant panel", "system monitor")
+
+    The visual surface must NEVER appear for:
+    - Ordinary conversation: "hello", "how are you?", "what is your name?", "what are you doing?", "what do you want to do?"
+    - Normal questions: "what is Python?", "explain machine learning", "why is this happening?", "how does this work?"
+    - Recommendations: "what should I work on?", "what should I study?", "recommend something", "what should I do next?"
+    - Simple actions: "open YouTube", "open Chrome", "increase volume", "decrease brightness", "mute", "pause", "play"
+    - Simple confirmations: "Done.", "Opening YouTube.", "Volume increased.", "Got it.", "All set."
+    """
+    req_raw = str(user_request or "").strip()
+    req_low = req_raw.lower()
+
+    # Normalize intent and response_type strings
+    intent_str = str(intent.name if hasattr(intent, "name") else (intent or "")).upper()
+    resp_type_str = str(response_type.value if hasattr(response_type, "value") else (response_type or "")).upper()
+
+    # Extract response text if available
+    resp_text = ""
+    if isinstance(result, str):
+        resp_text = result.strip().lower()
+    elif isinstance(result, dict):
+        resp_text = str(result.get("response") or result.get("message") or result.get("primary_value") or "").strip().lower()
+
+    # Clean user request for matching
+    cleaned_req = req_low
+    if req_low:
+        cleaned_req = re.sub(r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|trevon|nova|jarvis|assistant|computer)[,\s:]*', '', req_low).strip()
+        cleaned_req = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+)+', '', cleaned_req).strip()
+        cleaned_req = cleaned_req.rstrip("?.!")
+
+    # ── 1. HARD EXCLUSIONS (Must never pop up) ───────────────────────────────
+
+    # Simple confirmations / short status
+    CONFIRMATIONS = {"done.", "done", "got it.", "got it", "all set.", "all set", "opening youtube.", "volume increased.", "volume decreased.", "muted.", "unmuted.", "paused.", "playing."}
+    if resp_text in CONFIRMATIONS:
+        return False
+    if any(resp_text.startswith(c) for c in ["opening ", "launching ", "closing ", "muting ", "unmuting ", "volume set to ", "brightness set to "]):
+        if not is_explicit_visual_request(req_raw):
+            return False
+
+    # Ordinary conversation / greetings
+    CONV_STARTS = (
+        "hello", "hi", "hey", "how are you", "what is your name", "who are you",
+        "what are you doing", "what do you want to do", "what's up", "good morning",
+        "good afternoon", "good evening", "thank you", "thanks", "how do you feel",
+        "how're you", "how are you doing", "how are you feeling"
+    )
+    if cleaned_req in CONV_STARTS or any(cleaned_req.startswith(c) for c in CONV_STARTS):
+        return False
+
+    if intent_str in ("GENERAL_CONVERSATION", "CONVERSATION", "GREETING", "CASUAL_CHAT") and not is_explicit_visual_request(req_raw):
+        return False
+
+    # Recommendations
+    if intent_str in ("RECOMMENDATION", "RECOMMEND") and not is_explicit_visual_request(req_raw):
+        return False
+    if cleaned_req.startswith(("what should i", "what can i", "recommend ", "suggest ", "what do you recommend", "what do you suggest", "what should we")):
+        if not is_explicit_visual_request(req_raw):
+            return False
+
+    # Simple actions
+    SIMPLE_ACTIONS = ("open youtube", "open chrome", "open edge", "open spotify", "open calculator", "increase volume", "decrease volume", "mute", "unmute", "pause", "play", "skip", "stop", "volume up", "volume down")
+    if any(cleaned_req == a or req_low == a for a in SIMPLE_ACTIONS) and not is_explicit_visual_request(req_raw):
+        return False
+    if intent_str in ("OPEN_APPLICATION", "VOLUME_CONTROL", "MEDIA_CONTROL", "BRIGHTNESS_CONTROL") and not is_explicit_visual_request(req_raw):
+        return False
+
+    # Normal knowledge questions
+    KNOWLEDGE_STARTS = (
+        "what is ", "what are ", "who is ", "who was ", "who were ", "where is ",
+        "where are ", "when was ", "when did ", "why is ", "why do ", "why does ",
+        "how does ", "how do ", "how is ", "explain ", "tell me about ", "describe ",
+        "how can ", "can you explain "
+    )
+    if any(cleaned_req.startswith(k) for k in KNOWLEDGE_STARTS) and not is_explicit_visual_request(req_raw):
+        return False
+
+    # ── 2. ALLOWED VISUAL CONDITIONS ──────────────────────────────────────────
+
+    # Condition A: Explicit visual request by user
+    if is_explicit_visual_request(req_raw):
+        return True
+
+    # Condition B: Inherently visual entity (Pairing code / Verification code / Table)
+    if resp_type_str in ("PAIRING_CODE", "VERIFICATION_CODE", "TABLE"):
+        return True
+
+    # Condition C: Explicitly structured table / graph / chart payload
+    if isinstance(result, dict):
+        if result.get("table") or result.get("chart") or result.get("graph") or result.get("matrix"):
+            return True
+        if resp_type_str == "TABLE":
+            return True
+
+    # Condition D: Explicit hardware monitor / dashboard intent
+    if intent_str in ("VISUAL_SURFACE", "DASHBOARD", "SYSTEM_MONITOR"):
+        if any(cleaned_req.startswith(k) for k in KNOWLEDGE_STARTS) or any(cleaned_req.startswith(c) for c in CONV_STARTS):
+            return False
+        return True
+
+    # Default UI policy: NO popup
     return False
 
 
@@ -318,6 +448,20 @@ def detect_visual_response(
         return None
 
     explicit_request = is_explicit_visual_request(user_input)
+
+    # Check centralized visual surface policy
+    if not should_show_visual_surface(
+        intent=result_dict.get("intent"),
+        response_type=None,
+        user_request=user_input,
+        result=result_dict,
+        context={"source_context": source_context, "goal_id": goal_id}
+    ):
+        code = result_dict.get("code")
+        is_pairing = bool(code and ("pairing" in user_input.lower() or "phone" in user_input.lower() or "mobile" in user_input.lower() or "connect" in user_input.lower() or result_dict.get("status") in ("pairing_started", "pairing_code_active")))
+        is_table = bool(result_dict.get("table") or result_dict.get("headers") or ("|" in response_text and "-|-" in response_text))
+        if not is_pairing and not is_table and not explicit_request:
+            return None
 
     # Trivial / short casual responses do not popup unless explicitly requested
     if not explicit_request and is_casual_or_trivial(user_input, response_text):
@@ -701,13 +845,13 @@ def detect_visual_response(
             related_goal_id=goal_id
         )
 
-    # 12. AUTOMATIC MULTI-LINE / STRUCTURED TEXT (Only for genuinely structured lists/tables)
+    # 12. AUTOMATIC MULTI-LINE / STRUCTURED TEXT (Only for genuinely structured tables or explicit visual requests)
     if "\n" in response_text and len(response_text.splitlines()) >= 2:
-        if "•" in response_text or "-" in response_text or re.search(r'^\s*\d+\.', response_text, re.MULTILINE) or "|" in response_text:
+        if ("|" in response_text and "-|-" in response_text) or explicit_request:
             return VisualResponse(
                 response_id=resp_id,
                 user_id=str(user_id),
-                response_type=VisualResponseType.LIST,
+                response_type=VisualResponseType.TABLE if ("|" in response_text) else VisualResponseType.LIST,
                 title="RESULT",
                 primary_value=response_text,
                 raw_content={"text": response_text},

@@ -41,6 +41,10 @@ floating_ref = None
 _voice_id:     str | None = None   # SAPI5 voice id string; None = pyttsx3 default
 _voice_rate:   int        = 155    # words-per-minute
 _voice_volume: float      = 1.0   # 0.0 – 1.0
+_last_playback_metrics: dict = {}
+
+def get_last_playback_metrics() -> dict:
+    return dict(_last_playback_metrics)
 
 
 def enumerate_voices() -> list[dict]:
@@ -268,25 +272,64 @@ def _tts_worker():
         _tts_active.set()         # mark TTS as speaking
         _notify_speech_callbacks(text)
 
+        meta = None
+        try:
+            from extensions.system.tts_coordinator import get_tts_coordinator
+            cur_req = get_tts_coordinator()._current_request
+            if cur_req and cur_req.text == text:
+                meta = cur_req.metadata
+        except Exception:
+            pass
+
+        t_start = time.monotonic()
         try:
             success = False
             if _tts_interrupted.is_set():
                 continue
 
-            if lang_hint == 'en':
-                success = _speak_pyttsx3(text)
-                if not success and not _tts_interrupted.is_set():
-                    # pyttsx3 failed — fall back to gTTS for English
-                    print("[TTS] pyttsx3 failed; trying gTTS fallback for English")
-                    success = _speak_gtts(text, 'en')
-            else:
-                success = _speak_gtts(text, lang_hint)
-                if not success and not _tts_interrupted.is_set():
-                    print(f"[TTS] gTTS failed for lang={lang_hint}")
+            # ── 1. Try Pluggable Neural Streaming TTS Backend ─────────
+            try:
+                from extensions.system.tts_backend import get_tts_backend_manager
+                backend_mgr = get_tts_backend_manager()
+                active_backend = backend_mgr.get_backend()
+                if active_backend.name != "sapi" and active_backend.is_available():
+                    res = active_backend.stream_and_play(text, metadata=meta)
+                    if res.interrupted or _tts_interrupted.is_set():
+                        continue
+                    if not res.error:
+                        success = True
+            except Exception as _neural_err:
+                print(f"[TTS] Neural backend notice ({_neural_err}) — falling back to SAPI/pyttsx3")
+
+            # ── 2. Fallback to native Windows SAPI / OneCore (English) ──
+            if not success and not _tts_interrupted.is_set():
+                if lang_hint == 'en':
+                    success = _speak_pyttsx3(text)
+                    if not success and not _tts_interrupted.is_set():
+                        # pyttsx3 failed — fall back to gTTS for English
+                        print("[TTS] pyttsx3 failed; trying gTTS fallback for English")
+                        success = _speak_gtts(text, 'en')
+                else:
+                    success = _speak_gtts(text, lang_hint)
+                    if not success and not _tts_interrupted.is_set():
+                        print(f"[TTS] gTTS failed for lang={lang_hint}")
 
             if not success and not _tts_interrupted.is_set():
                 print(f"[TTS] Both synthesis engines failed for text: {text[:60]!r}")
         finally:
+            duration = max(0.01, time.monotonic() - t_start)
+            ui_text = (meta.get("ui_text") or meta.get("text") or text) if isinstance(meta, dict) else text
+            metrics = {
+                "ui_text": ui_text,
+                "speech_text": text,
+                "word_count": len(text.split()),
+                "char_count": len(text),
+                "duration": duration,
+                "timestamp": time.time(),
+            }
+            global _last_playback_metrics
+            _last_playback_metrics = metrics
+            print(f"[TTS METRICS] UI text: {ui_text[:100]!r} | Speech text: {text!r} | Words: {metrics['word_count']} | Chars: {metrics['char_count']} | Duration: {duration:.2f}s")
             with _tts_state_lock:
                 _active_tts_text = ""
             _tts_active.clear()   # mark TTS as idle
@@ -384,39 +427,15 @@ def _speak_pyttsx3(text: str, voice_id: str | None = None, rate: int | None = No
         with _tts_state_lock:
             _active_sp_voice = sp
 
-        # Seed EchoGuard with audio reference so Trevon's voice is not mistaken for user speech
+        # Note output in EchoGuard without expensive duplicate pre-synthesis
         try:
             from legacy.sst import get_echo_guard
             eg = get_echo_guard()
             if eg is not None:
-                try:
-                    mem_sp = comtypes.client.CreateObject("SAPI.SpVoice")
-                    if effective_vid:
-                        try:
-                            token_mem = comtypes.client.CreateObject("SAPI.SpObjectToken")
-                            token_mem.SetId(effective_vid)
-                            mem_sp.Voice = token_mem
-                        except Exception:
-                            pass
-                    mem_stream = comtypes.client.CreateObject("SAPI.SpMemoryStream")
-                    mem_sp.AudioOutputStream = mem_stream
-                    mem_sp.Rate = sapi_rate
-                    mem_sp.Volume = max(0, min(100, int(round(effective_vol * 100))))
-                    mem_sp.Speak(text)
-                    raw_data = bytes(mem_stream.GetData())
-                    if raw_data:
-                        pcm_arr = np.frombuffer(raw_data, dtype=np.int16)
-                        sr = 22050
-                        chunk_size = 2048
-                        t_now = time.monotonic()
-                        for i in range(0, len(pcm_arr), chunk_size):
-                            sub = pcm_arr[i:i + chunk_size]
-                            sub_rms = float(np.sqrt(np.mean(sub.astype(np.float32) ** 2)))
-                            sub_lvl = min(1.0, max(0.01, sub_rms / 32768.0))
-                            offset_s = i / float(sr)
-                            eg.note_output(sub, sr, sub_lvl, when=t_now + offset_s)
-                except Exception:
-                    pass
+                sr = 22050
+                t_now = time.monotonic()
+                dummy_pcm = np.zeros(int(sr * 0.05), dtype=np.int16)
+                eg.note_output(dummy_pcm, sr, 0.5, when=t_now)
         except Exception:
             pass
 
@@ -557,6 +576,14 @@ def stop_speaking(interrupted: bool = False):
     global _last_interrupted_speech, _active_sp_voice
     try:
         _tts_interrupted.set()
+
+        # Stop active pluggable TTS backends immediately
+        try:
+            from extensions.system.tts_backend import get_tts_backend_manager
+            get_tts_backend_manager().stop_all(interrupted=interrupted)
+        except Exception:
+            pass
+
         with _tts_state_lock:
             if interrupted and _active_tts_text:
                 _last_interrupted_speech = {
@@ -564,6 +591,11 @@ def stop_speaking(interrupted: bool = False):
                     "timestamp": time.time(),
                 }
                 print(f"[TTS BARGE-IN] Interrupted while speaking: {_active_tts_text[:60]!r}")
+                try:
+                    from extensions.dialogue_state_manager import get_dialogue_manager
+                    get_dialogue_manager().update_continuation_state(interrupted_speech=_active_tts_text)
+                except Exception:
+                    pass
             if _active_sp_voice is not None:
                 try:
                     # SVSFlagsAsync | SVSFPurgeBeforeSpeak (3) purges active hardware buffer

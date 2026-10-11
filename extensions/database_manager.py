@@ -28,8 +28,15 @@ class DatabaseManager:
     All schema changes must go through assistant_production_schema.sql.
     """
 
-    def __init__(self, db_pool):
-        self.pool = db_pool
+    def __init__(self, db_pool=None):
+        if db_pool is None:
+            try:
+                from core.db_pool import get_db_pool
+                self.pool = get_db_pool()
+            except Exception:
+                self.pool = None
+        else:
+            self.pool = db_pool
         if not self.pool:
             print("[DB MANAGER] No pool provided. Persistence disabled.")
 
@@ -75,11 +82,22 @@ class DatabaseManager:
         if not self.pool:
             return None
         try:
+            from core.auth_service import hash_password
+            pw_hash = hash_password(password) if not password.startswith("$pbkdf2") else password
+        except Exception:
+            pw_hash = password
+        try:
             with self._get_cursor() as cur:
-                cur.execute(
-                    "INSERT INTO users (username, password) VALUES (%s, %s) RETURNING id",
-                    (username, password)
-                )
+                try:
+                    cur.execute(
+                        "INSERT INTO users (username, password, password_hash) VALUES (%s, %s, %s) RETURNING id",
+                        (username, pw_hash, pw_hash)
+                    )
+                except Exception:
+                    cur.execute(
+                        "INSERT INTO users (username, password) VALUES (%s, %s) RETURNING id",
+                        (username, pw_hash)
+                    )
                 return cur.fetchone()[0]
         except Exception as e:
             print(f"[DB USER ERROR] create_user: {e}")

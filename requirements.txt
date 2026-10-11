@@ -22,3 +22,5 @@ wikipedia
 python-dotenv
 pyaudio
 yt-dlp
+PyQt6
+qtawesome

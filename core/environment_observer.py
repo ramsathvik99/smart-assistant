@@ -14,9 +14,11 @@ Key Principles:
 
 from __future__ import annotations
 
+import sys
 import os
 import re
 import time
+import threading
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -33,9 +35,20 @@ class EnvironmentSnapshot:
     file_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     toggle_keys: Dict[str, Optional[bool]] = field(default_factory=dict)
     audio_devices: Optional[Dict[str, Any]] = None
+    volume: Optional[int] = None
+    muted: Optional[bool] = None
+    brightness: Optional[int] = None
+    running_apps: List[str] = field(default_factory=list)
+    app_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    folder_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     location: Optional[Dict[str, Any]] = None
     smart_home_devices: Optional[List[Dict[str, Any]]] = None
     clipboard_state: Optional[Dict[str, Any]] = None
+    current_folder: Optional[str] = None
+    selected_files: List[str] = field(default_factory=list)
+    open_documents: List[Dict[str, Any]] = field(default_factory=list)
+    active_document: Optional[Dict[str, Any]] = None
+    recent_documents: List[str] = field(default_factory=list)
     observed_categories: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -45,6 +58,15 @@ class EnvironmentSnapshot:
         d["caps_lock"] = self.toggle_keys.get("caps_lock")
         d["num_lock"] = self.toggle_keys.get("num_lock")
         d["scroll_lock"] = self.toggle_keys.get("scroll_lock")
+        d["volume"] = self.volume
+        d["muted"] = self.muted
+        d["brightness"] = self.brightness
+        d["master_volume"] = self.volume
+        d["current_folder"] = self.current_folder
+        d["selected_files"] = list(self.selected_files)
+        d["active_document"] = self.active_document
+        d["open_documents"] = list(self.open_documents)
+        d["recent_documents"] = list(self.recent_documents)
         return d
 
 
@@ -58,6 +80,39 @@ class StateDifference:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class CanonicalSystemSnapshot:
+    """Canonical, read-only snapshot of hardware, OS, and active window state."""
+    cpu_model: str = "Unknown"
+    cpu_cores: int = 0
+    cpu_threads: int = 0
+    cpu_usage_percent: float = 0.0
+    gpu_model: str = "Unknown"
+    gpu_vram_mb: Optional[int] = None
+    ram_total_gb: float = 0.0
+    ram_available_gb: float = 0.0
+    os: str = sys.platform
+    display_resolution: str = "Unknown"
+    storage_info: Dict[str, Any] = field(default_factory=dict)
+    active_application: Optional[str] = None
+    currently_focused_window: Optional[str] = None
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def summary_text(self) -> str:
+        gpu_str = f"{self.gpu_model}" + (f" ({self.gpu_vram_mb} MB VRAM)" if self.gpu_vram_mb else "")
+        return (
+            f"CPU: {self.cpu_model} ({self.cpu_cores} cores, {self.cpu_threads} threads)\n"
+            f"GPU: {gpu_str}\n"
+            f"RAM: {self.ram_total_gb:.2f} GB total ({self.ram_available_gb:.2f} GB available)\n"
+            f"OS: {self.os}\n"
+            f"Display: {self.display_resolution}\n"
+            f"Active App: {self.active_application or 'None'}"
+        )
 
 
 # ============================================================================
@@ -102,9 +157,10 @@ def select_relevant_categories(
     ):
         categories.add("files")
 
-    # 6. Audio Devices
-    if intent == "AUDIO_DEVICES" or any(w in text for w in ["audio", "microphone", "speaker", "sound", "volume", "mute"]):
+    # 6. Audio & System Controls
+    if intent in ("AUDIO_DEVICES", "DEVICE_CONTROL") or any(w in text for w in ["audio", "microphone", "speaker", "sound", "volume", "mute", "unmute", "brightness"]):
         categories.add("audio")
+        categories.add("system")
 
     # 7. Location
     if intent == "WEATHER_QUERY" or any(w in text for w in ["location", "where am i", "weather", "city", "temperature"]):
@@ -117,6 +173,13 @@ def select_relevant_categories(
     # 9. Clipboard (Strictly on-demand only)
     if any(w in text for w in ["read clipboard", "check clipboard", "analyze clipboard", "inspect clipboard", "what is on clipboard", "what's in my clipboard", "what is in my clipboard"]):
         categories.add("clipboard")
+
+    # 10. Documents & PDF workflows
+    if intent in ("DOCUMENT_INTELLIGENCE", "DOCUMENT_OPERATIONS", "SUMMARIZE", "PDF_OPERATIONS") or any(
+        w in text for w in ["pdf", "document", "summarize", "big picture", "compare", "read to me", "read this", "read aloud", "read these"]
+    ):
+        categories.add("document")
+        categories.add("window")
 
     # Personal, informational, reminder or conversational intents do NOT observe or verify OS desktop windows
     if intent in (
@@ -134,6 +197,59 @@ def select_relevant_categories(
 
 
 # ============================================================================
+# Safe Explorer Windows Inspection
+# ============================================================================
+
+def _inspect_explorer_windows_safe(timeout_sec: float = 1.0) -> Tuple[Optional[str], List[str]]:
+    """
+    Inspects Windows Explorer for active directory and selected files.
+    Runs inside a dedicated worker thread with a strict timeout to prevent
+    synchronous COM calls from freezing the main thread if Explorer or network shares hang.
+    Returns: (current_folder, selected_files)
+    """
+    if sys.platform != "win32":
+        return None, []
+
+    result: List[Any] = [None, []]
+
+    def _worker():
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+            try:
+                import win32com.client
+                shell = win32com.client.Dispatch("Shell.Application")
+                for w in shell.Windows():
+                    try:
+                        name = getattr(w, "Name", "")
+                        if "explorer" in name.lower():
+                            doc = getattr(w, "Document", None)
+                            if doc:
+                                folder = getattr(doc, "Folder", None)
+                                if folder and hasattr(folder, "Self"):
+                                    fpath = folder.Self.Path
+                                    if fpath and not result[0]:
+                                        result[0] = fpath
+                                selected_items = getattr(doc, "SelectedItems", None)
+                                if selected_items:
+                                    for item in selected_items():
+                                        ipath = getattr(item, "Path", None)
+                                        if ipath and ipath not in result[1]:
+                                            result[1].append(ipath)
+                    except Exception:
+                        pass
+            finally:
+                pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout_sec)
+    return result[0], result[1]
+
+
+# ============================================================================
 # Environment Observer
 # ============================================================================
 
@@ -148,7 +264,9 @@ def observe_environment(
     
     Strictly READ-ONLY and user-isolated.
     """
-    categories = relevant_categories or {"window", "app"}
+    categories = relevant_categories if relevant_categories is not None else {"window", "app"}
+    if not categories:
+        return EnvironmentSnapshot(observed_categories=[])
     snapshot = EnvironmentSnapshot(observed_categories=sorted(list(categories)))
     uid_int = int(user_id) if str(user_id).isdigit() else 0
 
@@ -174,6 +292,23 @@ def observe_environment(
                 else:
                     proc = title_lower.split(" - ")[-1].strip() if " - " in title_lower else title_lower
                     snapshot.active_application = proc or "unknown"
+
+            # Populate running apps and detailed app_states
+            try:
+                from core.os_gateway.process_ops import _get_cached_process_list
+                raw_procs = _get_cached_process_list()
+                running_names = {p["name"].lower() for p in raw_procs if p.get("name")}
+                snapshot.running_apps = sorted(list(running_names))
+                for app_candidate in ("chrome", "notepad", "calculator", "edge", "msedge", "calc"):
+                    is_running = any(app_candidate in rn for rn in running_names)
+                    is_fg = bool(snapshot.active_application and (app_candidate in snapshot.active_application or snapshot.active_application in app_candidate))
+                    snapshot.app_states[app_candidate] = {
+                        "running": is_running,
+                        "foreground": is_fg,
+                        "active": is_fg
+                    }
+            except Exception:
+                pass
         except Exception:
             snapshot.active_application = "unknown"
 
@@ -215,22 +350,45 @@ def observe_environment(
         except Exception:
             snapshot.connected_devices = []
 
-    # ── 5. File State (Targeted Only) ─────────────────────────────────────────
+    # ── 5. File & Folder State (Targeted Only) ────────────────────────────────
     if "files" in categories and target_file:
         try:
             p = os.path.abspath(target_file)
             exists = os.path.exists(p)
+            is_dir = os.path.isdir(p) if exists else False
+            is_f = os.path.isfile(p) if exists else False
+
+            # Check desktop folder fallback if not found directly
+            if not exists:
+                try:
+                    from modules.system_controller.folder_manager import get_desktop_path
+                    cand = os.path.join(get_desktop_path(), target_file)
+                    if os.path.exists(cand):
+                        p = cand
+                        exists = True
+                        is_dir = os.path.isdir(p)
+                        is_f = os.path.isfile(p)
+                except Exception:
+                    pass
+
+            if is_dir or not is_f:
+                snapshot.folder_states[p] = {
+                    "exists": exists,
+                    "is_directory": is_dir,
+                    "name": os.path.basename(p) or target_file
+                }
             snapshot.file_states[p] = {
                 "exists": exists,
-                "size": os.path.getsize(p) if exists else 0,
+                "size": os.path.getsize(p) if (exists and is_f) else 0,
                 "mtime": os.path.getmtime(p) if exists else 0.0,
-                "is_file": os.path.isfile(p) if exists else False,
+                "is_file": is_f,
+                "is_directory": is_dir
             }
         except Exception:
-            snapshot.file_states[target_file] = {"exists": False, "size": 0, "mtime": 0.0, "is_file": False}
+            snapshot.file_states[target_file] = {"exists": False, "size": 0, "mtime": 0.0, "is_file": False, "is_directory": False}
 
-    # ── 6. Audio Devices ──────────────────────────────────────────────────────
-    if "audio" in categories:
+    # ── 6. Audio Devices & Audio/System Property State ────────────────────────
+    if "audio" in categories or "system" in categories:
         try:
             from skills.audio_management.audio_devices import list_devices
             inputs = list_devices("input")
@@ -242,6 +400,21 @@ def observe_environment(
             }
         except Exception:
             snapshot.audio_devices = {"inputs": [], "outputs": [], "status": "UNKNOWN"}
+
+        try:
+            from modules.system_controller import get_volume, get_brightness
+            v_info = get_volume()
+            snapshot.volume = v_info.get("level")
+            snapshot.muted = v_info.get("is_muted")
+        except Exception:
+            pass
+
+        try:
+            from modules.system_controller import get_brightness
+            b_info = get_brightness()
+            snapshot.brightness = b_info.get("level")
+        except Exception:
+            pass
 
     # ── 7. Location ───────────────────────────────────────────────────────────
     if "location" in categories:
@@ -276,7 +449,109 @@ def observe_environment(
         except Exception:
             snapshot.clipboard_state = {"success": False, "category": "UNKNOWN"}
 
+    # ── 10. Document & File Explorer Structured State ─────────────────────────
+    if "document" in categories or "files" in categories:
+        folder_path, sel_files = _inspect_explorer_windows_safe(timeout_sec=1.0)
+        if folder_path and not snapshot.current_folder:
+            snapshot.current_folder = folder_path
+        for f in sel_files:
+            if f not in snapshot.selected_files:
+                snapshot.selected_files.append(f)
+
+        # Also inspect active/foreground window for document viewers
+        if snapshot.foreground_window_title:
+            fg_title = snapshot.foreground_window_title
+            m_doc = re.search(r'([a-zA-Z0-9_\-\s]+\.(?:pdf|docx|pptx|xlsx|txt|md))', fg_title, re.IGNORECASE)
+            if m_doc:
+                doc_name = m_doc.group(1).strip()
+                ext = doc_name.split(".")[-1].lower()
+                snapshot.active_document = {
+                    "filename": doc_name,
+                    "title": fg_title,
+                    "document_type": ext,
+                    "application": snapshot.active_application or "viewer",
+                }
+
     return snapshot
+
+
+def get_canonical_system_snapshot(user_id: str = "default") -> CanonicalSystemSnapshot:
+    """
+    Query the actual local machine through the canonical system information subsystem
+    and return an authoritative, read-only snapshot of hardware and OS state.
+    """
+    snap = CanonicalSystemSnapshot()
+
+    # 1. CPU
+    try:
+        from modules.system_controller import get_detailed_cpu_info
+        cpu_info = get_detailed_cpu_info()
+        if isinstance(cpu_info, dict):
+            snap.cpu_model = cpu_info.get("cpu_name") or cpu_info.get("processor") or cpu_info.get("model") or snap.cpu_model
+            snap.cpu_cores = cpu_info.get("physical_cores") or cpu_info.get("cores") or 0
+            snap.cpu_threads = cpu_info.get("logical_processors") or cpu_info.get("logical_cores") or cpu_info.get("threads") or 0
+            snap.cpu_usage_percent = float(cpu_info.get("overall_percent") or cpu_info.get("total_usage_percent") or cpu_info.get("usage") or 0.0)
+    except Exception:
+        pass
+
+    # 2. RAM
+    try:
+        from modules.system_controller import get_detailed_ram_metrics
+        ram_info = get_detailed_ram_metrics()
+        if isinstance(ram_info, dict):
+            snap.ram_total_gb = float(ram_info.get("total_gb") or 0.0)
+            snap.ram_available_gb = float(ram_info.get("available_gb") or 0.0)
+    except Exception:
+        pass
+
+    # 3. GPU
+    try:
+        from modules.system_controller import get_gpu_telemetry
+        gpu_info = get_gpu_telemetry(detailed=True)
+        if isinstance(gpu_info, dict):
+            primary = gpu_info.get("primary_gpu") if isinstance(gpu_info.get("primary_gpu"), dict) else {}
+            snap.gpu_model = primary.get("name") or gpu_info.get("name") or gpu_info.get("model") or snap.gpu_model
+            vram = primary.get("vram_mb") or gpu_info.get("total_memory_mb") or gpu_info.get("vram_mb")
+            snap.gpu_vram_mb = int(vram) if vram is not None else None
+    except Exception:
+        pass
+
+    # 4. OS & Display
+    try:
+        import platform
+        snap.os = f"{platform.system()} {platform.release()}"
+    except Exception:
+        snap.os = sys.platform
+
+    try:
+        from modules.system_controller import get_display_info
+        disp = get_display_info()
+        if isinstance(disp, dict):
+            if disp.get("width") and disp.get("height"):
+                snap.display_resolution = f"{disp['width']}x{disp['height']}"
+            elif disp.get("resolution"):
+                snap.display_resolution = disp["resolution"]
+    except Exception:
+        pass
+
+    # 5. Storage
+    try:
+        from modules.system_controller import get_disk_space
+        disk = get_disk_space()
+        if isinstance(disk, dict):
+            snap.storage_info = disk
+    except Exception:
+        pass
+
+    # 6. Active Application & Window
+    try:
+        env = observe_environment(user_id=user_id, relevant_categories={"window", "app"})
+        snap.active_application = env.active_application
+        snap.currently_focused_window = env.foreground_window_title
+    except Exception:
+        pass
+
+    return snap
 
 
 # ============================================================================
@@ -292,6 +567,9 @@ def compare_snapshots(
     Does NOT emit false positive events for non-semantic or unobserved variations.
     """
     diff = StateDifference()
+    if not before or not after:
+        return diff
+
     changes: List[str] = []
     details: Dict[str, Dict[str, Any]] = {}
     summaries: List[str] = []
@@ -437,6 +715,69 @@ def compare_snapshots(
                     changes.append("SMART_HOME_STATE_CHANGED")
                     details[f"smart_device_{did}"] = {"before_on": b_on, "after_on": a_on, "name": d_data.get("name", did)}
                     summaries.append(f"Smart device '{d_data.get('name', did)}' turned {'ON' if a_on else 'OFF'}")
+
+    # 10. Application Running & Focus State Changes
+    all_app_keys = set(before.app_states.keys()).union(set(after.app_states.keys()))
+    for app_name in all_app_keys:
+        b_app = before.app_states.get(app_name, {})
+        a_app = after.app_states.get(app_name, {})
+        b_run = b_app.get("running", False)
+        a_run = a_app.get("running", False)
+        b_fg = b_app.get("foreground", False)
+        a_fg = a_app.get("foreground", False)
+
+        if not b_run and a_run:
+            changes.append(f"APP_{app_name.upper()}_OPENED")
+            details[f"app_{app_name}"] = {"transition": "CLOSED -> OPEN", "running": True}
+            summaries.append(f"Application '{app_name}' opened (CLOSED -> OPEN)")
+        elif b_run and not a_run:
+            changes.append(f"APP_{app_name.upper()}_CLOSED")
+            details[f"app_{app_name}"] = {"transition": "OPEN -> CLOSED", "running": False}
+            summaries.append(f"Application '{app_name}' closed (OPEN -> CLOSED)")
+        elif b_run and a_run:
+            if not b_fg and a_fg:
+                changes.append(f"APP_{app_name.upper()}_ACTIVATED")
+                details[f"app_{app_name}"] = {"transition": "OPEN -> ACTIVE", "foreground": True}
+                summaries.append(f"Application '{app_name}' activated (OPEN -> ACTIVE)")
+            elif b_fg and not a_fg:
+                changes.append(f"APP_{app_name.upper()}_BACKGROUNDED")
+                details[f"app_{app_name}"] = {"transition": "ACTIVE -> BACKGROUND", "foreground": False}
+                summaries.append(f"Application '{app_name}' moved to background (ACTIVE -> BACKGROUND)")
+
+    # 11. Folder State Changes
+    all_folders = set(before.folder_states.keys()).union(set(after.folder_states.keys()))
+    for fold_path in all_folders:
+        b_fold = before.folder_states.get(fold_path, {})
+        a_fold = after.folder_states.get(fold_path, {})
+        b_f_exists = b_fold.get("exists", False)
+        a_f_exists = a_fold.get("exists", False)
+        fold_name = b_fold.get("name") or a_fold.get("name") or os.path.basename(fold_path)
+
+        if not b_f_exists and a_f_exists:
+            changes.append("FOLDER_CREATED")
+            details[f"folder_{fold_name}"] = {"transition": "MISSING -> EXISTS", "path": fold_path}
+            summaries.append(f"Folder '{fold_name}' was created (MISSING -> EXISTS)")
+        elif b_f_exists and not a_f_exists:
+            changes.append("FOLDER_DELETED")
+            details[f"folder_{fold_name}"] = {"transition": "EXISTS -> MISSING", "path": fold_path}
+            summaries.append(f"Folder '{fold_name}' was deleted (EXISTS -> MISSING)")
+
+    # 12. Deterministic System Property Changes (Volume, Brightness, Mute)
+    if before.volume is not None and after.volume is not None and before.volume != after.volume:
+        changes.append("VOLUME_CHANGED")
+        details["system_volume"] = {"transition": f"volume {before.volume} -> volume {after.volume}", "before": before.volume, "after": after.volume}
+        summaries.append(f"Volume changed from {before.volume}% to {after.volume}%")
+
+    if before.muted is not None and after.muted is not None and before.muted != after.muted:
+        tr = "unmuted -> muted" if after.muted else "muted -> unmuted"
+        changes.append("MUTE_STATE_CHANGED")
+        details["system_mute"] = {"transition": tr, "before": before.muted, "after": after.muted}
+        summaries.append(f"Audio mute state changed ({tr})")
+
+    if before.brightness is not None and after.brightness is not None and before.brightness != after.brightness:
+        changes.append("BRIGHTNESS_CHANGED")
+        details["system_brightness"] = {"transition": f"brightness {before.brightness} -> brightness {after.brightness}", "before": before.brightness, "after": after.brightness}
+        summaries.append(f"Brightness changed from {before.brightness}% to {after.brightness}%")
 
     diff.has_changes = len(changes) > 0
     diff.changes = changes

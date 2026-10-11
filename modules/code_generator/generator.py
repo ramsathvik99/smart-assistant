@@ -11,7 +11,7 @@ def generate_code(prompt: str, language: str = "python") -> str:
 
     try:
         engine = LLMEngine()
-        response = engine.get_completion(prompt, system_prompt=system_prompt, max_tokens=1500)
+        response = engine.get_completion(prompt, system_prompt=system_prompt, max_tokens=600)
         if response and response.strip():
             cleaned = clean_code(response)
             if cleaned and "sorry, i could not generate code" not in cleaned.lower():

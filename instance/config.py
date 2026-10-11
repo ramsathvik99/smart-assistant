@@ -1,17 +1,10 @@
 import os
-
 import json
-
-# Load .env from project root and legacy folder
-import os
 from dotenv import load_dotenv
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 root_env_path = os.path.join(project_root, '.env')
-legacy_env_path = os.path.join(project_root, 'legacy', '.env')
-
 load_dotenv(root_env_path)
-load_dotenv(legacy_env_path, override=True)
 
 
 
@@ -142,7 +135,16 @@ class Settings:
 
         self.OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "true").lower() in ("true", "1", "yes")
 
-        self.OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "10"))
+        self.OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "60.0"))
+
+        # Authoritative LLM Primary Provider and Request Timeout budget
+        self.LLM_PRIMARY_PROVIDER = os.getenv("LLM_PRIMARY_PROVIDER", os.getenv("PRIMARY_PROVIDER", "ollama")).lower().strip()
+        self.LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", os.getenv("LLM_TIMEOUT", "65.0")))
+        self.GROQ_TIMEOUT = float(os.getenv("GROQ_TIMEOUT", "6.0"))
+        self.OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "8.0"))
+        self.GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", "6.0"))
+        self.DEEPSEEK_TIMEOUT = float(os.getenv("DEEPSEEK_TIMEOUT", "8.0"))
+        self.HF_TIMEOUT = float(os.getenv("HF_TIMEOUT", "6.0"))
 
         self.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 
@@ -186,6 +188,16 @@ class Settings:
 
         self.LANGUAGE = os.getenv("LANGUAGE", "en-in")
 
+        # --- PLUGGABLE NEURAL TTS CONFIGURATION ---
+        self.TTS_PROVIDER = os.getenv("TTS_PROVIDER", "neural")  # "neural", "edge", "openai", "sapi"
+        self.TTS_VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
+        self.TTS_FALLBACK_VOICE = os.getenv("TTS_FALLBACK_VOICE", "Microsoft David Desktop - English (United States)")
+        self.TTS_MODEL = os.getenv("TTS_MODEL", "neural")
+        self.TTS_SPEED = float(os.getenv("TTS_SPEED", "1.0"))
+        self.TTS_OUTPUT_FORMAT = os.getenv("TTS_OUTPUT_FORMAT", "audio-24khz-48kbitrate-mono-mp3")
+        self.TTS_TIMEOUT = float(os.getenv("TTS_TIMEOUT", "10.0"))
+        self.TTS_MAX_LENGTH = int(os.getenv("TTS_MAX_LENGTH", "2000"))
+
 
 
         # --- AUDIO STABILIZATION ---
@@ -209,9 +221,11 @@ class Settings:
 
         self.DB_USER = os.getenv("DB_USER", "postgres")
 
-        self.DB_PASSWORD = os.getenv("DB_PASSWORD", "ramsathvik")
+        self.DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
         self.DB_PORT = int(os.getenv("DB_PORT", "5432"))
+
+        self.JWT_SECRET = os.getenv("JWT_SECRET", "")
 
 
 

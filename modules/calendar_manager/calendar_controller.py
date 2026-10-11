@@ -160,6 +160,24 @@ class CalendarController:
                 title = entities.get("event_title", "Untitled Event")
                 event_time = entities.get("start_time")
                 
+                # Check if event is in the past for today
+                now = datetime.now()
+                if target_start == str(now.date()) and event_time:
+                    t_obj = None
+                    for fmt in ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M%p", "%I %p"):
+                        try:
+                            t_obj = datetime.strptime(event_time.strip(), fmt).time()
+                            break
+                        except ValueError:
+                            pass
+                    if t_obj:
+                        event_dt = datetime.combine(now.date(), t_obj)
+                        if event_dt < now:
+                            results["status"] = "error"
+                            results["error_type"] = "temporal_failure"
+                            results["speech_response"] = f"Cannot schedule '{title}' because {event_time} has already passed today."
+                            return results
+
                 # Conflict detection
                 conflicts = self.check_event_conflicts(user_id, target_start, event_time)
                 conflict_note = ""

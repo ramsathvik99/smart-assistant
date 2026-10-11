@@ -1,5 +1,26 @@
 {
   "user_id": 8,
-  "rules": [],
-  "updated_at": 1790173890.6505475
+  "rules": [
+    {
+      "id": "560927ff",
+      "user_id": 8,
+      "rule": "see i like to watch movies, mostly i like englsih movies espicially marvel mcu movies.",
+      "category": "general",
+      "origin": "user_directive",
+      "active": true,
+      "created_at": 1790657994.6856356,
+      "updated_at": 1790657994.6856356
+    },
+    {
+      "id": "5012590c",
+      "user_id": 8,
+      "rule": "I prefer Python for my programming projects",
+      "category": "general",
+      "origin": "user_directive",
+      "active": true,
+      "created_at": 1791206149.8848062,
+      "updated_at": 1791206149.8848062
+    }
+  ],
+  "updated_at": 1791206149.8859005
 }

@@ -723,6 +723,12 @@ class ProactiveObservationCoordinator:
 
         # Surfacing callback (e.g. TTS speak or UI notification)
         self._surface_callback: Optional[Callable[[ProactiveEvent], None]] = None
+        self._last_interaction_time: float = time.time()
+
+    def reset_idle_timer(self) -> None:
+        """Reset the proactive idle timer on user interaction."""
+        with self._lock:
+            self._last_interaction_time = time.time()
 
     @classmethod
     def get_instance(cls, config: Optional[ProactiveObserverConfig] = None) -> ProactiveObservationCoordinator:
@@ -845,7 +851,8 @@ class ProactiveObservationCoordinator:
         event_id = event.event_id
 
         # 1. Cooldown / Deduplication check
-        last_surfaced = self._event_history.get(event_id, 0.0)
+        msg_key = f"{event.user_id}:{event.event_type}:{event.message.strip().lower()}"
+        last_surfaced = max(self._event_history.get(event_id, 0.0), self._event_history.get(msg_key, 0.0))
         if (now - last_surfaced) < self.config.cooldown_seconds:
             logger.debug("[PROACTIVE] Event '%s' in cooldown (%.1fs remaining)", event_id, self.config.cooldown_seconds - (now - last_surfaced))
             return False
@@ -866,7 +873,10 @@ class ProactiveObservationCoordinator:
 
     def record_event_surfaced(self, event: ProactiveEvent) -> None:
         """Record that an event has been presented to the user."""
-        self._event_history[event.event_id] = time.time()
+        now_ts = time.time()
+        self._event_history[event.event_id] = now_ts
+        msg_key = f"{event.user_id}:{event.event_type}:{event.message.strip().lower()}"
+        self._event_history[msg_key] = now_ts
         event.surfaced = True
 
     # ------------------------------------------------------------------------
@@ -878,6 +888,10 @@ class ProactiveObservationCoordinator:
         uid = event.user_id
         if uid not in self._event_queues:
             self._event_queues[uid] = []
+        norm_msg = event.message.strip().lower()
+        if any(e.event_type == event.event_type and e.message.strip().lower() == norm_msg for e in self._event_queues[uid]):
+            logger.debug("[PROACTIVE] Deduplicated queued event '%s' for user '%s'", event.event_type, uid)
+            return
         self._event_queues[uid].append(event)
         logger.info("[PROACTIVE] Queued event '%s' for user '%s' (system busy)", event.event_type, uid)
 
@@ -925,6 +939,19 @@ class ProactiveObservationCoordinator:
         if not self.is_enabled_for_user(uid):
             return []
 
+        # Check if assistant is currently speaking via TTS - suppress proactive evaluation during speech
+        try:
+            from extensions.system.tts_coordinator import tts_coordinator
+            if tts_coordinator and tts_coordinator.is_speaking():
+                return []
+        except Exception:
+            try:
+                from legacy.tts import is_speaking
+                if is_speaking():
+                    return []
+            except Exception:
+                pass
+
         try:
             # Observe only safe lightweight categories
             current_snap = observe_environment(
@@ -940,15 +967,13 @@ class ProactiveObservationCoordinator:
         if baseline is None:
             # First tick captures initial baseline
             self._user_baselines[uid] = current_snap
-            return []
-
-        try:
+            baseline = current_snap
+            diff = StateDifference(has_changes=False)
+        else:
             diff = compare_snapshots(baseline, current_snap)
             self._user_baselines[uid] = current_snap
 
-            if not diff.has_changes:
-                return []
-
+        try:
             # Retrieve active goal info if any
             active_goal = None
             dm = None
@@ -960,37 +985,94 @@ class ProactiveObservationCoordinator:
             except Exception:
                 pass
 
-            raw_events = ProactiveEventDetector.detect_events(
-                before=baseline,
-                after=current_snap,
-                state_diff=diff,
-                user_id=uid,
-                active_goal_info=active_goal,
-            )
-
             surfaced_events: List[ProactiveEvent] = []
-            for evt in raw_events:
-                # Phase 7: Goal-Aware Proactive Reasoning
-                GoalAwareEventReasoner.correlate_and_apply(evt, user_id=uid, dialogue_mgr=dm)
 
-                # Suppress IRRELEVANT events
-                if evt.impact == GoalImpact.IRRELEVANT:
-                    logger.debug("[PROACTIVE] Suppressed IRRELEVANT event '%s'", evt.event_id)
-                    continue
+            if diff.has_changes:
+                raw_events = ProactiveEventDetector.detect_events(
+                    before=baseline,
+                    after=current_snap,
+                    state_diff=diff,
+                    user_id=uid,
+                    active_goal_info=active_goal,
+                )
+                for evt in raw_events:
+                    # Phase 7: Goal-Aware Proactive Reasoning
+                    GoalAwareEventReasoner.correlate_and_apply(evt, user_id=uid, dialogue_mgr=dm)
 
-                if not self.should_surface_event(evt):
-                    continue
+                    # Suppress IRRELEVANT events
+                    if evt.impact == GoalImpact.IRRELEVANT:
+                        logger.debug("[PROACTIVE] Suppressed IRRELEVANT event '%s'", evt.event_id)
+                        continue
 
-                if self.is_cancelled(uid):
-                    logger.debug("[PROACTIVE] Event suppressed due to user cancellation")
-                    continue
+                    if not self.should_surface_event(evt):
+                        continue
 
-                if self.is_system_busy(uid):
-                    self.queue_event(evt)
+                    if self.is_cancelled(uid):
+                        logger.debug("[PROACTIVE] Event suppressed due to user cancellation")
+                        continue
+
+                    if self.is_system_busy(uid):
+                        self.queue_event(evt)
+                    else:
+                        self.record_event_surfaced(evt)
+                        surfaced_events.append(evt)
+                        self._dispatch_event(evt)
+
+            # Level 6: Proactive Intelligence Layer Evaluation
+            try:
+                from core.proactive_intelligence import proactive_intelligence, ProactiveDecisionType, UserActivityState
+                # Suppress redundant evaluations when user is actively interacting and there are no external changes
+                activity = proactive_intelligence.classify_user_activity(uid)
+                if activity in (UserActivityState.BUSY, UserActivityState.ACTIVELY_INTERACTING, UserActivityState.IN_CONVERSATION) and not diff.has_changes:
+                    # Meaningful state transition has not occurred while user is active; skip redundant evaluation
+                    pass
                 else:
-                    self.record_event_surfaced(evt)
-                    surfaced_events.append(evt)
-                    self._dispatch_event(evt)
+                    pro_decision = proactive_intelligence.evaluate_situation(
+                        current_snapshot=current_snap,
+                        previous_snapshot=baseline,
+                        state_difference=diff,
+                        user_id=uid
+                    )
+                    if pro_decision.decision in (ProactiveDecisionType.SUGGEST, ProactiveDecisionType.ASK_PERMISSION):
+                        prompt_msg = pro_decision.details.get("prompt") or pro_decision.reason
+                        if prompt_msg and dm and dm.current_state:
+                            dm.current_state.pending_action = {
+                                "command": pro_decision.proposed_action,
+                                "action": pro_decision.proposed_action,
+                                "proactive": True,
+                                "decision_id": pro_decision.trigger,
+                                "prompt": prompt_msg
+                            }
+                            dm.current_state.pending_confirmation = True
+
+                            evt = ProactiveEvent(
+                                event_id=pro_decision.trigger,
+                                event_type=f"PROACTIVE_{pro_decision.decision.value}",
+                                source_category="proactive_intelligence",
+                                observed_change=pro_decision.reason,
+                                user_id=uid,
+                                message=prompt_msg,
+                                details=pro_decision.details
+                            )
+                            if self.should_surface_event(evt):
+                                if self.is_system_busy(uid):
+                                    self.queue_event(evt)
+                                else:
+                                    self.record_event_surfaced(evt)
+                                    surfaced_events.append(evt)
+                                    self._dispatch_event(evt)
+                    elif pro_decision.decision == ProactiveDecisionType.EXECUTE:
+                        if pro_decision.proposed_action:
+                            logger.info("[PROACTIVE] Executing pre-authorized proactive action: %s", pro_decision.proposed_action)
+                            try:
+                                from core.brain import brain_process
+                                brain_process(pro_decision.proposed_action, user_id=uid)
+                            except Exception as e_err:
+                                logger.error("[PROACTIVE] Proactive execution error: %s", e_err)
+                    elif pro_decision.decision == ProactiveDecisionType.PREPARE:
+                        logger.info("[PROACTIVE] Executed background preparation: %s", pro_decision.proposed_action)
+            except Exception as p_err:
+                logger.debug("[PROACTIVE] Proactive intelligence evaluation notice: %s", p_err)
 
             return surfaced_events
         except Exception as exc:

@@ -29,7 +29,7 @@ from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QBrush, QRadialGradien
 from modules.ui.design_system import C, F, APP_STYLESHEET
 from modules.ui.login_window import LoginWindow
 from modules.ui.floating_launcher import FloatingLauncher
-from modules.ui.main_window import MainWindow
+from modules.ui.dashboard.main_window import DashboardMainWindow
 from modules.ui.notification_toast import ToastManager
 from modules.ui.worker_threads import (
     CommandThread, TTSMonitor, VADMonitor, AudioLevelProvider, HistoryLoader
@@ -81,7 +81,7 @@ class AssistantApp(QObject):
 
         # Components initialized after login
         self._launcher:    FloatingLauncher    | None = None
-        self._win:         MainWindow          | None = None
+        self._win:         DashboardMainWindow  | None = None
         self._tray:        QSystemTrayIcon     | None = None
         self._toasts:      ToastManager        = ToastManager()
 
@@ -103,13 +103,24 @@ class AssistantApp(QObject):
                 self._launcher.dismiss_visual_response()
         else:
             try:
-                from core.visual_response import VisualResponse
+                from core.visual_response import VisualResponse, should_show_visual_surface
                 if isinstance(vr_data, VisualResponse):
                     vr = vr_data
                 elif isinstance(vr_data, dict):
                     vr = VisualResponse.from_dict(vr_data)
                 else:
                     return
+
+                req = vr.metadata.get("user_input") or vr.source_context
+                if not should_show_visual_surface(
+                    intent=vr.metadata.get("intent"),
+                    response_type=vr.response_type,
+                    user_request=req,
+                    result=vr.raw_content or vr.primary_value,
+                    context=vr.metadata
+                ):
+                    return
+
                 if self._launcher:
                     self._launcher.show_visual_response(vr)
             except Exception as e:
@@ -201,32 +212,37 @@ class AssistantApp(QObject):
 
             # Populate the Settings appearance page with current user colors
             if self._win and hasattr(self._win, 'settings_page') and self._win.settings_page:
-                self._win.settings_page.load_colors(dash_color, float_color)
+                try:
+                    self._win.settings_page.load_colors(dash_color, float_color)
+                except Exception:
+                    pass  # New dashboard handles loading asynchronously
 
-            # Wire Settings → real-time update + persistence
+            # Wire Settings → real-time update + persistence (old dashboard only)
             if self._win and hasattr(self._win, 'settings_page') and self._win.settings_page:
                 sp = self._win.settings_page
+                try:
+                    def _on_dash_color_changed(hex_color: str):
+                        if self._win:
+                            self._win.set_accent_color(hex_color)
+                        try:
+                            set_user_preference_db(self._user_id, 'dashboard_color', hex_color)
+                            print(f"[COLOR] Dashboard color saved: {hex_color} for user {self._user_id}")
+                        except Exception as e:
+                            print(f"[COLOR] Failed to persist dashboard color: {e}")
 
-                def _on_dash_color_changed(hex_color: str):
-                    if self._win:
-                        self._win.set_accent_color(hex_color)
-                    try:
-                        set_user_preference_db(self._user_id, 'dashboard_color', hex_color)
-                        print(f"[COLOR] Dashboard color saved: {hex_color} for user {self._user_id}")
-                    except Exception as e:
-                        print(f"[COLOR] Failed to persist dashboard color: {e}")
+                    def _on_float_color_changed(hex_color: str):
+                        if self._launcher:
+                            self._launcher.set_accent_color(hex_color)
+                        try:
+                            set_user_preference_db(self._user_id, 'floating_button_color', hex_color)
+                            print(f"[COLOR] Floating button color saved: {hex_color} for user {self._user_id}")
+                        except Exception as e:
+                            print(f"[COLOR] Failed to persist floating color: {e}")
 
-                def _on_float_color_changed(hex_color: str):
-                    if self._launcher:
-                        self._launcher.set_accent_color(hex_color)
-                    try:
-                        set_user_preference_db(self._user_id, 'floating_button_color', hex_color)
-                        print(f"[COLOR] Floating button color saved: {hex_color} for user {self._user_id}")
-                    except Exception as e:
-                        print(f"[COLOR] Failed to persist floating color: {e}")
-
-                sp.dashboard_color_changed.connect(_on_dash_color_changed)
-                sp.floating_color_changed.connect(_on_float_color_changed)
+                    sp.dashboard_color_changed.connect(_on_dash_color_changed)
+                    sp.floating_color_changed.connect(_on_float_color_changed)
+                except Exception:
+                    pass  # New dashboard uses different signal system
 
             print(f"[COLOR] User {user_id} colors applied — Dashboard: {dash_color} | Floating: {float_color}")
 
@@ -267,22 +283,25 @@ class AssistantApp(QObject):
             # Populate the Settings voice panel with loaded profile (or empty defaults)
             if self._win and hasattr(self._win, 'settings_page') and self._win.settings_page:
                 sp = self._win.settings_page
-                sp.load_voice_profile(profile if has_profile else {})
+                try:
+                    sp.load_voice_profile(profile if has_profile else {})
 
-                # Wire Settings voice_profile_changed → apply immediately
-                def _on_voice_profile_changed(prof: dict):
-                    try:
-                        from legacy.tts import apply_voice_profile
-                        apply_voice_profile(
-                            prof.get("voice_id"),
-                            rate=int(prof.get("voice_rate", 155)),
-                            volume=float(prof.get("voice_volume", 1.0)),
-                        )
-                        print(f"[VOICE] Voice profile updated live: {prof.get('voice_tone')}")
-                    except Exception as e:
-                        print(f"[VOICE] Live apply error: {e}")
+                    # Wire Settings voice_profile_changed → apply immediately
+                    def _on_voice_profile_changed(prof: dict):
+                        try:
+                            from legacy.tts import apply_voice_profile
+                            apply_voice_profile(
+                                prof.get("voice_id"),
+                                rate=int(prof.get("voice_rate", 155)),
+                                volume=float(prof.get("voice_volume", 1.0)),
+                            )
+                            print(f"[VOICE] Voice profile updated live: {prof.get('voice_tone')}")
+                        except Exception as e:
+                            print(f"[VOICE] Live apply error: {e}")
 
-                sp.voice_profile_changed.connect(_on_voice_profile_changed)
+                    sp.voice_profile_changed.connect(_on_voice_profile_changed)
+                except Exception:
+                    pass  # New dashboard handles voice loading asynchronously
 
         except Exception as e:
             print(f"[VOICE] Voice personalization setup failed (non-critical): {e}")
@@ -380,8 +399,8 @@ class AssistantApp(QObject):
         self._launcher.single_clicked.connect(self._toggle_main_window)
         self._launcher.action_requested.connect(self._handle_launcher_action)
 
-        # ── Main window ──
-        self._win = MainWindow()
+        # ── Main window (NEW DASHBOARD) ──
+        self._win = DashboardMainWindow()
         self._win.set_assistant_name(self._assistant_name)
         if self._username:
             self._win.set_user_name(self._username)
@@ -558,7 +577,7 @@ class AssistantApp(QObject):
         """
         if not self._win:
             return
-        self._win.select_tab(0)  # Tab 0 is Dashboard
+        self._win._on_nav("home")  # Navigate to home page
         self._win.refresh_dashboard()
         if self._win.isMinimized():
             self._win.showNormal()
@@ -571,7 +590,7 @@ class AssistantApp(QObject):
             if self._win.isVisible():
                 self._win.hide()
             else:
-                self._win.show_on_chat()
+                self._win.show_animated()
 
     def _show_main_window(self):
         if self._win:
@@ -915,16 +934,82 @@ class AssistantApp(QObject):
             print(f"[APP] Restart error: {e}")
 
     def _quit(self):
-        """Perform orderly application termination."""
-        print("[APP] Shutting down application...")
+        """Perform orderly, idempotent application and service termination."""
+        if getattr(self, "_is_shutting_down", False):
+            return
+        self._is_shutting_down = True
+        print("[APP] Shutting down application and background services...")
+
+        # Stop speech listener
+        try:
+            import legacy.tts as tts_mod
+            if hasattr(self, '_speech_callback'):
+                tts_mod.unregister_speech_callback(self._speech_callback)
+        except Exception:
+            pass
+
+        # Stop continuous audio capture
+        try:
+            from legacy.sst import stop_continuous_audio_stream
+            stop_continuous_audio_stream()
+        except Exception:
+            pass
+
+        # Stop reminder scheduler
+        try:
+            from extensions.reminder_engine.reminder_scheduler import shutdown_scheduler
+            shutdown_scheduler()
+        except Exception:
+            pass
+
+        # Stop proactive interaction
+        try:
+            from legacy.proactive_interaction import get_proactive_interaction
+            proactive = get_proactive_interaction()
+            if proactive:
+                proactive.stop()
+        except Exception:
+            pass
+
+        # Stop workers
+        for worker in [self._tts_mon, self._vad_mon, self._audio_prov]:
+            if worker:
+                try:
+                    worker.stop()
+                except Exception:
+                    pass
+
+        # Stop dashboard server cleanly if running
+        try:
+            from dashboard.server import stop_dashboard_server
+            stop_dashboard_server()
+        except Exception:
+            pass
+
+        # Close windows
         if self._launcher:
-            self._launcher.close()
+            try:
+                self._launcher.close()
+            except Exception:
+                pass
         if self._win:
-            self._win.close()
+            try:
+                self._win.close()
+            except Exception:
+                pass
         if self._tray:
-            self._tray.hide()
-        from assistant import shutdown
-        shutdown()
+            try:
+                self._tray.hide()
+            except Exception:
+                pass
+
+        try:
+            from assistant import shutdown
+            shutdown()
+        except Exception:
+            pass
+
+        QApplication.quit()
 
     # ── System tray ──────────────────────────────────────────────────────────
     def _build_tray_menu(self) -> QMenu:
@@ -1067,59 +1152,7 @@ class AssistantApp(QObject):
         # Return to login window
         self._show_login()
 
-    def _quit(self):
-        """Gracefully shut down all services and exit application."""
-        print("[APP] Shutting down application...")
 
-        # Stop speech listener
-        try:
-            import legacy.tts as tts_mod
-            if hasattr(self, '_speech_callback'):
-                tts_mod.unregister_speech_callback(self._speech_callback)
-        except Exception:
-            pass
-
-        # Stop continuous audio capture
-        try:
-            from legacy.sst import stop_continuous_audio_stream
-            stop_continuous_audio_stream()
-        except Exception:
-            pass
-
-        # Stop reminder scheduler
-        try:
-            from extensions.reminder_engine.reminder_scheduler import shutdown_scheduler
-            shutdown_scheduler()
-        except Exception:
-            pass
-
-        # Stop proactive interaction
-        try:
-            from legacy.proactive_interaction import get_proactive_interaction
-            proactive = get_proactive_interaction()
-            if proactive:
-                proactive.stop()
-        except Exception:
-            pass
-
-        # Stop workers
-        for worker in [self._tts_mon, self._vad_mon, self._audio_prov]:
-            if worker:
-                try:
-                    worker.stop()
-                except Exception:
-                    pass
-
-        # Stop dashboard server cleanly if running
-        try:
-            from dashboard.server import stop_dashboard_server
-            stop_dashboard_server()
-        except Exception:
-            pass
-
-        if self._tray:
-            self._tray.hide()
-        QApplication.quit()
 
     # ── History loader ────────────────────────────────────────────────────────
     def _load_history(self):

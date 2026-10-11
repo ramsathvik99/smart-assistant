@@ -52,7 +52,11 @@ class SmartHomeService:
         if not provider:
             return []
         creds = credentials or {}
-        discovered = provider.discover_devices(creds)
+        try:
+            discovered = provider.discover_devices(creds)
+        except Exception as e:
+            logger.warning(f"Notice: discovery for {provider_key} encountered error: {e}")
+            discovered = []
         # Automatically register discovered devices in user storage
         if discovered:
             self.storage.save_devices(user_id, provider_key, discovered)
