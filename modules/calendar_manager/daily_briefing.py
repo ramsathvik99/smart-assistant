@@ -59,13 +59,31 @@ def get_daily_briefing(user_id: Optional[int] = None, user_name: Optional[str] =
         storage = CalendarStorage()
         today_iso = now.strftime("%Y-%m-%d")
         uid = user_id if user_id is not None else 1
+        settings = storage.get_settings(uid)
+        region = settings.get('country', 'IN') if settings else 'IN'
         events = storage.get_events(uid, today_iso)
+        ev_items = []
         if events:
-            ev_list = [f"• {e.get('title', 'Event')} at {e.get('time', 'all day')}" for e in events]
-            events_summary = "\n".join(ev_list)
+            for e in events:
+                loc_str = f" ({e['location']})" if e.get('location') else ""
+                dur_str = f" [{e['duration_minutes']}m]" if e.get('duration_minutes') and e.get('duration_minutes') != 60 else ""
+                ev_items.append(f"• {e.get('title', 'Event')} at {e.get('time', 'all day')}{dur_str}{loc_str}")
             speech_parts.append(f"You have {len(events)} event{'s' if len(events) > 1 else ''} scheduled today.")
         else:
             speech_parts.append("Your calendar is clear for today.")
+
+        try:
+            from modules.calendar_manager.special_days_service import get_special_days_service
+            spec_service = get_special_days_service(region=region, user_id=uid)
+            special_day = spec_service.get_special_day(today_iso)
+            if special_day:
+                ev_items.append(f"🎉 Today is {special_day['name']} ({special_day.get('type', 'Special Day')})")
+                speech_parts.append(f"Today is {special_day['name']}.")
+        except Exception:
+            pass
+
+        if ev_items:
+            events_summary = "\n".join(ev_items)
     except Exception as e:
         logger.warning(f"[BRIEFING] Failed to load calendar events: {e}")
 

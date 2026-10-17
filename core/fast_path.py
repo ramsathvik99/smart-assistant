@@ -71,12 +71,14 @@ class FastPathProcessor:
             return None
 
         # Active email dictation/session takes strict precedence over fast path
-        try:
-            from modules.assistant_email.email_controller import is_active_email_session, _resolve_user
-            if is_active_email_session(_resolve_user(user_id)):
-                return None
-        except Exception:
-            pass
+        import sys
+        if 'modules.assistant_email.email_controller' in sys.modules:
+            try:
+                from modules.assistant_email.email_controller import is_active_email_session, _resolve_user
+                if is_active_email_session(_resolve_user(user_id)):
+                    return None
+            except Exception:
+                pass
 
         clean_text = user_input.strip()
         low = clean_text.lower().rstrip('.?!,').strip()
@@ -114,11 +116,47 @@ class FastPathProcessor:
             resp = "I'm feeling great and ready to help! What would you like to work on?"
             return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
 
-        if low in (
-            "who are you", "what is your name", "what's your name", "whats your name"
-        ) or norm_low in ("who are you", "what is your name", "what's your name", "whats your name"):
-            resp = "I'm Friday, your desktop assistant."
+        identity_queries = (
+            "who are you", "what is your name", "what's your name", "whats your name",
+            "who're you", "tell me about yourself", "introduce yourself", "who made you",
+            "who created you", "who built you", "what are you", "who am i speaking with",
+            "who am i talking to", "what is your identity", "whats your identity", "who is this",
+            "tell me who you are", "what should i call you"
+        )
+        if low in identity_queries or norm_low in identity_queries:
+            asst_name = "Trevon"
+            try:
+                from instance.config import settings as _cfg
+                asst_name = _cfg.get_assistant_name()
+            except Exception:
+                pass
+            resp = f"I'm {asst_name}, your desktop assistant."
             return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
+
+        # ---------------------------------------------------------------------
+        # 1.1 Time and Date Queries (Deterministic, Zero Latency)
+        # ---------------------------------------------------------------------
+        time_queries = (
+            "what time is it", "what is the time", "what's the time", "whats the time",
+            "tell me the time", "current time", "time", "what time is it now",
+            "tell me what time it is", "do you have the time"
+        )
+        if (low in time_queries or norm_low in time_queries or
+            re.match(r'^(?:tell\s+me\s+)?(?:what\s+(?:is\s+)?(?:the\s+)?time(?:\s+is\s+it)?|current\s+time|what\'?s\s+the\s+time)$', norm_low)):
+            now_str = datetime.now().strftime("%I:%M %p")
+            resp = f"The current time is {now_str}."
+            return cls._build_result("TIME_QUERY", resp, dialogue_mgr)
+
+        date_queries = (
+            "what date is it", "what is today's date", "what's today's date", "whats todays date",
+            "what is the date", "what's the date", "whats the date", "what day is it",
+            "what day is today", "today's date", "todays date", "current date"
+        )
+        if (low in date_queries or norm_low in date_queries or
+            re.match(r'^(?:tell\s+me\s+)?(?:what\s+(?:is\s+)?(?:today\'?s\s+)?date|current\s+date|what\s+day\s+is\s+it|what\s+day\s+is\s+today)$', norm_low)):
+            now_str = datetime.now().strftime("%A, %B %d, %Y")
+            resp = f"Today is {now_str}."
+            return cls._build_result("DATE_QUERY", resp, dialogue_mgr)
 
         # ---------------------------------------------------------------------
         # 1b. Runtime Capabilities & Registry Query
@@ -144,12 +182,17 @@ class FastPathProcessor:
             return cls._build_result("CAPABILITY_QUERY", resp, dialogue_mgr)
 
         # Check active continuation state for list queries before generic capability dump
-        if not dialogue_mgr and user_id:
-            try:
-                from extensions.dialogue_state_manager import get_dialogue_manager
-                dialogue_mgr = get_dialogue_manager(str(user_id))
-            except Exception:
-                pass
+        list_continuation_keywords = (
+            "full list", "continue", "resume", "repeat", "say that again", "next",
+            "first", "second", "third", "1st", "2nd", "3rd", "fourth", "fifth"
+        )
+        if any(k in norm_low for k in list_continuation_keywords):
+            if not dialogue_mgr and user_id:
+                try:
+                    from extensions.dialogue_state_manager import get_dialogue_manager
+                    dialogue_mgr = get_dialogue_manager(str(user_id))
+                except Exception:
+                    pass
 
         if dialogue_mgr and hasattr(dialogue_mgr, "current_state"):
             cs = dialogue_mgr.current_state
@@ -337,25 +380,6 @@ class FastPathProcessor:
             res["directory"] = curr_dir
             return res
 
-        # ---------------------------------------------------------------------
-        # 3. Time and Date Queries
-        # ---------------------------------------------------------------------
-        if low in (
-            "what time is it", "what is the time", "what's the time", "whats the time",
-            "tell me the time", "current time", "time"
-        ):
-            now_str = datetime.now().strftime("%I:%M %p")
-            resp = f"The current time is {now_str}."
-            return cls._build_result("TIME_QUERY", resp, dialogue_mgr)
-
-        if low in (
-            "what date is it", "what is today's date", "what's today's date", "whats todays date",
-            "what is the date", "what's the date", "whats the date", "what day is it",
-            "what day is today", "today's date", "todays date", "current date"
-        ):
-            now_str = datetime.now().strftime("%A, %B %d, %Y")
-            resp = f"Today is {now_str}."
-            return cls._build_result("DATE_QUERY", resp, dialogue_mgr)
 
         # ---------------------------------------------------------------------
         # 4. Application Running / Open State Query
@@ -501,37 +525,27 @@ class FastPathProcessor:
 
         # ---------------------------------------------------------------------
         # 6. Recent Context / Last Action Query
-        # "What did I just do?", "What was the last thing you did?"
+        # "What is my last command?", "What did I just ask you to do?", "What was the last action you performed?"
         # ---------------------------------------------------------------------
-        if low in (
-            "what did i just do", "what did i just ask", "what was the last thing i asked",
-            "what was the last thing you did", "what did we just do", "what did you just do",
-            "what did you do last", "last action", "what was my last command"
-        ):
-            last_action_desc = None
-            if dialogue_mgr and getattr(dialogue_mgr, "current_state", None):
-                rec_actions = getattr(dialogue_mgr.current_state, "recent_actions", [])
-                if rec_actions:
-                    last_act = rec_actions[-1]
-                    last_action_desc = (
-                        last_act.get("command")
-                        or last_act.get("command_signature")
-                        or last_act.get("intent")
-                    )
+        is_user_cmd = bool(
+            re.search(r'\b(?:what(?:\'s|\s+is|\s+was)\s+(?:my\s+)?(?:last|previous)\s+command|what\s+did\s+i\s+(?:just\s+)?ask(?:\s+you(?:\s+to\s+do)?)?|what\s+was\s+the\s+last\s+thing\s+i\s+asked|what\s+command\s+did\s+i\s+(?:just\s+)?(?:give|issue|say))\b', low)
+            or re.search(r'\b(?:what(?:\'s|\s+is|\s+was)\s+(?:my\s+)?(?:last|previous)\s+command|what\s+did\s+i\s+(?:just\s+)?ask(?:\s+you(?:\s+to\s+do)?)?|what\s+was\s+the\s+last\s+thing\s+i\s+asked|what\s+command\s+did\s+i\s+(?:just\s+)?(?:give|issue|say))\b', norm_low)
+            or low in ("what is my last command", "what was my last command", "what did i just ask", "what did i just ask you to do", "what did i just ask you", "what was the last thing i asked", "last command")
+        )
+        is_assistant_act = bool(
+            re.search(r'\b(?:what(?:\'s|\s+is|\s+was)\s+(?:the\s+)?last\s+action(?:\s+(?:you\s+)?performed)?|what\s+was\s+your\s+last\s+action|what\s+action\s+did\s+you\s+(?:just\s+)?perform|what\s+did\s+you\s+(?:just\s+)?do|what\s+did\s+you\s+do\s+last|what\s+was\s+the\s+last\s+thing\s+you\s+did|what\s+action\s+did\s+you\s+take)\b', low)
+            or re.search(r'\b(?:what(?:\'s|\s+is|\s+was)\s+(?:the\s+)?last\s+action(?:\s+(?:you\s+)?performed)?|what\s+was\s+your\s+last\s+action|what\s+action\s+did\s+you\s+(?:just\s+)?perform|what\s+did\s+you\s+(?:just\s+)?do|what\s+did\s+you\s+do\s+last|what\s+was\s+the\s+last\s+thing\s+you\s+did|what\s+action\s+did\s+you\s+take)\b', norm_low)
+            or low in ("what was the last action you performed", "what was your last action", "what action did you just perform", "what did you just do", "what did you do last", "what was the last thing you did", "last action")
+        )
 
-            if last_action_desc:
-                if any(w in low for w in ("what did you", "what was the last thing you did")):
-                    if last_act.get("response"):
-                        resp = f"I recently did: {last_act.get('response')}"
-                    else:
-                        resp = f"I recently executed: {last_action_desc}."
-                else:
-                    resp = f"You recently executed: {last_action_desc}."
-            else:
-                resp = "You haven't performed any actions yet in this session."
-
+        if is_user_cmd or is_assistant_act:
+            resp = cls._resolve_recent_history(
+                is_user_cmd=is_user_cmd,
+                dialogue_mgr=dialogue_mgr,
+                user_id=user_id
+            )
             res = cls._build_result("MEMORY_QUERY", resp, dialogue_mgr)
-            res["recent_action"] = last_action_desc
+            res["query_type"] = "last_command" if is_user_cmd else "last_action"
             return res
 
         # ---------------------------------------------------------------------
@@ -590,6 +604,157 @@ class FastPathProcessor:
         # State-changing queries pass through to Semantic Understanding -> UnifiedCommandRouter.
 
         # ---------------------------------------------------------------------
+        # 8. Deterministic Open Application Fast Path (Section 2)
+        # ---------------------------------------------------------------------
+        m_open_app = re.match(
+            r'^(?:please\s+)?(?:open|launch|start)\s+(?:the\s+|a\s+|an\s+)?([a-zA-Z0-9_\-\.\s]+?)[.?!]?$',
+            clean_text,
+            re.IGNORECASE
+        )
+        if m_open_app:
+            target_cand = m_open_app.group(1).strip()
+            cand_low = target_cand.lower()
+            # Do NOT intercept document / file / URL requests
+            is_doc_or_file = (
+                any(cand_low.endswith(ext) for ext in (".txt", ".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".py", ".md", ".json"))
+                or any(w in cand_low for w in ["document", "presentation", "ppt", "report", "file", "spreadsheet", "excel sheet", "assignment", "folder", "directory"])
+                or cand_low.startswith(("http://", "https://", "www."))
+            )
+            if not is_doc_or_file:
+                mapped = cls.KNOWN_APP_MAPPINGS.get(cand_low)
+                proc_key = mapped[0] if mapped else cand_low
+                # Verify it's a known or valid desktop application target
+                from extensions.system.smart_opener import smart_opener
+                resolved_info = smart_opener.resolve_detailed(proc_key)
+                if resolved_info and smart_opener.indexer._is_legitimate_app(resolved_info[0], resolved_info[1]):
+                    open_dict = smart_opener.smart_open(proc_key)
+                    if open_dict.get("success"):
+                        disp_name = open_dict.get("display_name") or resolved_info[0] or target_cand.title()
+                        resp_msg = open_dict.get("message") or f"Opened {disp_name}."
+                        res = cls._build_result("OPEN_APPLICATION", resp_msg, dialogue_mgr)
+                        res["target"] = target_cand
+                        res["app_name"] = disp_name
+                        res["path"] = open_dict.get("path")
+                        if dialogue_mgr and hasattr(dialogue_mgr, "current_state"):
+                            try:
+                                opened_apps = dialogue_mgr.current_state.session_context.setdefault("opened_applications", [])
+                                if disp_name not in opened_apps:
+                                    opened_apps.append(disp_name)
+                                dialogue_mgr.current_state.session_context["active_application"] = disp_name.lower()
+                            except Exception:
+                                pass
+                        return res
+
+        # ---------------------------------------------------------------------
+        # 8b. Deterministic Calendar Query / List Events Fast Path (Section 2)
+        # ---------------------------------------------------------------------
+        calendar_read_queries = (
+            "what is on my calendar", "what's on my calendar", "whats on my calendar",
+            "show my calendar", "show calendar", "check my calendar", "view calendar",
+            "what is on my schedule", "what's on my schedule", "whats on my schedule",
+            "my schedule", "what do i have planned today", "what do i have planned tomorrow",
+            "what do i have today", "what do i have tomorrow", "what do i have scheduled today",
+            "what do i have scheduled tomorrow", "any events today", "any events tomorrow",
+            "calendar today", "calendar tomorrow", "my events today", "my events tomorrow"
+        )
+        if norm_low in calendar_read_queries or re.match(r'^(?:what(?:\'s|\s+is)\s+on\s+my\s+(?:calendar|schedule)|show(?:\s+me)?\s+(?:my\s+)?calendar)[.?!]?$', norm_low):
+            try:
+                from datetime import timedelta
+                from modules.calendar_manager.calendar_storage import CalendarStorage
+                c_storage = CalendarStorage()
+                uid = int(user_id) if str(user_id).isdigit() else 1
+                is_tomorrow = "tomorrow" in norm_low
+                target_dt = datetime.now().date() + timedelta(days=1) if is_tomorrow else datetime.now().date()
+                date_lbl = "tomorrow" if is_tomorrow else "today"
+                target_iso = target_dt.strftime("%Y-%m-%d")
+                events = c_storage.get_events(uid, target_iso) or []
+                if not events:
+                    resp = f"You don't have any events scheduled for {date_lbl}."
+                else:
+                    ev_strs = [f"{e.get('title', 'Event')} at {e.get('time', 'all day')}" for e in events]
+                    resp = f"For {date_lbl}, you have {len(events)} event(s): {', '.join(ev_strs)}."
+                res = cls._build_result("DAILY_BRIEFING", resp, dialogue_mgr)
+                res["events"] = events
+                res["target_date"] = target_iso
+                return res
+            except Exception:
+                pass
+
+        # ---------------------------------------------------------------------
+        # 8c. Straightforward Memory Retrieval Fast Path (Section 2)
+        # ---------------------------------------------------------------------
+        m_fav = re.match(r"^(?:what\s+is|what\'?s|tell\s+me)\s+(?:my\s+)?(?:favorite|favourite)\s+([a-zA-Z0-9_\s]+?)[.?!]?$", norm_low)
+        if m_fav:
+            try:
+                target_word = m_fav.group(1).strip()
+                fact_k = target_word.replace(" ", "_")
+                from core.chatgpt_memory import get_chatgpt_memory
+                uid = int(user_id) if str(user_id).isdigit() else 1
+                facts = get_chatgpt_memory().get_user_facts(uid)
+                cand_keys = [f"favorite_{fact_k}", f"favourite_{fact_k}", f"my_favorite_{fact_k}", fact_k]
+                found_val = None
+                for k in cand_keys:
+                    if k in facts:
+                        found_val = facts[k]
+                        break
+                if found_val:
+                    resp = f"Your favorite {target_word} is {found_val}."
+                    res = cls._build_result("MEMORY_QUERY", resp, dialogue_mgr)
+                    res["key"] = fact_k
+                    res["value"] = found_val
+                    return res
+            except Exception:
+                pass
+
+        m_user_fact = re.match(r"^(?:what\s+is|what\'?s|tell\s+me|where\s+do\s+i|where\s+am\s+i)\s+(?:my\s+)?(job|occupation|workplace|city|hometown|live|from)[.?!]?$", norm_low)
+        if m_user_fact:
+            try:
+                raw_fact_k = m_user_fact.group(1).strip()
+                fact_k = "city" if raw_fact_k == "live" else ("hometown" if raw_fact_k == "from" else raw_fact_k)
+                from core.chatgpt_memory import get_chatgpt_memory
+                uid = int(user_id) if str(user_id).isdigit() else 1
+                facts = get_chatgpt_memory().get_user_facts(uid)
+                if fact_k in facts:
+                    found_val = facts[fact_k]
+                    if fact_k in ("city", "hometown"):
+                        resp = f"You live in {found_val}." if fact_k == "city" else f"You are from {found_val}."
+                    else:
+                        resp = f"Your {raw_fact_k} is {found_val}."
+                    res = cls._build_result("MEMORY_QUERY", resp, dialogue_mgr)
+                    res["key"] = fact_k
+                    res["value"] = found_val
+                    return res
+            except Exception:
+                pass
+
+        # ---------------------------------------------------------------------
+        # 8d. Deterministic Memory Storage Fast Path (Requirement 2 & Section 8)
+        # "remember that my favorite language is Python", "remember that my secret pin is 7890"
+        # ---------------------------------------------------------------------
+        m_rem = re.match(r"^(?:please\s+)?(?:remember|note)\s+(?:that\s+)?(?:my\s+|the\s+)?([a-zA-Z0-9_\s]+?)\s+(?:is|was|=)\s+(.+)$", norm_low)
+        if m_rem:
+            try:
+                raw_entity = m_rem.group(1).strip()
+                val = m_rem.group(2).strip().rstrip(".!?")
+                entity_words = raw_entity.split()
+                if 1 <= len(entity_words) <= 5 and not any(w in entity_words for w in ("what", "now", "it", "when", "how", "why", "where")):
+                    key = raw_entity.replace(" ", "_")
+                    from core.chatgpt_memory import get_chatgpt_memory
+                    uid = int(user_id) if str(user_id).isdigit() else 1
+                    get_chatgpt_memory().set_user_fact(uid, key, val, confidence=0.98, source="explicit_user_store")
+                    if "favorite" in key:
+                        get_chatgpt_memory().set_user_fact(uid, key.replace("favorite", "favourite"), val, confidence=0.98, source="explicit_user_store")
+                    elif "favourite" in key:
+                        get_chatgpt_memory().set_user_fact(uid, key.replace("favourite", "favorite"), val, confidence=0.98, source="explicit_user_store")
+                    resp = f"Understood. I'll remember that your {raw_entity} is {val}."
+                    res = cls._build_result("MEMORY_STORE", resp, dialogue_mgr)
+                    res["key"] = key
+                    res["value"] = val
+                    return res
+            except Exception:
+                pass
+
+        # ---------------------------------------------------------------------
         # 9. Time and Date Queries (Sub-millisecond fast path)
         # ---------------------------------------------------------------------
         if low in (
@@ -617,6 +782,102 @@ class FastPathProcessor:
 
         # Not eligible for fast path — fallback to standard semantic & planning pipeline
         return None
+
+    @classmethod
+    def _resolve_recent_history(
+        cls,
+        is_user_cmd: bool,
+        dialogue_mgr: Any,
+        user_id: Any
+    ) -> str:
+        """
+        Retrieve and distinguish user command from assistant action executed.
+        Accurately reports historical record without hallucinating actions.
+        """
+        meta_query_pattern = re.compile(
+            r'\b(?:what(?:\'s|\s+is|\s+was)\s+(?:my\s+)?(?:last|previous)\s+command|'
+            r'what\s+did\s+(?:i|you)\s+(?:just\s+)?(?:ask|do)|'
+            r'what\s+was\s+(?:the\s+)?last\s+(?:thing|action))\b',
+            re.IGNORECASE
+        )
+
+        if is_user_cmd:
+            # 1. Check dialogue state turns
+            if dialogue_mgr and getattr(dialogue_mgr, "current_state", None):
+                turns = getattr(dialogue_mgr.current_state, "turns", [])
+                for t in reversed(turns):
+                    u_in = getattr(t, "user_input", "") or ""
+                    if u_in and not meta_query_pattern.search(u_in):
+                        return f"Your last command was: '{u_in}'."
+
+            # 2. Check in-memory conversation history from assistant.py
+            try:
+                from legacy.assistant import conversation_history_by_user
+                uid = int(user_id) if str(user_id).isdigit() else 1
+                u_hist = conversation_history_by_user.get(uid, [])
+                for entry in reversed(u_hist):
+                    u_in = entry.get("user", "")
+                    if u_in and not meta_query_pattern.search(u_in):
+                        return f"Your last command was: '{u_in}'."
+            except Exception:
+                pass
+
+            # 3. Check conversational memory deque
+            try:
+                from extensions.conversational_memory import recent_memory, _lock
+                with _lock:
+                    mem_list = list(recent_memory)
+                for entry in reversed(mem_list):
+                    u_in = entry.get("user_command", "")
+                    if u_in and not meta_query_pattern.search(u_in):
+                        return f"Your last command was: '{u_in}'."
+            except Exception:
+                pass
+
+            return "You haven't issued any commands yet in this session."
+
+        else:
+            # Assistant action query: must return actual executed action or report none
+            if dialogue_mgr and getattr(dialogue_mgr, "current_state", None):
+                rec_actions = getattr(dialogue_mgr.current_state, "recent_actions", [])
+                for act in reversed(rec_actions):
+                    intent = str(act.get("intent", ""))
+                    cmd = str(act.get("command", "") or act.get("command_signature", "")).lower()
+                    # Skip meta-queries and conversational queries
+                    if intent in ("MEMORY_QUERY", "GENERAL_CONVERSATION", "GREETINGS", "CAPABILITY_QUERY") or meta_query_pattern.search(cmd):
+                        continue
+                    if act.get("response"):
+                        return f"The last action I performed was: {act['response']}"
+                    elif act.get("action") and act.get("target"):
+                        return f"The last action I performed was {act['action']} on '{act['target']}'."
+                    elif act.get("command"):
+                        return f"The last action I performed was executing: {act['command']}."
+
+            # Check PersistentExecutionRecordsManager
+            try:
+                from core.persistent_execution_records import get_persistent_execution_records_manager
+                uid = int(user_id) if str(user_id).isdigit() else 1
+                mgr = get_persistent_execution_records_manager()
+                recs = mgr.get_recent_actions(user_id=uid, limit=5)
+                for r in recs:
+                    if r.status in ("COMPLETED", "SUCCESS") and r.operation not in ("READ", "QUERY", "INSPECT"):
+                        desc = r.intended_action or f"{r.operation} on {r.target}"
+                        return f"The last action I performed was: {desc}."
+            except Exception:
+                pass
+
+            # Check OS Action History
+            try:
+                from core.os_gateway import get_os_action_history
+                uid = int(user_id) if str(user_id).isdigit() else 1
+                acts = get_os_action_history().get_recent_actions(user_id=uid, limit=5)
+                for a in acts:
+                    if a.get("status") in ("SUCCESS", "completed") and a.get("result_message"):
+                        return f"The last action I performed was: {a.get('result_message')}"
+            except Exception:
+                pass
+
+            return "I haven't performed any actions yet in this session."
 
     @classmethod
     def _build_result(cls, intent: str, response: str, dialogue_mgr: Any) -> Dict[str, Any]:

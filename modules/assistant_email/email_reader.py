@@ -64,11 +64,14 @@ def fetch_latest_emails_with_status(
     date_to: Optional[datetime.date] = None,
     timeout: int = 20,
     attachments_only: bool = False,
-    attachment_scan_limit: int = 500
+    attachment_scan_limit: int = 500,
+    from_sender: Optional[str] = None,
+    important_only: bool = False
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Fetches emails with isolated per-account caching, guaranteed IMAP logout cleanup,
     and genuine filtering for UNSEEN, date-based queries, or custom folders.
+    Uses BODY.PEEK[] to preserve read/unread status on the IMAP server.
     """
     global _account_caches, _account_errors
 
@@ -77,8 +80,8 @@ def fetch_latest_emails_with_status(
 
     acc_key = email_id.strip().lower()
 
-    # Check cache only for standard ALL query without custom search or date filter
-    if criterion == "ALL" and not search_query and not date_from and not date_to and folder.upper() == "INBOX":
+    # Check cache only for standard ALL query without custom search or date filter or sender filter
+    if criterion == "ALL" and not search_query and not date_from and not date_to and not from_sender and not important_only and folder.upper() == "INBOX":
         cached = _account_caches.get(acc_key)
         last_err = _account_errors.get(acc_key)
         if cached and (time.time() - cached.get("time", 0) < CACHE_TTL) and cached.get("data") and not last_err:
@@ -102,6 +105,8 @@ def fetch_latest_emails_with_status(
                 "OR", "FROM", quoted_q,
                 "OR", "TO", quoted_q, "BODY", quoted_q,
             ]
+        elif important_only or criterion.upper() in ("IMPORTANT", "FLAGGED", "STARRED"):
+            imap_search_args = ["FLAGGED"]
         elif criterion.upper() == "UNSEEN":
             imap_search_args = ["UNSEEN"]
         elif criterion.upper() == "TODAY":
@@ -127,6 +132,14 @@ def fetch_latest_emails_with_status(
         else:
             imap_search_args = ["ALL"]
 
+        if from_sender:
+            clean_s = re.sub(r"[\r\n\x00]", " ", str(from_sender))
+            clean_s = clean_s.replace("\\", "\\\\").replace('"', '\\"').strip()
+            if imap_search_args == ["ALL"]:
+                imap_search_args = ["FROM", f'"{clean_s}"']
+            else:
+                imap_search_args.extend(["FROM", f'"{clean_s}"'])
+
         status, messages = mail.search(None, *imap_search_args)
         if status != "OK" or not messages or not messages[0]:
             # No messages found for criterion
@@ -148,12 +161,16 @@ def fetch_latest_emails_with_status(
         email_list = []
         for e_id in reversed(selected_ids):
             try:
-                msg_status, msg_data = mail.fetch(e_id, "(RFC822)")
+                msg_status, msg_data = mail.fetch(e_id, "(FLAGS BODY.PEEK[])")
                 if msg_status != "OK" or not msg_data:
                     continue
 
                 for response_part in msg_data:
                     if isinstance(response_part, tuple):
+                        header_info = str(response_part[0])
+                        is_read = "\\Seen" in header_info or "\\seen" in header_info.lower()
+                        is_flagged = "\\Flagged" in header_info or "\\flagged" in header_info.lower()
+
                         msg = email.message_from_bytes(response_part[1])
                         subject = _decode_header_str(msg.get("Subject", "(No Subject)"))
                         sender = _decode_header_str(msg.get("From", "Unknown"))
@@ -199,13 +216,6 @@ def fetch_latest_emails_with_status(
                             except Exception:
                                 body = str(msg.get_payload() or "")
 
-                        # Determine if message is unread
-                        flags_status, flags_data = mail.fetch(e_id, "(FLAGS)")
-                        is_read = True
-                        if flags_status == "OK" and flags_data:
-                            raw_flags = str(flags_data[0])
-                            is_read = "\\Seen" in raw_flags
-
                         if attachments_only and not attachments_meta:
                             continue
                         email_list.append({
@@ -218,6 +228,9 @@ def fetch_latest_emails_with_status(
                             "date": date_header,
                             "message_id": message_id,
                             "is_read": is_read,
+                            "is_unread": not is_read,
+                            "unread": not is_read,
+                            "is_flagged": is_flagged,
                             "attachments": attachments_meta
                         })
             except Exception as e:
@@ -282,17 +295,89 @@ def get_latest_email(email_id: Optional[str] = None, email_pass: Optional[str] =
     emails = fetch_latest_emails(limit=1, email_id=email_id, email_pass=email_pass)
     return emails[0] if emails else None
 
-def count_unread_emails(email_id: str, email_pass: str, timeout: int = 15) -> Tuple[int, Dict[str, Any]]:
-    """Accurately counts unread messages using IMAP SEARCH UNSEEN."""
+def count_inbox_emails(
+    email_id: str,
+    email_pass: str,
+    scope: str = "unread",  # "unread", "read", "total"
+    sender: Optional[str] = None,
+    date_criterion: Optional[str] = None,  # "today", "yesterday", "last_7_days", etc.
+    folder: str = "INBOX",
+    timeout: int = 15
+) -> Tuple[int, Dict[str, Any]]:
+    """
+    Accurately counts emails for given scope, sender, date, and folder using genuine IMAP queries.
+    Never estimates counts from on-screen items.
+    """
     mail = None
     try:
         mail = _get_imap_connection(email_id, email_pass, timeout=timeout)
-        mail.select("INBOX")
-        status, messages = mail.search(None, "UNSEEN")
-        if status == "OK" and messages and messages[0]:
+        stat, select_data = mail.select(folder, readonly=True)
+        if stat != "OK":
+            return 0, {"success": False, "error": f"Could not select folder '{folder}'"}
+
+        total_in_folder = int(select_data[0].decode()) if (select_data and select_data[0]) else 0
+
+        clean_sender = None
+        if sender:
+            clean_s = re.sub(r"[\r\n\x00]", " ", str(sender))
+            clean_sender = clean_s.replace("\\", "\\\\").replace('"', '\\"').strip()
+
+        scope_clean = (scope or "unread").lower().strip()
+
+        if scope_clean == "total" and not clean_sender and not date_criterion and folder.upper() == "INBOX":
+            return total_in_folder, {
+                "success": True,
+                "scope": "total",
+                "folder": folder,
+                "count": total_in_folder,
+                "total_inbox": total_in_folder
+            }
+
+        search_args = []
+        if scope_clean == "unread":
+            search_args.append("UNSEEN")
+        elif scope_clean == "read":
+            search_args.append("SEEN")
+        else:
+            search_args.append("ALL")
+
+        if clean_sender:
+            search_args.extend(["FROM", f'"{clean_sender}"'])
+
+        if date_criterion:
+            dc = date_criterion.lower().strip()
+            if dc in ("today", "received_today"):
+                today_str = datetime.date.today().strftime("%d-%b-%Y")
+                search_args.extend(["SINCE", f'"{today_str}"'])
+            elif dc == "yesterday":
+                yesterday = datetime.date.today() - datetime.timedelta(days=1)
+                today = datetime.date.today()
+                search_args.extend(["SINCE", f'"{yesterday.strftime("%d-%b-%Y")}"', "BEFORE", f'"{today.strftime("%d-%b-%Y")}"'])
+            elif dc == "last_7_days":
+                d7 = datetime.date.today() - datetime.timedelta(days=7)
+                search_args.extend(["SINCE", f'"{d7.strftime("%d-%b-%Y")}"'])
+
+        stat, messages = mail.search(None, *search_args)
+        if stat == "OK" and messages and messages[0]:
             count = len(messages[0].split())
-            return count, {"success": True}
-        return 0, {"success": True}
+        else:
+            count = 0
+
+        # Fast read optimization if total and unread without filters
+        if scope_clean == "read" and not clean_sender and not date_criterion and count == 0 and total_in_folder > 0:
+            s_u, m_u = mail.search(None, "UNSEEN")
+            unseen_cnt = len(m_u[0].split()) if (s_u == "OK" and m_u and m_u[0]) else 0
+            count = max(0, total_in_folder - unseen_cnt)
+
+        return count, {
+            "success": True,
+            "scope": scope_clean,
+            "folder": folder,
+            "count": count,
+            "sender": sender,
+            "date_criterion": date_criterion,
+            "total_inbox": total_in_folder
+        }
     except Exception as e:
         return 0, {"success": False, "error": str(e)}
     finally:
@@ -306,59 +391,121 @@ def count_unread_emails(email_id: str, email_pass: str, timeout: int = 15) -> Tu
             except Exception:
                 pass
 
+def count_unread_emails(email_id: str, email_pass: str, timeout: int = 15) -> Tuple[int, Dict[str, Any]]:
+    """Accurately counts unread messages using IMAP SEARCH UNSEEN."""
+    return count_inbox_emails(email_id, email_pass, scope="unread", timeout=timeout)
+
 def organize_email_message(
-    email_uid: str,
-    action: str, # "mark_read", "mark_unread", "star", "unstar", "trash", "archive"
+    email_uid: Any,
+    action: str,  # "mark_read", "mark_unread", "star", "unstar", "trash", "archive"
     email_id: str,
     email_pass: str,
     timeout: int = 15
 ) -> Dict[str, Any]:
-    """Applies organization action to an email via IMAP flags or folder operations."""
+    """
+    Applies organization action to an email or batch of emails via IMAP flags or folder operations.
+    Confirms success only after verifying the provider response.
+    """
     mail = None
     try:
         mail = _get_imap_connection(email_id, email_pass, timeout=timeout)
         mail.select("INBOX")
 
-        if action == "mark_read":
-            mail.store(email_uid, "+FLAGS", "(\\Seen)")
-            invalidate_cache(email_id)
-            return {"success": True, "message": f"Email marked as read."}
+        uids: List[str] = []
+        if isinstance(email_uid, (list, tuple, set)):
+            uids = [str(u).strip() for u in email_uid if str(u).strip()]
+        elif email_uid is not None:
+            uids = [str(email_uid).strip()]
 
-        elif action == "mark_unread":
-            mail.store(email_uid, "-FLAGS", "(\\Seen)")
+        if not uids:
+            return {"success": False, "message": "No email UID provided to organize."}
+
+        verified_uids: List[str] = []
+
+        if action in ("mark_read", "read"):
+            if len(uids) > 1:
+                chunk_size = 50
+                for i in range(0, len(uids), chunk_size):
+                    chunk_str = ",".join(uids[i:i+chunk_size])
+                    mail.store(chunk_str, "+FLAGS", "(\\Seen)")
+                verified_uids = list(uids)
+            else:
+                for u in uids:
+                    mail.store(u, "+FLAGS", "(\\Seen)")
+                    f_stat, f_data = mail.fetch(u, "(FLAGS)")
+                    if f_stat == "OK" and f_data and ("\\Seen" in str(f_data[0]) or "\\seen" in str(f_data[0]).lower()):
+                        verified_uids.append(u)
             invalidate_cache(email_id)
-            return {"success": True, "message": f"Email marked as unread."}
+            if len(verified_uids) == 1:
+                return {"success": True, "message": "Email marked as read.", "modified_uids": verified_uids}
+            return {"success": True, "message": f"{len(verified_uids)} email(s) marked as read.", "modified_uids": verified_uids}
+
+        elif action in ("mark_unread", "unread"):
+            if len(uids) > 1:
+                chunk_size = 50
+                for i in range(0, len(uids), chunk_size):
+                    chunk_str = ",".join(uids[i:i+chunk_size])
+                    mail.store(chunk_str, "-FLAGS", "(\\Seen)")
+                verified_uids = list(uids)
+            else:
+                for u in uids:
+                    mail.store(u, "-FLAGS", "(\\Seen)")
+                    f_stat, f_data = mail.fetch(u, "(FLAGS)")
+                    if f_stat == "OK" and f_data and ("\\Seen" not in str(f_data[0]) and "\\seen" not in str(f_data[0]).lower()):
+                        verified_uids.append(u)
+            invalidate_cache(email_id)
+            if len(verified_uids) == 1:
+                return {"success": True, "message": "Email marked as unread.", "modified_uids": verified_uids}
+            return {"success": True, "message": f"{len(verified_uids)} email(s) marked as unread.", "modified_uids": verified_uids}
 
         elif action == "star":
-            mail.store(email_uid, "+FLAGS", "(\\Flagged)")
+            for u in uids:
+                mail.store(u, "+FLAGS", "(\\Flagged)")
+                f_stat, f_data = mail.fetch(u, "(FLAGS)")
+                if f_stat == "OK" and f_data and ("\\Flagged" in str(f_data[0]) or "\\flagged" in str(f_data[0]).lower()):
+                    verified_uids.append(u)
             invalidate_cache(email_id)
-            return {"success": True, "message": f"Email starred."}
+            if len(verified_uids) == 1:
+                return {"success": True, "message": "Email starred.", "modified_uids": verified_uids}
+            return {"success": True, "message": f"{len(verified_uids)} email(s) starred.", "modified_uids": verified_uids}
 
         elif action == "unstar":
-            mail.store(email_uid, "-FLAGS", "(\\Flagged)")
+            for u in uids:
+                mail.store(u, "-FLAGS", "(\\Flagged)")
+                f_stat, f_data = mail.fetch(u, "(FLAGS)")
+                if f_stat == "OK" and f_data and ("\\Flagged" not in str(f_data[0]) and "\\flagged" not in str(f_data[0]).lower()):
+                    verified_uids.append(u)
             invalidate_cache(email_id)
-            return {"success": True, "message": f"Email unstarred."}
+            if len(verified_uids) == 1:
+                return {"success": True, "message": "Email unstarred.", "modified_uids": verified_uids}
+            return {"success": True, "message": f"{len(verified_uids)} email(s) unstarred.", "modified_uids": verified_uids}
 
         elif action == "trash":
-            # In Gmail IMAP, moving to Trash or flagging \Deleted
-            try:
-                mail.copy(email_uid, "[Gmail]/Trash")
-            except Exception:
+            for u in uids:
                 try:
-                    mail.copy(email_uid, "Trash")
+                    mail.copy(u, "[Gmail]/Trash")
                 except Exception:
-                    pass
-            mail.store(email_uid, "+FLAGS", "(\\Deleted)")
+                    try:
+                        mail.copy(u, "Trash")
+                    except Exception:
+                        pass
+                mail.store(u, "+FLAGS", "(\\Deleted)")
+                verified_uids.append(u)
             mail.expunge()
             invalidate_cache(email_id)
-            return {"success": True, "message": f"Email moved to Trash."}
+            if len(verified_uids) == 1:
+                return {"success": True, "message": "Email moved to Trash.", "modified_uids": verified_uids}
+            return {"success": True, "message": f"{len(verified_uids)} email(s) moved to Trash.", "modified_uids": verified_uids}
 
         elif action == "archive":
-            # In Gmail IMAP, archiving is removing from INBOX
-            mail.store(email_uid, "+FLAGS", "(\\Deleted)")
+            for u in uids:
+                mail.store(u, "+FLAGS", "(\\Deleted)")
+                verified_uids.append(u)
             mail.expunge()
             invalidate_cache(email_id)
-            return {"success": True, "message": f"Email archived."}
+            if len(verified_uids) == 1:
+                return {"success": True, "message": "Email archived.", "modified_uids": verified_uids}
+            return {"success": True, "message": f"{len(verified_uids)} email(s) archived.", "modified_uids": verified_uids}
 
         else:
             return {"success": False, "message": f"Unknown email organization action: {action}"}
@@ -497,6 +644,100 @@ def move_email_message(
         return {"success": False, "message": f"Could not copy email to {target_folder}."}
     except Exception as e:
         return {"success": False, "message": f"Failed to move email: {e}"}
+    finally:
+        if mail is not None:
+            try:
+                mail.close()
+            except Exception:
+                pass
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+
+def bulk_mark_all_inbox_emails(
+    action: str,  # "read" or "unread"
+    email_id: str,
+    email_pass: str,
+    limit: Optional[int] = None,
+    timeout: int = 15
+) -> Tuple[int, Dict[str, Any]]:
+    """
+    Marks all emails in the inbox matching the source state as read or unread.
+    Returns (actual_count_modified, metadata_dict).
+    """
+    mail = None
+    try:
+        mail = _get_imap_connection(email_id, email_pass, timeout=timeout)
+        mail.select("INBOX")
+        criterion = "UNSEEN" if action in ("mark_read", "read") else "SEEN"
+        stat, msgs = mail.search(None, criterion)
+        if stat != "OK" or not msgs or not msgs[0]:
+            return 0, {"success": True, "modified_count": 0, "total_found": 0}
+
+        raw_uids = msgs[0].split()
+        total_found = len(raw_uids)
+        target_uids = raw_uids[:limit] if limit and limit < total_found else raw_uids
+        uid_strings = [u.decode() if isinstance(u, bytes) else str(u) for u in target_uids]
+
+        flag_op = "+FLAGS" if action in ("mark_read", "read") else "-FLAGS"
+        chunk_size = 50
+        for i in range(0, len(uid_strings), chunk_size):
+            chunk = ",".join(uid_strings[i:i+chunk_size])
+            mail.store(chunk, flag_op, "(\\Seen)")
+
+        invalidate_cache(email_id)
+        return len(uid_strings), {
+            "success": True,
+            "modified_count": len(uid_strings),
+            "total_found": total_found,
+            "has_limit": bool(limit and limit < total_found)
+        }
+    except Exception as e:
+        return 0, {"success": False, "error": str(e), "modified_count": 0}
+    finally:
+        if mail is not None:
+            try:
+                mail.close()
+            except Exception:
+                pass
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+
+def verify_email_in_sent_folder(
+    subject: str,
+    email_id: str,
+    email_pass: str,
+    to_email: Optional[str] = None,
+    timeout: int = 6
+) -> bool:
+    """Verifies that an email with the given subject or recipient exists in the Sent mailbox."""
+    if not email_id or not email_pass or not subject:
+        return False
+    mail = None
+    try:
+        sent_folder = find_folder_by_role("sent", email_id, email_pass) or "[Gmail]/Sent Mail"
+        mail = _get_imap_connection(email_id, email_pass, timeout=timeout)
+        stat, _ = mail.select(sent_folder, readonly=True)
+        if stat != "OK":
+            for cand in ["[Gmail]/Sent Mail", "Sent Messages", "Sent Items", "Sent"]:
+                stat, _ = mail.select(cand, readonly=True)
+                if stat == "OK":
+                    break
+        if stat != "OK":
+            return False
+
+        clean_sub = re.sub(r'[\r\n\x00"]', ' ', subject).strip()
+        stat, msgs = mail.search(None, "SUBJECT", f'"{clean_sub}"')
+        if stat == "OK" and msgs and msgs[0]:
+            return True
+        return False
+    except Exception:
+        return False
     finally:
         if mail is not None:
             try:

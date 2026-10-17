@@ -180,6 +180,15 @@ def resolve_recipient_detailed(identifier: str) -> Dict[str, Any]:
     norm = clean.lower()
     norm_clean = re.sub(r'^(?:my|the)\s+', '', norm).strip()
 
+    INVALID_CONTACT_NAMES = {
+        "him", "her", "them", "him the", "her the", "them the",
+        "the mail", "the email", "send him", "send her", "send them",
+        "send him the mail", "send her the mail", "it", "that", "this",
+        "the", "a", "an", "email", "mail"
+    }
+    if norm in INVALID_CONTACT_NAMES or norm_clean in INVALID_CONTACT_NAMES or any(norm.startswith(p) for p in ("him ", "her ", "them ", "send ")):
+        return {"status": "not_found", "email": None, "name": None, "candidates": []}
+
     def _build_cand(main_key: str, data: Dict[str, Any]) -> Dict[str, Any]:
         email_val = data.get("email", "")
         return {

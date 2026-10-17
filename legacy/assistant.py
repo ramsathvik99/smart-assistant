@@ -376,14 +376,31 @@ def process_input(text, user_id=None):
 
         effective_uid = user_id or current_uid
 
+        # Multilingual Language Detection & Canonical Intent Normalization
+        from core.multilingual_engine import get_multilingual_engine
+        ml_engine = get_multilingual_engine()
+        lang_res = ml_engine.detect_language(clean_text, user_id=effective_uid)
+        detected_lang = lang_res.language
+        ml_engine.set_active_language(effective_uid, detected_lang)
+
+        if lang_res.is_multilingual:
+            routing_text = ml_engine.translate_to_english(clean_text, source_lang=detected_lang)
+            try:
+                print(f"[MULTILINGUAL] Detected {detected_lang} ({lang_res.locale}) -> Canonical routing: {routing_text}")
+            except Exception:
+                safe_rt = str(routing_text).encode("ascii", errors="backslashreplace").decode("ascii")
+                print(f"[MULTILINGUAL] Detected {detected_lang} -> Canonical routing: {safe_rt}")
+        else:
+            routing_text = clean_text
+
         try:
             from core.brain import brain_route_and_execute
-            result = brain_route_and_execute(clean_text, user_id=effective_uid)
+            result = brain_route_and_execute(routing_text, user_id=effective_uid)
         except Exception as brain_err:
             # If Brain fails for any reason, fall back to direct single-intent router
             print(f"[BRAIN FALLBACK] {brain_err}")
             from core.unified_command_router import route_and_execute
-            result = route_and_execute(clean_text, user_id=effective_uid)
+            result = route_and_execute(routing_text, user_id=effective_uid)
 
         if tracker:
             tracker.record("routing_complete_timestamp", time.monotonic())
@@ -392,7 +409,7 @@ def process_input(text, user_id=None):
         raw_output = str(result.get("response") or "")
         try:
             from extensions.system.conversational_response import sanitize_user_response
-            response = sanitize_user_response(raw_output, clean_text)
+            response = sanitize_user_response(raw_output, routing_text)
         except Exception:
             response = raw_output
 
@@ -412,7 +429,7 @@ def process_input(text, user_id=None):
                     raw_response=response,
                     intent=result.get("intent"),
                     action_result=result,
-                    context={"user_id": effective_uid, "command": clean_text},
+                    context={"user_id": effective_uid, "command": routing_text},
                     user_id=effective_uid,
                     is_proactive=False,
                 )
@@ -420,13 +437,31 @@ def process_input(text, user_id=None):
                 spoken_response = conv_resp.speech_text or conv_resp.text or response
                 meta = conv_resp.to_dict()
                 meta["ui_text"] = final_ui_text
+            except Exception as c_err:
+                print(f"[CONVERSATIONAL COMPOSER ERROR] {c_err}")
+                final_ui_text = response
+                spoken_response = response
+                meta = {"ui_text": response}
+
+            # Multilingual response generation: reply in the same language as input
+            if detected_lang != "en":
+                final_ui_text = ml_engine.translate_from_english(final_ui_text, target_lang=detected_lang)
+                spoken_response = ml_engine.translate_from_english(spoken_response, target_lang=detected_lang)
+                response = final_ui_text
+                meta["lang_hint"] = detected_lang
+                meta["language"] = detected_lang
+                meta["locale"] = lang_res.locale
+                meta["ui_text"] = final_ui_text
+
+            try:
                 print(f"[SPEECH PIPELINE] Final UI Text: {final_ui_text[:120]!r}")
                 print(f"[SPEECH PIPELINE] Speech Text: {spoken_response!r}")
                 print(f"[SPEECH PIPELINE] Words: {len(spoken_response.split())} | Chars: {len(spoken_response)}")
-            except Exception as c_err:
-                print(f"[CONVERSATIONAL COMPOSER ERROR] {c_err}")
-                spoken_response = response
-                meta = {"ui_text": response}
+            except Exception:
+                safe_ui = str(final_ui_text[:120]).encode("ascii", errors="backslashreplace").decode("ascii")
+                safe_sp = str(spoken_response).encode("ascii", errors="backslashreplace").decode("ascii")
+                print(f"[SPEECH PIPELINE] Final UI Text: {safe_ui}")
+                print(f"[SPEECH PIPELINE] Speech Text: {safe_sp}")
 
             if tracker:
                 tracker.record("tts_request_timestamp", time.monotonic())
@@ -441,6 +476,30 @@ def process_input(text, user_id=None):
             except Exception as e:
                 print(f"[MEMORY ERROR] {e}")
 
+            # Store in dialogue state manager for repetition and continuation (preserving per-user isolation)
+            is_repeat_cmd = routing_text.lower().strip() in (
+                "repeat", "repeat that", "say that again", "repeat last part",
+                "repeat the last part", "repeat what you said", "what did you say", "come again"
+            )
+            if not is_repeat_cmd and (final_ui_text or spoken_response):
+                try:
+                    from extensions.dialogue_state_manager import get_dialogue_manager
+                    dm = get_dialogue_manager(str(effective_uid))
+                    dm.update_continuation_state(
+                        full_response=final_ui_text,
+                        spoken_segment=spoken_response
+                    )
+                    if result and isinstance(result, dict) and result.get("status") in ("success", True, "completed", None) and not result.get("error"):
+                        intent_str = str(result.get("intent", ""))
+                        if intent_str not in ("GENERAL_CONVERSATION", "GREETINGS", ""):
+                            dm.record_execution_result(
+                                execution_result=result,
+                                intents=[result.get("intent")] if result.get("intent") else []
+                            )
+                except Exception as d_err:
+                    import logging
+                    logging.getLogger("legacy.assistant").warning(f"Failed to update dialogue continuation state: {d_err}")
+
         if tracker:
             tracker.print_breakdown()
 
@@ -448,7 +507,15 @@ def process_input(text, user_id=None):
     except Exception as e:
         err = f"Execution failed: {str(e)}"
         print(f"[ASSISTANT ERROR] {err}")
-        speak("I encountered an error executing that command.", priority=TTSPriority.COMMAND)
+        err_msg = "I encountered an error executing that command."
+        target_lang = "en"
+        try:
+            if 'detected_lang' in locals() and detected_lang != "en":
+                target_lang = detected_lang
+                err_msg = ml_engine.translate_from_english(err_msg, target_lang=target_lang)
+        except Exception:
+            pass
+        speak(err_msg, priority=TTSPriority.COMMAND, metadata={"lang_hint": target_lang})
         if tracker:
             tracker.set_reason(fallback=str(e))
             tracker.print_breakdown()

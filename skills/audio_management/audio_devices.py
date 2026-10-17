@@ -419,6 +419,8 @@ def resolve(name: str, kind: str):
             + [a for a in _PREFERRED_APIS.get(platform.system(), ()) if a != chosen] \
             + [None]
 
+
+
         # A candidate only counts if it can be opened at the rate this side runs
         # at. The prefix match matters because the API that carries the audio is
         # not always the one that can spell: MME truncates names to 31 characters

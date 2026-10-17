@@ -77,6 +77,7 @@ class RAGRouter:
         "REMINDERS":            {"core_intent": "chat",               "sub_intent": "general_knowledge"},
         "TRANSLATION":          {"core_intent": "chat",               "sub_intent": "general_knowledge"},
         "CALCULATOR":           {"core_intent": "chat",               "sub_intent": "general_knowledge"},
+        "DAILY_BRIEFING":       {"core_intent": "db_search",          "sub_intent": "calendar_query"},
     }
 
     def __init__(self):
@@ -98,10 +99,13 @@ class RAGRouter:
             intent_name = "GENERAL_CONVERSATION"
             params = {}
 
-        mapping = self._INTENT_MAP.get(intent_name, {
-            "core_intent": "chat",
-            "sub_intent": "general_knowledge"
-        })
+        if params.get("action") == "calendar_query":
+            mapping = {"core_intent": "db_search", "sub_intent": "calendar_query"}
+        else:
+            mapping = self._INTENT_MAP.get(intent_name, {
+                "core_intent": "chat",
+                "sub_intent": "general_knowledge"
+            })
 
         logger.info(f"[RAGRouter] '{intent_name}' -> core_intent='{mapping['core_intent']}' (preserving unified_intent)")
 

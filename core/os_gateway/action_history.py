@@ -31,6 +31,84 @@ class OSActionHistoryManager:
     def __init__(self, max_memory_records: int = 150):
         self._memory_cache: deque[Dict[str, Any]] = deque(maxlen=max_memory_records)
 
+    def record_action(
+        self,
+        user_id: Any = 1,
+        operation_type: str = "action",
+        capability: str = "SYSTEM",
+        target: str = "",
+        parameters: Optional[Dict[str, Any]] = None,
+        execution_method: str = "direct",
+        risk_level: str = "LOW",
+        status: str = "SUCCESS",
+        verified: bool = False,
+        result_message: str = "",
+        result_data: Optional[Dict[str, Any]] = None,
+        error_message: str = "",
+        before_state: Optional[Dict[str, Any]] = None,
+        after_state: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Directly record an action with individual field parameters."""
+        entry = {
+            "operation_id": f"act_{int(time.time()*1000)}",
+            "user_id": int(user_id) if str(user_id).isdigit() else 1,
+            "capability": str(capability),
+            "operation_type": str(operation_type),
+            "target": str(target or ""),
+            "parameters": parameters or {},
+            "execution_method": str(execution_method),
+            "risk_level": str(risk_level),
+            "status": str(status),
+            "verified": bool(verified),
+            "result_message": str(result_message or ""),
+            "result_data": result_data or {},
+            "error_message": str(error_message or ""),
+            "before_state": before_state or {},
+            "after_state": after_state or {},
+            "created_at": time.time(),
+        }
+
+        self._memory_cache.append(entry)
+
+        try:
+            from core.db_pool import get_db_pool
+            pool = get_db_pool()
+            if pool and pool.is_healthy():
+                with pool.get_cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO os_action_history (
+                            operation_id, user_id, capability, operation_type,
+                            target, parameters, execution_method, risk_level,
+                            status, verified, result_message, result_data,
+                            error_message, before_state, after_state, created_at
+                        ) VALUES (
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s, to_timestamp(%s)
+                        );
+                    """, (
+                        entry["operation_id"],
+                        entry["user_id"],
+                        entry["capability"],
+                        entry["operation_type"],
+                        entry["target"],
+                        json.dumps(entry["parameters"]),
+                        entry["execution_method"],
+                        entry["risk_level"],
+                        entry["status"],
+                        entry["verified"],
+                        entry["result_message"],
+                        json.dumps(entry["result_data"]),
+                        entry["error_message"],
+                        json.dumps(entry["before_state"]),
+                        json.dumps(entry["after_state"]),
+                        entry["created_at"],
+                    ))
+        except Exception:
+            pass
+        return True
+
     def record_operation(
         self,
         operation: OSOperation,

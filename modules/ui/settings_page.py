@@ -1,5 +1,10 @@
+# ════════════════════════════════════════════════════════════════════════
+# SUPERSEDED — This settings page was designed for the legacy HUD window.
+# Active Production Settings: modules/ui/dashboard/pages/settings_page.py
+# Preserved for reference and component compatibility.
+# ════════════════════════════════════════════════════════════════════════
 """
-Smart Assistant — Assistant Control Center (Settings)
+Smart Assistant — Legacy Settings Page (Superseded by Dashboard Settings Page)
 Distinct, comprehensive configuration hub designed around our assistant's
 real architecture: Identity & Persona, Voice & Audio, Intelligence & LLM,
 Memory & Privacy, Floating Assistant, and System Diagnostics.
@@ -79,6 +84,7 @@ class SettingsPage(QWidget):
         ("Appearance & Colors", "appearance"),
         ("Voice & Audio", "voice"),
         ("Intelligence & LLM", "intelligence"),
+        ("API Keys & Integrations", "api_keys"),
         ("Memory & Privacy", "memory"),
         ("Floating Assistant", "floating"),
         ("Diagnostics & Health", "diagnostics")
@@ -159,6 +165,7 @@ class SettingsPage(QWidget):
         self._appearance_page  = self._build_appearance_page()
         self._voice_page       = self._build_voice_page()
         self._intelligence_page= self._build_intelligence_page()
+        self._api_keys_page    = self._build_api_keys_page()
         self._memory_page      = self._build_memory_page()
         self._floating_page    = self._build_floating_page()
         self._diagnostics_page = self._build_diagnostics_page()
@@ -167,6 +174,7 @@ class SettingsPage(QWidget):
         self._stack.addWidget(self._appearance_page)
         self._stack.addWidget(self._voice_page)
         self._stack.addWidget(self._intelligence_page)
+        self._stack.addWidget(self._api_keys_page)
         self._stack.addWidget(self._memory_page)
         self._stack.addWidget(self._floating_page)
         self._stack.addWidget(self._diagnostics_page)
@@ -1844,7 +1852,165 @@ class SettingsPage(QWidget):
         return w
 
     # ─────────────────────────────────────────────────────────────────────────
-    # 4. MEMORY & PRIVACY
+    # 4. API KEYS & INTEGRATIONS
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build_api_keys_page(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(Spacing.XL, Spacing.LG, Spacing.XL, Spacing.LG)
+        lay.setSpacing(Spacing.MD)
+
+        lay.addWidget(_section_header("API Keys & Integrations", "Secure per-user credential vault protected by Windows DPAPI"))
+
+        card = _control_card()
+        c_lay = QVBoxLayout(card)
+        c_lay.setSpacing(Spacing.MD)
+
+        info = QLabel(
+            "Every user configures their own credentials. Keys are encrypted and isolated per user profile. "
+            "Optional services can be left unconfigured without affecting unrelated features."
+        )
+        info.setWordWrap(True)
+        info.setFont(QFont(F.PRIMARY, 10))
+        info.setStyleSheet(f"color: {C.TEXT_MED};")
+        c_lay.addWidget(info)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        scroll_w = QWidget()
+        scroll_lay = QVBoxLayout(scroll_w)
+        scroll_lay.setContentsMargins(0, 0, 0, 0)
+        scroll_lay.setSpacing(10)
+
+        providers = [
+            ("groq", "Groq Cloud (Fast LLM)", "Inference"),
+            ("openai", "OpenAI (GPT-4o, GPT-3.5)", "Inference"),
+            ("gemini", "Google Gemini", "Inference"),
+            ("ollama", "Ollama (Offline Daemon)", "Local Inference"),
+            ("serpapi", "SerpAPI (Google Search)", "Web Search"),
+            ("tavily", "Tavily Search", "Web Search"),
+            ("email", "Email Integration", "SMTP / IMAP"),
+            ("openweather", "OpenWeatherMap", "Weather"),
+            ("tmdb", "TMDB Movies", "Recommendations"),
+            ("calendarific", "Calendarific", "Holidays"),
+            ("deepseek", "DeepSeek", "Inference"),
+            ("anthropic", "Anthropic Claude", "Inference"),
+            ("huggingface", "HuggingFace", "Inference"),
+        ]
+
+        self._legacy_key_inputs = {}
+        for pid, name, cat in providers:
+            p_card = _control_card()
+            p_lay = QVBoxLayout(p_card)
+            p_lay.setContentsMargins(8, 8, 8, 8)
+            p_lay.setSpacing(6)
+
+            h_top = QHBoxLayout()
+            lbl = QLabel(f"<b>{name}</b> <span style='color:{C.TEXT_MUTED};'>({cat})</span>")
+            lbl.setFont(QFont(F.PRIMARY, 10))
+            lbl.setStyleSheet(f"color: {C.TEXT};")
+            h_top.addWidget(lbl)
+
+            st_lbl = QLabel("Checking...")
+            st_lbl.setFont(QFont(F.PRIMARY, 9))
+            st_lbl.setStyleSheet(f"color: {C.ACCENT_CYAN};")
+            h_top.addWidget(st_lbl)
+            h_top.addStretch()
+            p_lay.addLayout(h_top)
+
+            h_ctrl = QHBoxLayout()
+            inp = QLineEdit()
+            inp.setEchoMode(QLineEdit.EchoMode.Password)
+            inp.setPlaceholderText("Enter API key...")
+            inp.setFont(F.mono(9))
+            inp.setStyleSheet(f"""
+                QLineEdit {{
+                    background: rgba(14, 20, 27, 0.9);
+                    color: {C.TEXT};
+                    border: 1px solid rgba(255, 255, 255, 0.15);
+                    border-radius: 4px;
+                    padding: 4px 6px;
+                }}
+            """)
+            h_ctrl.addWidget(inp, 1)
+
+            eye = QPushButton("👁")
+            eye.setFixedSize(28, 28)
+            eye.clicked.connect(lambda _, field=inp: field.setEchoMode(
+                QLineEdit.EchoMode.Normal if field.echoMode() == QLineEdit.EchoMode.Password else QLineEdit.EchoMode.Password
+            ))
+            h_ctrl.addWidget(eye)
+
+            test_b = QPushButton("Test")
+            test_b.setFont(QFont(F.PRIMARY, 9, QFont.Weight.Medium))
+            test_b.setStyleSheet(f"background: rgba(0, 212, 255, 0.15); color: {C.ACCENT_CYAN}; border: 1px solid rgba(0, 212, 255, 0.3); border-radius: 4px; padding: 4px 8px;")
+            h_ctrl.addWidget(test_b)
+
+            save_b = QPushButton("Save")
+            save_b.setFont(QFont(F.PRIMARY, 9, QFont.Weight.Medium))
+            save_b.setStyleSheet("background: rgba(74, 222, 128, 0.2); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.4); border-radius: 4px; padding: 4px 8px;")
+            h_ctrl.addWidget(save_b)
+
+            del_b = QPushButton("Remove")
+            del_b.setFont(QFont(F.PRIMARY, 9, QFont.Weight.Medium))
+            del_b.setStyleSheet("background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 4px; padding: 4px 8px;")
+            h_ctrl.addWidget(del_b)
+            p_lay.addLayout(h_ctrl)
+
+            fb = QLabel("")
+            fb.setFont(QFont(F.PRIMARY, 8))
+            p_lay.addWidget(fb)
+
+            # Connect actions
+            def make_test(p=pid, f=inp, msg=fb):
+                def do_test():
+                    msg.setText("Testing…")
+                    from modules.ui.dashboard.service_adapters import test_api_credential
+                    res = test_api_credential(p, candidate_key=f.text().strip() or None)
+                    msg.setText(res.get("message", "Done"))
+                    msg.setStyleSheet("color: #4ade80;" if res.get("success") else "color: #ef4444;")
+                return do_test
+            test_b.clicked.connect(make_test())
+
+            def make_save(p=pid, f=inp, msg=fb, status_label=st_lbl):
+                def do_save():
+                    val = f.text().strip()
+                    if not val and p != "ollama": return
+                    from modules.ui.dashboard.service_adapters import save_api_credential
+                    ok = save_api_credential(p, val)
+                    msg.setText("Saved!" if ok else "Failed.")
+                    msg.setStyleSheet("color: #4ade80;" if ok else "color: #ef4444;")
+                    if ok:
+                        f.clear()
+                        status_label.setText("Configured")
+                        status_label.setStyleSheet("color: #4ade80;")
+                return do_save
+            save_b.clicked.connect(make_save())
+
+            def make_del(p=pid, f=inp, msg=fb, status_label=st_lbl):
+                def do_del():
+                    from modules.ui.dashboard.service_adapters import delete_api_credential
+                    ok = delete_api_credential(p)
+                    msg.setText("Removed." if ok else "Failed.")
+                    msg.setStyleSheet("color: #8fa0b5;")
+                    if ok:
+                        status_label.setText("Not Configured")
+                        status_label.setStyleSheet("color: #ffa500;")
+                return do_del
+            del_b.clicked.connect(make_del())
+
+            scroll_lay.addWidget(p_card)
+            self._legacy_key_inputs[pid] = (st_lbl, inp, fb)
+
+        scroll.setWidget(scroll_w)
+        c_lay.addWidget(scroll)
+
+        lay.addWidget(card)
+        return w
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 5. MEMORY & PRIVACY
     # ─────────────────────────────────────────────────────────────────────────
     def _build_memory_page(self) -> QWidget:
         w = QWidget()

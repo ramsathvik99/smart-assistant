@@ -213,20 +213,48 @@ class VisualResponsePanel(QWidget):
         if response.response_type in (
             VisualResponseType.PAIRING_CODE,
             VisualResponseType.VERIFICATION_CODE,
-            VisualResponseType.CODE
         ):
             self._primary_lbl.setFont(QFont(F.MONO, 26, QFont.Weight.Bold))
             self._primary_lbl.setStyleSheet(f"color: {self._custom_hex}; font-weight: 800; letter-spacing: 3px; padding: 4px 0;")
             self._primary_lbl.setTextFormat(Qt.TextFormat.PlainText)
             self._scroll_area.setMaximumHeight(54)
+        elif response.response_type == VisualResponseType.CODE:
+            self.setFixedWidth(460)
+            self._primary_lbl.setFont(QFont("Consolas", 10))
+            self._primary_lbl.setStyleSheet("color: #00e5ff; background: rgba(0, 0, 0, 0.4); border-radius: 4px; padding: 8px; font-family: 'Consolas', 'Courier New', monospace; line-height: 1.4;")
+            self._primary_lbl.setTextFormat(Qt.TextFormat.PlainText)
+            self._primary_lbl.setWordWrap(False)
+            self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self._scroll_area.setMaximumHeight(320)
         elif response.response_type == VisualResponseType.TABLE:
             self._primary_lbl.setFont(QFont("Consolas", 10))
             self._primary_lbl.setStyleSheet("color: #e2f1f8; padding: 2px 0; font-family: 'Consolas', 'Courier New', monospace;")
             self._primary_lbl.setTextFormat(Qt.TextFormat.PlainText)
             self._primary_lbl.setWordWrap(False)
             self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            self._scroll_area.setMaximumHeight(260)
+            self._scroll_area.setMaximumHeight(280)
             self.setFixedWidth(440)
+        elif response.response_type in (VisualResponseType.CALENDAR_EVENT, VisualResponseType.EMAIL_INFO):
+            self.setFixedWidth(400)
+            self._primary_lbl.setFont(QFont(F.PRIMARY, 10))
+            self._primary_lbl.setStyleSheet("color: #ffffff; padding: 4px 0; line-height: 1.5;")
+            self._primary_lbl.setTextFormat(Qt.TextFormat.MarkdownText)
+            self._primary_lbl.setWordWrap(True)
+            self._scroll_area.setMaximumHeight(300)
+        elif response.response_type in (
+            VisualResponseType.PROCEDURE_STEPS,
+            VisualResponseType.TECHNICAL_DETAILS,
+            VisualResponseType.LIST,
+            VisualResponseType.SEARCH_RESULTS,
+            VisualResponseType.SEARCH_RESULT,
+            VisualResponseType.KNOWLEDGE
+        ):
+            self.setFixedWidth(420)
+            self._primary_lbl.setFont(QFont(F.PRIMARY, 10))
+            self._primary_lbl.setStyleSheet("color: #e2f1f8; padding: 4px 0; line-height: 1.5;")
+            self._primary_lbl.setTextFormat(Qt.TextFormat.MarkdownText)
+            self._primary_lbl.setWordWrap(True)
+            self._scroll_area.setMaximumHeight(340)
         elif response.response_type == VisualResponseType.IP_ADDRESS:
             self._primary_lbl.setFont(QFont(F.MONO, 20, QFont.Weight.Bold))
             self._primary_lbl.setStyleSheet(f"color: #ffffff; letter-spacing: 1px; padding: 4px 0;")
@@ -238,24 +266,12 @@ class VisualResponsePanel(QWidget):
             self._primary_lbl.setTextFormat(Qt.TextFormat.PlainText)
             self._primary_lbl.setWordWrap(True)
             self._scroll_area.setMaximumHeight(90)
-        elif response.response_type in (VisualResponseType.LIST, VisualResponseType.SEARCH_RESULTS, VisualResponseType.SEARCH_RESULT):
-            self._primary_lbl.setFont(QFont(F.PRIMARY, 10))
-            self._primary_lbl.setStyleSheet("color: #e8f4f8; padding: 2px 0; line-height: 1.4;")
-            self._primary_lbl.setTextFormat(Qt.TextFormat.MarkdownText)
-            self._primary_lbl.setWordWrap(True)
-            self._scroll_area.setMaximumHeight(260)
-        elif response.response_type == VisualResponseType.KNOWLEDGE:
-            self._primary_lbl.setFont(QFont(F.PRIMARY, 10))
-            self._primary_lbl.setStyleSheet("color: #e2f1f8; padding: 2px 0; line-height: 1.5;")
-            self._primary_lbl.setTextFormat(Qt.TextFormat.MarkdownText)
-            self._primary_lbl.setWordWrap(True)
-            self._scroll_area.setMaximumHeight(260)
         else:
             self._primary_lbl.setFont(QFont(F.PRIMARY, 11, QFont.Weight.DemiBold))
             self._primary_lbl.setStyleSheet("color: #ffffff; padding: 2px 0;")
             self._primary_lbl.setTextFormat(Qt.TextFormat.MarkdownText)
             self._primary_lbl.setWordWrap(True)
-            self._scroll_area.setMaximumHeight(200)
+            self._scroll_area.setMaximumHeight(220)
 
         # Set secondary description
         if response.secondary_text:

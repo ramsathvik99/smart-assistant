@@ -39,6 +39,16 @@ SECRET_PATTERNS = [
     re.compile(r'ey[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}'), # JWT
 ]
 
+def _safe_json_dumps(obj: Any) -> str:
+    """Safely serialize data structures containing datetime, date, UUID, or custom types preserving ISO formatting."""
+    def _default_serializer(o):
+        if hasattr(o, "isoformat"):
+            return o.isoformat()
+        if isinstance(o, uuid.UUID):
+            return str(o)
+        return str(o)
+    return json.dumps(obj, default=_default_serializer)
+
 
 # ============================================================================
 # Data Models
@@ -428,20 +438,20 @@ class ExecutionExperienceManager:
                     exp.intent,
                     exp.command_signature,
                     exp.action_signature,
-                    json.dumps(redact_secrets(exp.environment_context)),
-                    json.dumps(redact_secrets(exp.expected_outcome)),
-                    json.dumps(redact_secrets(exp.observed_outcome)),
+                    _safe_json_dumps(redact_secrets(exp.environment_context)),
+                    _safe_json_dumps(redact_secrets(exp.expected_outcome)),
+                    _safe_json_dumps(redact_secrets(exp.observed_outcome)),
                     exp.verification_status,
                     exp.confidence,
                     exp.failure_classification,
                     exp.strategy_id,
                     exp.strategy_type,
-                    json.dumps(exp.attempts),
+                    _safe_json_dumps(exp.attempts),
                     exp.adaptation_attempts,
                     exp.final_status,
                     exp.duration_ms,
                     exp.created_at,
-                    json.dumps(redact_secrets(exp.metadata)),
+                    _safe_json_dumps(redact_secrets(exp.metadata)),
                 ))
             return True
         except Exception as e:

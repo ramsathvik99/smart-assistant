@@ -121,6 +121,7 @@ C.SURFACE_BG = "#070B11"           # sidebar / topbar shell
 C.PANEL_BG = "#0A1118"             # page container
 C.CARD_BG = "#0E161F"              # default card body
 C.CARD_HIGHLIGHT = "#121C27"       # elevated / hover card
+C.CARD_BG_ALT = "#121C27"          # alternate card background
 C.HIGHLIGHT_GLOW = "rgba(0, 212, 255, 0.04)"  # subtle 4% tint
 
 # -- Glass --
@@ -526,14 +527,28 @@ def clear_layout(layout):
         return
     while layout.count():
         item = layout.takeAt(0)
-        w = item.widget()
-        if w is not None:
-            w.setParent(None)
-            w.deleteLater()
-        else:
-            sub = item.layout()
-            if sub is not None:
-                clear_layout(sub)
+        if item is None:
+            continue
+        try:
+            w = item.widget()
+            if w is not None:
+                try:
+                    import sip
+                    if not sip.isdeleted(w):
+                        w.setParent(None)
+                        w.deleteLater()
+                except Exception:
+                    try:
+                        w.setParent(None)
+                        w.deleteLater()
+                    except Exception:
+                        pass
+            else:
+                sub = item.layout()
+                if sub is not None:
+                    clear_layout(sub)
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────

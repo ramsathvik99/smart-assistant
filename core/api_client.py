@@ -88,6 +88,12 @@ class SmartAssistantApiClient:
             return {"success": False, "error": str(e), "code": "CONNECTION_FAILED"}
 
     # ── Auth Endpoints ────────────────────────────────────────────────────────
+    def check_username(self, username: str) -> Dict[str, Any]:
+        return self._request("/api/auth/check-username", method="POST", payload={"username": username})
+
+    def validate_candidate_key(self, provider: str, api_key: str) -> Dict[str, Any]:
+        return self._request("/api/credentials/validate", method="POST", payload={"provider": provider, "api_key": api_key})
+
     def signup(self, username: str, password: str) -> Dict[str, Any]:
         res = self._request("/api/auth/signup", method="POST", payload={"username": username, "password": password})
         if res.get("success") and res.get("token"):
@@ -138,6 +144,28 @@ class SmartAssistantApiClient:
     # ── Health Check ──────────────────────────────────────────────────────────
     def check_health(self) -> Dict[str, Any]:
         return self._request("/api/health", method="GET")
+
+    # ── Per-User API Credentials ─────────────────────────────────────────────
+    def get_credentials_status(self) -> Dict[str, Any]:
+        return self._request("/api/credentials", method="GET")
+
+    def save_credential(self, provider: str, api_key: str) -> Dict[str, Any]:
+        return self._request("/api/credentials", method="POST", payload={"provider": provider, "api_key": api_key})
+
+    def delete_credential(self, provider: str) -> Dict[str, Any]:
+        return self._request(f"/api/credentials?provider={provider}", method="DELETE")
+
+    def test_credential(self, provider: str, api_key: Optional[str] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"provider": provider}
+        if api_key is not None:
+            payload["api_key"] = api_key
+        return self._request("/api/credentials/test", method="POST", payload=payload)
+
+    def get_api_setup_status(self) -> Dict[str, Any]:
+        return self._request("/api/credentials/setup-status", method="GET")
+
+    def set_api_setup_status(self, completed: bool = True) -> Dict[str, Any]:
+        return self._request("/api/credentials/setup-status", method="POST", payload={"completed": completed})
 
 
 # Global singleton

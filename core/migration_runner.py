@@ -46,50 +46,53 @@ def run_migrations():
 
     try:
         with pool.get_cursor() as cur:
-            # 1. Acquire advisory lock
+            locked = False
             try:
                 cur.execute("SELECT pg_advisory_lock(%s);", (MIGRATION_ADVISORY_LOCK_ID,))
+                locked = True
             except Exception as e:
                 print(f"[MIGRATIONS] [NOTICE] Advisory lock acquisition note: {e}")
 
-            # 2. Ensure tracking table exists
-            _init_migrations_table(cur)
-
-            # 3. Retrieve already applied versions
-            cur.execute("SELECT version FROM schema_migrations;")
-            applied_versions = {row[0] for row in cur.fetchall()}
-
-            # 4. Apply unapplied migrations
-            for mf in migration_files:
-                fname = os.path.basename(mf)
-                if fname in applied_versions:
-                    continue  # Already applied
-
-                with open(mf, "r", encoding="utf-8") as f:
-                    sql_content = f.read()
-
-                if not sql_content.strip():
-                    continue
-
-                checksum = hashlib.sha256(sql_content.encode("utf-8")).hexdigest()
-
-                try:
-                    cur.execute(sql_content)
-                    cur.execute("""
-                        INSERT INTO schema_migrations (version, checksum)
-                        VALUES (%s, %s)
-                        ON CONFLICT (version) DO NOTHING;
-                    """, (fname, checksum))
-                    print(f"[MIGRATIONS] [APPLIED] Migration {fname} applied successfully.")
-                except Exception as e:
-                    print(f"[MIGRATIONS] [ERROR] Migration {fname} failed: {e}")
-                    raise
-
-            # 5. Release advisory lock
             try:
-                cur.execute("SELECT pg_advisory_unlock(%s);", (MIGRATION_ADVISORY_LOCK_ID,))
-            except Exception:
-                pass
+                # 2. Ensure tracking table exists
+                _init_migrations_table(cur)
+
+                # 3. Retrieve already applied versions
+                cur.execute("SELECT version FROM schema_migrations;")
+                applied_versions = {row[0] for row in cur.fetchall()}
+
+                # 4. Apply unapplied migrations
+                for mf in migration_files:
+                    fname = os.path.basename(mf)
+                    if fname in applied_versions:
+                        continue  # Already applied
+
+                    with open(mf, "r", encoding="utf-8") as f:
+                        sql_content = f.read()
+
+                    if not sql_content.strip():
+                        continue
+
+                    checksum = hashlib.sha256(sql_content.encode("utf-8")).hexdigest()
+
+                    try:
+                        cur.execute(sql_content)
+                        cur.execute("""
+                            INSERT INTO schema_migrations (version, checksum)
+                            VALUES (%s, %s)
+                            ON CONFLICT (version) DO NOTHING;
+                        """, (fname, checksum))
+                        print(f"[MIGRATIONS] [APPLIED] Migration {fname} applied successfully.")
+                    except Exception as e:
+                        print(f"[MIGRATIONS] [ERROR] Migration {fname} failed: {e}")
+                        raise
+            finally:
+                # 5. Always release advisory lock
+                if locked:
+                    try:
+                        cur.execute("SELECT pg_advisory_unlock(%s);", (MIGRATION_ADVISORY_LOCK_ID,))
+                    except Exception:
+                        pass
 
     except Exception as e:
         print(f"[MIGRATIONS] [WARN] Migration runner encountered error: {e}")

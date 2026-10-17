@@ -15,7 +15,7 @@ import time
 import uuid
 from enum import Enum
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Tuple, Set, Callable
 
 
 class VisualResponseType(str, Enum):
@@ -38,6 +38,10 @@ class VisualResponseType(str, Enum):
     TASK_STATUS = "TASK_STATUS"
     DOCUMENT_INFO = "DOCUMENT_INFO"
     GENERIC_RESULT = "GENERIC_RESULT"
+    CALENDAR_EVENT = "CALENDAR_EVENT"
+    EMAIL_INFO = "EMAIL_INFO"
+    PROCEDURE_STEPS = "PROCEDURE_STEPS"
+    TECHNICAL_DETAILS = "TECHNICAL_DETAILS"
 
 
 @dataclass
@@ -145,6 +149,195 @@ class VisualResponse:
             metadata=data.get("metadata", {})
         )
 
+    @classmethod
+    def for_text(
+        cls,
+        text: str,
+        title: str = "DETAILS",
+        description: str = "",
+        user_id: str = "default",
+        **kwargs
+    ) -> 'VisualResponse':
+        clean_text = str(text or "").strip()
+        r_type = kwargs.pop("response_type", VisualResponseType.KNOWLEDGE)
+        return cls(
+            response_id=str(uuid.uuid4())[:8],
+            user_id=str(user_id),
+            response_type=r_type,
+            title=title.upper(),
+            primary_value=clean_text,
+            secondary_text=description or "Information display.",
+            raw_content={"text": clean_text},
+            actions=[VisualResponseAction(label="Copy", action_type="copy", payload=clean_text)],
+            created_at=time.time(),
+            ttl_seconds=600.0,
+            source_context="text_details",
+            **kwargs
+        )
+
+    @classmethod
+    def for_file_path(
+        cls,
+        path: str,
+        title: str = "FILE PATH",
+        description: str = "",
+        user_id: str = "default",
+        **kwargs
+    ) -> 'VisualResponse':
+        clean_path = str(path or "").strip()
+        return cls(
+            response_id=str(uuid.uuid4())[:8],
+            user_id=str(user_id),
+            response_type=VisualResponseType.FILE_PATH,
+            title=title.upper(),
+            primary_value=clean_path,
+            secondary_text=description or "File system path.",
+            raw_content={"path": clean_path},
+            actions=[
+                VisualResponseAction(label="Open", action_type="open_file", payload=clean_path),
+                VisualResponseAction(label="Copy", action_type="copy", payload=clean_path)
+            ],
+            created_at=time.time(),
+            ttl_seconds=600.0,
+            source_context="file_details",
+            **kwargs
+        )
+
+    @classmethod
+    def for_code(
+        cls,
+        code: str,
+        title: str = "CODE",
+        language: str = "",
+        user_id: str = "default",
+        **kwargs
+    ) -> 'VisualResponse':
+        clean_code = str(code or "").strip()
+        return cls(
+            response_id=str(uuid.uuid4())[:8],
+            user_id=str(user_id),
+            response_type=VisualResponseType.CODE,
+            title=title.upper(),
+            primary_value=clean_code,
+            secondary_text=f"Language: {language}" if language else "Technical code snippet.",
+            raw_content={"code": clean_code, "language": language},
+            actions=[VisualResponseAction(label="Copy", action_type="copy", payload=clean_code)],
+            created_at=time.time(),
+            ttl_seconds=600.0,
+            source_context="code_snippet",
+            **kwargs
+        )
+
+    @classmethod
+    def for_steps(
+        cls,
+        steps: Union[List[str], str],
+        title: str = "PROCEDURE STEPS",
+        user_id: str = "default",
+        **kwargs
+    ) -> 'VisualResponse':
+        if isinstance(steps, list):
+            formatted_steps = "\n".join(f"{i+1}. {s}" if not re.match(r'^\d+\.', s.strip()) else s for i, s in enumerate(steps))
+        else:
+            formatted_steps = str(steps).strip()
+        return cls(
+            response_id=str(uuid.uuid4())[:8],
+            user_id=str(user_id),
+            response_type=VisualResponseType.PROCEDURE_STEPS,
+            title=title.upper(),
+            primary_value=formatted_steps,
+            secondary_text="Step-by-step procedure.",
+            raw_content={"steps": steps},
+            actions=[VisualResponseAction(label="Copy", action_type="copy", payload=formatted_steps)],
+            created_at=time.time(),
+            ttl_seconds=600.0,
+            source_context="procedure_steps",
+            **kwargs
+        )
+
+    @classmethod
+    def for_calendar_event(
+        cls,
+        event: Dict[str, Any],
+        title: str = "CALENDAR EVENT",
+        user_id: str = "default",
+        **kwargs
+    ) -> 'VisualResponse':
+        ev_title = event.get("title") or event.get("summary") or event.get("event_name") or "Calendar Event"
+        ev_date = event.get("date") or event.get("start_date") or event.get("event_date") or ""
+        ev_time = event.get("time") or event.get("start_time") or ""
+        ev_end_time = event.get("end_time") or ""
+        ev_loc = event.get("location") or "No location specified"
+        ev_desc = event.get("description") or event.get("notes") or ""
+        ev_attendees = event.get("attendees") or event.get("participants") or []
+        if isinstance(ev_attendees, list):
+            attendees_str = ", ".join(str(a) for a in ev_attendees) if ev_attendees else ""
+        else:
+            attendees_str = str(ev_attendees)
+
+        time_display = f"{ev_date} at {ev_time}" if (ev_date and ev_time) else (ev_date or ev_time or "Scheduled")
+        if ev_end_time:
+            time_display += f" – {ev_end_time}"
+
+        lines = [f"### 📅 {ev_title}"]
+        lines.append(f"• **When:** {time_display}")
+        if ev_loc and ev_loc != "No location specified":
+            lines.append(f"• **Where:** {ev_loc}")
+        if attendees_str:
+            lines.append(f"• **Attendees:** {attendees_str}")
+        if ev_desc:
+            lines.append(f"• **Details:** {ev_desc}")
+
+        primary_val = "\n".join(lines)
+        return cls(
+            response_id=str(uuid.uuid4())[:8],
+            user_id=str(user_id),
+            response_type=VisualResponseType.CALENDAR_EVENT,
+            title=title.upper() if title != "CALENDAR EVENT" else f"EVENT: {ev_title.upper()[:25]}",
+            primary_value=primary_val,
+            secondary_text=f"Calendar: {time_display}",
+            raw_content=event,
+            actions=[VisualResponseAction(label="Copy", action_type="copy", payload=primary_val)],
+            created_at=time.time(),
+            ttl_seconds=600.0,
+            source_context="calendar_event_details",
+            **kwargs
+        )
+
+    @classmethod
+    def for_email(
+        cls,
+        email_data: Dict[str, Any],
+        title: str = "EMAIL DETAILS",
+        user_id: str = "default",
+        **kwargs
+    ) -> 'VisualResponse':
+        subj = email_data.get("subject") or "No Subject"
+        sender = email_data.get("sender") or email_data.get("from") or "Unknown Sender"
+        date_str = email_data.get("date") or email_data.get("time") or ""
+        body = email_data.get("body") or email_data.get("snippet") or email_data.get("preview") or ""
+        lines = [f"### ✉️ {subj}"]
+        lines.append(f"• **From:** {sender}")
+        if date_str:
+            lines.append(f"• **Date:** {date_str}")
+        if body:
+            lines.append(f"• **Content:**\n{body[:350]}")
+        primary_val = "\n".join(lines)
+        return cls(
+            response_id=str(uuid.uuid4())[:8],
+            user_id=str(user_id),
+            response_type=VisualResponseType.EMAIL_INFO,
+            title=title.upper(),
+            primary_value=primary_val,
+            secondary_text=f"From: {sender}",
+            raw_content=email_data,
+            actions=[VisualResponseAction(label="Copy", action_type="copy", payload=primary_val)],
+            created_at=time.time(),
+            ttl_seconds=600.0,
+            source_context="email_details",
+            **kwargs
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SENSITIVE DATA DETECTION & FILTERING
@@ -180,16 +373,30 @@ def contains_sensitive_data(text_or_dict: Union[str, Dict[str, Any]]) -> bool:
 # EXPLICIT "SHOW ME" & VISUAL PRESENTATION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 _EXPLICIT_SHOW_PATTERNS = [
-    r'\b(?:show\s+me\s+the\s+details|show\s+me\s+details|show\s+the\s+details|open\s+the\s+details|open\s+details)\b',
+    r'\b(?:show\s+me\s+the\s+details|show\s+me\s+details|show\s+the\s+details|open\s+the\s+details(?:\s+box)?|open\s+details(?:\s+box)?|details\s+box)\b',
+    r'\b(?:show\s+all\s+(?:the\s+)?information|show\s+all\s+info|show\s+the\s+information|show\s+info)\b',
+    r'\b(?:display\s+(?:the\s+)?complete\s+explanation|display\s+(?:the\s+)?explanation|complete\s+explanation)\b',
+    r'\b(?:show\s+(?:the\s+)?full\s+steps|show\s+the\s+steps|full\s+steps|step\s+by\s+step\s+details)\b',
+    r'\b(?:put\s+(?:that|it|this)\s+on\s+(?:the\s+)?screen|on\s+(?:the\s+)?screen|on\s+my\s+screen|visually|on\s+display)\b',
+    r'\b(?:i\s+didn\'?t\s+understand\s+everything[;,]?\s*show\s+me|didn\'?t\s+understand\s+everything\s+show\s+me)\b',
+    r'\b(?:show\s+(?:the\s+)?technical\s+details|technical\s+details|expand\s+that(?:\s+information)?|expand\s+details)\b',
+    r'\b(?:can\s+you\s+)?show\s+what\s+you\s+(?:just\s+)?(?:explained|said|told\s+me)\b',
     r'\b(?:show\s+that\s+again|show\s+that|show\s+it\s+again|show\s+it|display\s+that\s+again|display\s+that|bring\s+that\s+back|bring\s+it\s+back)\b',
     r'\b(?:display\s+(?:the\s+)?result|show\s+(?:the\s+)?result|visualize\s+this|visualize\s+that|visualize\b|what\s+does\s+this\s+look\s+like\??)\b',
-    r'\b(?:show\s+me\s+the\s+information|show\s+the\s+information|show\s+me\s+the\s+info|show\s+info)\b',
-    r'\b(?:on\s+(?:the\s+)?screen|on\s+my\s+screen|visually|on\s+display)\b',
-    r'\b(?:put\s+(?:that\s+)?on\s+screen|let\s+me\s+see\s+(?:it|that|the|this))\b',
+    r'\b(?:show\s+me\s+the\s+information|show\s+me\s+the\s+info)\b',
+    r'\b(?:let\s+me\s+see\s+(?:it|that|the|this))\b',
     r'\b(?:show\s+visual\s+response|visual\s+surface|visual\s+response)\b',
     r'\b(?:open\s+(?:the\s+)?dashboard|show\s+(?:the\s+)?dashboard|show\s+(?:the\s+)?assistant\s+panel|open\s+system\s+monitor)\b',
     r'\b(?:show|display)\s+(?:my\s+|the\s+)?(?:cpu(?:\s+usage)?|system\s+stat(?:istic)?s?|calendar|files|route|graph|chart|calculation|table|pairing\s+code|code)\b',
     r'\b(?:show\s+me\s+something\s+visual|make\s+it\s+visual)\b',
+    # Multilingual: Telugu
+    r'(?:వివరాలు\s+చూపించు|వివరాలను\s+చూపించు|స్క్రీన్‌పై\s+చూపించు|పూర్తి\s+వివరణ\s+చూపించు|మొత్తం\s+సమాచారం\s+చూపించు|వివరాల\s+పెట్టె)',
+    # Multilingual: Hindi
+    r'(?:विवरण\s+दिखाएं|विवरण\s+दिखाओ|पूरी\s+जानकारी\s+दिखाओ|स्क्रीन\s+पर\s+दिखाओ|पूरा\s+विवरण\s+दिखाओ|डिटेल्स\s+दिखाओ)',
+    # Multilingual: Tamil
+    r'(?:விவரங்களை\s+காட்டு|முழு\s+விளக்கத்தை\s+காட்டு|திரையில்\s+காட்டு)',
+    # Multilingual: Spanish
+    r'(?:muestra\s+los\s+detalles|mostrar\s+detalles|abrir\s+la\s+caja\s+de\s+detalles|muestra\s+toda\s+la\s+informaci[oó]n|pon\s+eso\s+en\s+la\s+pantalla)',
 ]
 
 def is_explicit_visual_request(user_input: str) -> bool:
@@ -208,6 +415,84 @@ def is_explicit_visual_request(user_input: str) -> bool:
     return False
 
 
+def is_complex_or_information_dense(
+    text: str,
+    result: Any = None,
+    intent: Any = None
+) -> Tuple[bool, str, VisualResponseType]:
+    """
+    Evaluates whether response content is especially important, complex, technical,
+    information-dense, multi-step, or difficult to retain from speech alone.
+
+    Returns (is_complex, reason, suggested_response_type).
+    """
+    if not text and not result:
+        return False, "", VisualResponseType.GENERIC_RESULT
+
+    raw_str = ""
+    if isinstance(text, str):
+        raw_str = text.strip()
+    elif isinstance(result, dict):
+        raw_str = str(result.get("response") or result.get("message") or result.get("primary_value") or "").strip()
+    elif result:
+        raw_str = str(result).strip()
+
+    if not raw_str:
+        return False, "", VisualResponseType.GENERIC_RESULT
+
+    # Hard exclusions for trivial / casual output
+    if raw_str.lower() in ("done.", "done", "got it.", "all set.", "hello", "hi", "hey"):
+        return False, "", VisualResponseType.GENERIC_RESULT
+
+    # 1. Multi-step procedures or numbered/bulleted action steps (>= 3 steps)
+    numbered_steps = re.findall(r'(?:^|\n)\s*(?:\d+[\.\)]|step\s*\d+[:\.\-])\s+[^\n]+', raw_str, flags=re.IGNORECASE)
+    if len(numbered_steps) >= 3:
+        return True, "multi_step_procedure", VisualResponseType.PROCEDURE_STEPS
+
+    bullet_steps = re.findall(r'(?:^|\n)\s*[\*\-\•]\s+[^\n]+', raw_str)
+    if len(bullet_steps) >= 4:
+        return True, "structured_bullet_list", VisualResponseType.LIST
+
+    # 2. Programming Code, Shell Commands, Scripts, or Config Blocks
+    if "```" in raw_str:
+        return True, "code_block", VisualResponseType.CODE
+
+    command_patterns = [
+        r'\b(?:sudo|systemctl|docker|kubectl|git|pip|npm|npx|apt-get|brew|curl|wget)\s+[a-zA-Z0-9_\-\.\/]+',
+        r'\b(?:reg\s+add|netsh|powershell|cmd\.exe|chmod|chown)\s+',
+        r'(?:SELECT\s+.+\s+FROM\s+.+|INSERT\s+INTO\s+|UPDATE\s+.+\s+SET\s+)',
+        r'(?:def\s+[a-zA-Z_]\w*\(|class\s+[a-zA-Z_]\w*\(|function\s+[a-zA-Z_]\w*\(|import\s+[a-zA-Z_]\w*)',
+    ]
+    for cp in command_patterns:
+        if re.search(cp, raw_str, re.IGNORECASE):
+            return True, "technical_command_or_code", VisualResponseType.CODE
+
+    # 3. Mathematical formulas / complex equations / configuration syntax
+    if re.search(r'[\w]+\s*=\s*[\w\+\-\*\/\^\(\)\.\s]{6,}', raw_str) and any(m in raw_str.lower() for m in ["formula", "equation", "calculate", "algorithm", "integral", "derivative", "sqrt"]):
+        return True, "mathematical_formula", VisualResponseType.TECHNICAL_DETAILS
+
+    # 4. High Information Density (Multiple exact dates, times, amounts, or structured metrics)
+    date_matches = re.findall(r'\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?|\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b', raw_str, re.IGNORECASE)
+    currency_matches = re.findall(r'[\$€£₹]\s*\d+(?:,\d{3})*(?:\.\d{2})?', raw_str)
+    if len(date_matches) >= 3 or (len(date_matches) >= 2 and len(currency_matches) >= 1):
+        return True, "dense_dates_or_amounts", VisualResponseType.LIST
+
+    # 5. Long, information-dense technical explanation
+    words = raw_str.split()
+    tech_terms = [
+        "architecture", "protocol", "latency", "concurrency", "asynchronous",
+        "microservice", "infrastructure", "kubernetes", "docker", "encryption",
+        "authentication", "authorization", "database", "postgresql", "index",
+        "algorithm", "bandwidth", "throughput", "parameter", "configuration",
+        "compiler", "dependency", "deployment", "repository", "pipeline"
+    ]
+    tech_count = sum(1 for term in tech_terms if term in raw_str.lower())
+    if (len(words) >= 30 and tech_count >= 3) or (len(words) >= 50 and tech_count >= 2) or (len(words) >= 60 and tech_count >= 1):
+        return True, "complex_technical_explanation", VisualResponseType.TECHNICAL_DETAILS
+
+    return False, "", VisualResponseType.GENERIC_RESULT
+
+
 def should_show_visual_surface(
     intent: Any = None,
     response_type: Any = None,
@@ -219,18 +504,17 @@ def should_show_visual_surface(
 
     Default policy:
         Voice response + Normal chat feed + NO popup.
-    The detailed visual surface should ONLY open when there is a genuine reason:
+    The detailed visual surface opens when:
     1. User explicitly asks to see something ("show me details", "show that", "display result", "visualize this", etc.)
-    2. Visual information is inherently useful ("show CPU usage", "show system stats", pairing code, verification code)
-    3. Large structured output (TABLE, graph, chart, system dashboard)
-    4. Explicit UI/dashboard requests ("open dashboard", "show assistant panel", "system monitor")
+    2. Proactive display: response is complex, technical, multi-step, code, or information-dense
+    3. Visual information is inherently useful ("show CPU usage", pairing code, verification code)
+    4. Large structured output (TABLE, graph, chart, system dashboard)
+    5. Explicit UI/dashboard requests ("open dashboard", "show assistant panel", "system monitor")
 
     The visual surface must NEVER appear for:
-    - Ordinary conversation: "hello", "how are you?", "what is your name?", "what are you doing?", "what do you want to do?"
-    - Normal questions: "what is Python?", "explain machine learning", "why is this happening?", "how does this work?"
-    - Recommendations: "what should I work on?", "what should I study?", "recommend something", "what should I do next?"
-    - Simple actions: "open YouTube", "open Chrome", "increase volume", "decrease brightness", "mute", "pause", "play"
+    - Ordinary conversation: "hello", "how are you?", "what is your name?", "what are you doing?"
     - Simple confirmations: "Done.", "Opening YouTube.", "Volume increased.", "Got it.", "All set."
+    - Simple actions: "open YouTube", "open Chrome", "increase volume", "mute", "pause", "play"
     """
     req_raw = str(user_request or "").strip()
     req_low = req_raw.lower()
@@ -253,7 +537,7 @@ def should_show_visual_surface(
         cleaned_req = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+)+', '', cleaned_req).strip()
         cleaned_req = cleaned_req.rstrip("?.!")
 
-    # ── 1. HARD EXCLUSIONS (Must never pop up) ───────────────────────────────
+    # ── 1. HARD EXCLUSIONS (Must never pop up unless explicit visual request) ──
 
     # Simple confirmations / short status
     CONFIRMATIONS = {"done.", "done", "got it.", "got it", "all set.", "all set", "opening youtube.", "volume increased.", "volume decreased.", "muted.", "unmuted.", "paused.", "playing."}
@@ -274,14 +558,20 @@ def should_show_visual_surface(
         return False
 
     if intent_str in ("GENERAL_CONVERSATION", "CONVERSATION", "GREETING", "CASUAL_CHAT") and not is_explicit_visual_request(req_raw):
-        return False
+        is_comp, _, _ = is_complex_or_information_dense(resp_text, result, intent)
+        if not is_comp:
+            return False
 
     # Recommendations
     if intent_str in ("RECOMMENDATION", "RECOMMEND") and not is_explicit_visual_request(req_raw):
-        return False
+        is_comp, _, _ = is_complex_or_information_dense(resp_text, result, intent)
+        if not is_comp:
+            return False
     if cleaned_req.startswith(("what should i", "what can i", "recommend ", "suggest ", "what do you recommend", "what do you suggest", "what should we")):
         if not is_explicit_visual_request(req_raw):
-            return False
+            is_comp, _, _ = is_complex_or_information_dense(resp_text, result, intent)
+            if not is_comp:
+                return False
 
     # Simple actions
     SIMPLE_ACTIONS = ("open youtube", "open chrome", "open edge", "open spotify", "open calculator", "increase volume", "decrease volume", "mute", "unmute", "pause", "play", "skip", "stop", "volume up", "volume down")
@@ -298,7 +588,9 @@ def should_show_visual_surface(
         "how can ", "can you explain "
     )
     if any(cleaned_req.startswith(k) for k in KNOWLEDGE_STARTS) and not is_explicit_visual_request(req_raw):
-        return False
+        is_comp, _, _ = is_complex_or_information_dense(resp_text, result, intent)
+        if not is_comp:
+            return False
 
     # ── 2. ALLOWED VISUAL CONDITIONS ──────────────────────────────────────────
 
@@ -306,13 +598,15 @@ def should_show_visual_surface(
     if is_explicit_visual_request(req_raw):
         return True
 
-    # Condition B: Inherently visual entity (Pairing code / Verification code / Table)
-    if resp_type_str in ("PAIRING_CODE", "VERIFICATION_CODE", "TABLE"):
+    # Condition B: Inherently visual entity (Pairing code / Verification code / Table / Task / Calendar / Email / Code)
+    if resp_type_str in ("PAIRING_CODE", "VERIFICATION_CODE", "TABLE", "TASK_STATUS", "CALENDAR_EVENT", "EMAIL_INFO", "DEVICE_INFO", "PROCEDURE_STEPS", "TECHNICAL_DETAILS", "CODE"):
         return True
 
-    # Condition C: Explicitly structured table / graph / chart payload
+    # Condition C: Explicitly structured table / graph / chart payload or Task / Calendar / Email
     if isinstance(result, dict):
         if result.get("table") or result.get("chart") or result.get("graph") or result.get("matrix"):
+            return True
+        if result.get("task_id") or result.get("calendar_event") or result.get("email"):
             return True
         if resp_type_str == "TABLE":
             return True
@@ -321,6 +615,11 @@ def should_show_visual_surface(
     if intent_str in ("VISUAL_SURFACE", "DASHBOARD", "SYSTEM_MONITOR"):
         if any(cleaned_req.startswith(k) for k in KNOWLEDGE_STARTS) or any(cleaned_req.startswith(c) for c in CONV_STARTS):
             return False
+        return True
+
+    # Condition E: Proactive display for important, complex, technical, or information-dense content
+    is_comp, _, _ = is_complex_or_information_dense(resp_text, result, intent)
+    if is_comp:
         return True
 
     # Default UI policy: NO popup
@@ -633,8 +932,9 @@ def detect_visual_response(
         )
 
     # 4. URL / WEB LINK
+    is_dense_or_steps, _, _ = is_complex_or_information_dense(response_text, result_dict)
     url_val = result_dict.get("url")
-    if not url_val:
+    if not url_val and not is_dense_or_steps:
         m_url = re.search(r'(https?://[^\s<>"]+)', response_text)
         if m_url:
             url_val = m_url.group(1)
@@ -749,24 +1049,55 @@ def detect_visual_response(
             related_goal_id=goal_id
         )
 
-    # 8. TASK QUEUE / STATUS
+    # 8. TASK QUEUE / STATUS (Distinguish pending vs confirmed)
     if result_dict.get("task_id"):
         t_id = str(result_dict["task_id"])
         t_goal = result_dict.get("goal") or user_input
+        is_pending = status in ("running", "in_progress", "pending", "executing") or result_dict.get("pending") is True or result_dict.get("verified") is False
+        title_txt = f"TASK #{t_id} (IN PROGRESS)" if is_pending else f"TASK #{t_id}"
+        sec_txt = f"Goal: {t_goal} [PENDING CONFIRMATION]" if is_pending else f"Goal: {t_goal} [CONFIRMED]"
+        status_val = "Pending verification..." if is_pending else "Completed."
         return VisualResponse(
             response_id=resp_id,
             user_id=str(user_id),
             response_type=VisualResponseType.TASK_STATUS,
-            title="TASK STATUS",
-            primary_value=f"Task #{t_id}",
-            secondary_text=f"Goal: {t_goal}",
-            raw_content={"task_id": t_id, "goal": t_goal},
+            title=title_txt,
+            primary_value=f"Task #{t_id}: {status_val}",
+            secondary_text=sec_txt,
+            raw_content={"task_id": t_id, "goal": t_goal, "status": "pending" if is_pending else "completed"},
             actions=[VisualResponseAction(label="Copy", action_type="copy", payload=t_id)],
             created_at=now,
             ttl_seconds=600.0,
             source_context=source_context or "task_management",
             related_goal_id=goal_id
         )
+
+    # 8b. CALENDAR EVENT DETAILS
+    if (
+        result_dict.get("calendar_event")
+        or result_dict.get("event")
+        or (isinstance(result_dict.get("events"), list) and len(result_dict["events"]) == 1)
+        or result_dict.get("event_title")
+    ):
+        ev_data = result_dict.get("calendar_event") or result_dict.get("event") or (result_dict.get("events")[0] if isinstance(result_dict.get("events"), list) and result_dict["events"] else result_dict)
+        if isinstance(ev_data, dict) and any(k in ev_data for k in ["title", "summary", "event_name", "date", "start_time"]):
+            return VisualResponse.for_calendar_event(
+                ev_data,
+                user_id=str(user_id),
+                related_goal_id=goal_id,
+                source_context=source_context or "calendar_event_details"
+            )
+
+    # 8c. EMAIL DETAILS
+    if result_dict.get("email") or (isinstance(result_dict.get("emails"), list) and len(result_dict["emails"]) == 1):
+        em_data = result_dict.get("email") or (result_dict.get("emails")[0] if isinstance(result_dict.get("emails"), list) and result_dict["emails"] else result_dict)
+        if isinstance(em_data, dict) and any(k in em_data for k in ["subject", "from", "sender", "body"]):
+            return VisualResponse.for_email(
+                em_data,
+                user_id=str(user_id),
+                related_goal_id=goal_id,
+                source_context=source_context or "email_details"
+            )
 
     # 9. DEVICE INFO / BATTERY / SYSTEM STATUS
     if isinstance(result_dict, dict) and (any(k in result_dict for k in ["battery_level", "percent", "cpu_percent", "memory_percent"]) or "battery" in user_input.lower()):
@@ -821,12 +1152,18 @@ def detect_visual_response(
         elif "reminder" in req_low or "reminders" in req_low:
             resp_type = VisualResponseType.LIST
             default_title = "MY REMINDERS"
+        elif any(k in req_low for k in ["step", "steps", "procedure", "how to"]):
+            resp_type = VisualResponseType.PROCEDURE_STEPS
+            default_title = "STEP-BY-STEP PROCEDURE"
+        elif any(k in req_low for k in ["technical", "code", "command"]):
+            resp_type = VisualResponseType.TECHNICAL_DETAILS
+            default_title = "TECHNICAL DETAILS"
         elif "\n" in response_text and ("•" in response_text or "-" in response_text or re.search(r'^\s*\d+\.', response_text, re.MULTILINE)):
             resp_type = VisualResponseType.LIST
-            default_title = "LIST"
+            default_title = "DETAILS"
         else:
             resp_type = VisualResponseType.KNOWLEDGE
-            default_title = "KNOWLEDGE"
+            default_title = "DETAILS"
 
         title_str = extract_visual_title(user_input, response_text, default=default_title)
         formatted_val = format_knowledge_content(response_text)
@@ -845,7 +1182,27 @@ def detect_visual_response(
             related_goal_id=goal_id
         )
 
-    # 12. AUTOMATIC MULTI-LINE / STRUCTURED TEXT (Only for genuinely structured tables or explicit visual requests)
+    # 12. PROACTIVE DISPLAY FOR COMPLEX, TECHNICAL, OR INFORMATION-DENSE RESPONSES
+    is_comp, comp_reason, comp_type = is_complex_or_information_dense(response_text, result_dict)
+    if is_comp:
+        title_str = extract_visual_title(user_input, response_text, default=comp_type.value)
+        formatted_val = format_knowledge_content(response_text)
+        return VisualResponse(
+            response_id=resp_id,
+            user_id=str(user_id),
+            response_type=comp_type,
+            title=title_str,
+            primary_value=formatted_val,
+            secondary_text="Important details displayed for visual reference.",
+            raw_content=result_dict,
+            actions=[VisualResponseAction(label="Copy", action_type="copy", payload=formatted_val)],
+            created_at=now,
+            ttl_seconds=600.0,
+            source_context=source_context or f"proactive_{comp_reason}",
+            related_goal_id=goal_id
+        )
+
+    # 13. AUTOMATIC MULTI-LINE / STRUCTURED TEXT (Tables or multi-column data)
     if "\n" in response_text and len(response_text.splitlines()) >= 2:
         if ("|" in response_text and "-|-" in response_text) or explicit_request:
             return VisualResponse(

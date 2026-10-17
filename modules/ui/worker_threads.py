@@ -80,14 +80,18 @@ class TTSMonitor(QThread):
         super().__init__()
         self._running = False
         self._was_speaking = False
-        self.setDaemon = True  # don't block shutdown
 
     def run(self):
         import time
+        try:
+            from legacy.tts import is_speaking
+        except Exception:
+            def is_speaking():
+                return False
+
         self._running = True
         while self._running:
             try:
-                from legacy.tts import is_speaking
                 now_speaking = is_speaking()
                 if now_speaking and not self._was_speaking:
                     self.speaking_started.emit()
@@ -109,9 +113,10 @@ class TTSMonitor(QThread):
 # Watches for SST activity by sampling TTS + process state changes.
 # ─────────────────────────────────────────────────────────────────────────────
 class VADMonitor(QThread):
-    """Emits signals reflecting microphone VAD state."""
-    vad_active   = pyqtSignal()   # speech detected
-    vad_inactive = pyqtSignal()   # back to silence
+    """Emits signals reflecting genuine microphone VAD and voice lifecycle state."""
+    vad_active    = pyqtSignal()          # genuine speech detected
+    vad_inactive  = pyqtSignal()          # back to silence
+    state_changed = pyqtSignal(str, str)  # (state, message)
 
     def __init__(self):
         super().__init__()
@@ -119,23 +124,31 @@ class VADMonitor(QThread):
 
     def run(self):
         import time
+        from core.voice_lifecycle import get_voice_lifecycle
+        vl = get_voice_lifecycle()
+
         self._running = True
-        prev_state = False
+        prev_is_listening = False
+        prev_state = ""
         while self._running:
             try:
-                # Use TTS silence as an inverse proxy for listening state
-                # When TTS is idle, the mic is listening (VAD is active in SST)
-                from legacy.tts import is_speaking
-                from legacy.sst import is_continuous_audio_running
-                is_active = is_continuous_audio_running() and not is_speaking()
-                if is_active and not prev_state:
+                curr_state = vl.get_state()
+                msg = vl.get_status_message()
+                is_listening = (curr_state == "listening")
+
+                if is_listening and not prev_is_listening:
                     self.vad_active.emit()
-                elif not is_active and prev_state:
+                elif not is_listening and prev_is_listening:
                     self.vad_inactive.emit()
-                prev_state = is_active
+                prev_is_listening = is_listening
+
+                if curr_state != prev_state:
+                    self.state_changed.emit(curr_state, msg)
+                    prev_state = curr_state
+
             except Exception:
                 pass
-            time.sleep(0.10)
+            time.sleep(0.04)
 
     def stop(self):
         self._running = False
@@ -145,10 +158,10 @@ class VADMonitor(QThread):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUDIO LEVEL PROVIDER
-# Generates smooth synthetic audio animation (real RMS not exposed by SST).
+# Exposes genuine microphone energy levels and voice activity.
 # ─────────────────────────────────────────────────────────────────────────────
 class AudioLevelProvider(QThread):
-    """Generates simulated audio energy for visualizer animation."""
+    """Provides genuine audio energy levels for visualizer and listening ring animation."""
     level_changed = pyqtSignal(float)   # 0.0 – 1.0
 
     def __init__(self):
@@ -156,24 +169,30 @@ class AudioLevelProvider(QThread):
         self._running = False
 
     def run(self):
-        import time, math, random
+        import time, math
+        from core.voice_lifecycle import get_voice_lifecycle
+        vl = get_voice_lifecycle()
+
         self._running = True
         t = 0.0
         while self._running:
             try:
-                from legacy.tts import is_speaking
-                from legacy.sst import is_continuous_audio_running
-                if is_speaking():
-                    # TTS active: moderate pulsing energy
-                    level = 0.35 + 0.25 * math.sin(t * 8)
-                elif is_continuous_audio_running():
-                    # Listening: low idle energy
-                    level = 0.06 + 0.04 * math.sin(t * 2)
+                st = vl.get_state()
+                if st == "listening":
+                    # Real microphone energy from VAD loop
+                    raw_lvl = vl.get_audio_level()
+                    # Add subtle baseline presence so listening ring is visible even during quiet phonemes
+                    level = max(0.12, raw_lvl)
+                elif st == "speaking":
+                    # Organic speech rhythm pulse during assistant playback
+                    level = 0.30 + 0.20 * math.sin(t * 8)
                 else:
                     level = 0.0
-                self.level_changed.emit(max(0.0, min(1.0, level)))
+
+                self.level_changed.emit(max(0.0, min(1.0, float(level))))
             except Exception:
                 self.level_changed.emit(0.0)
+
             t += 0.04
             time.sleep(0.04)  # 25 fps
 

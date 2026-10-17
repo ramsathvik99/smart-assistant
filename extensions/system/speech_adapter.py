@@ -27,7 +27,15 @@ def sanitize_user_response(text: str, user_input: str = "") -> str:
 
     s = text.strip()
 
-    # 1. Whole-sentence internal debug / pipeline disclosures
+    # 0. Clean raw engine exceptions and provider failure dumps
+    if any(err_token in s for err_token in (
+        "[LLM]", "[BRAIN FALLBACK]", "all language model providers failed",
+        "Traceback (most recent call last)", "Provider=Ollama request timed out",
+        "name 'norm' is not defined"
+    )):
+        return "I understood your request, but I was temporarily unable to reach the language model. Please check your provider settings or try again in a moment."
+
+    s = re.sub(r'\[(?:VOICE|TTS|ERROR|DEBUG|INFO|CONFIG)\]\s*', '', s).strip()
     debug_sentences = [
         r"(?:I(?:\'ve|\s+have)?\s+(?:queried|checked|searched|accessed|retrieved)\s+(?:the\s+|your\s+)?(?:database|memory|history|context|historical\s+records|records|previous\s+conversations?)[^.\n]*[.\?!]\s*)",
         r"(?:I(?:\'ve|\s+have)?\s+(?:used|executed|called)\s+(?:the\s+)?(?:tool|subsystem|function)[^.\n]*[.\?!]\s*)",
@@ -185,7 +193,7 @@ class SpeechAdapter:
             "TASK_MANAGEMENT", "REMINDERS", "NOTES"
         ) or any(phrase in s.lower() for phrase in ("created and saved", "successfully created", "has been created")):
             # Document Generation
-            if is_doc_cmd or intent_up in ("DOCUMENT_GENERATION", "CREATE_DOCUMENT") or any(w in s.lower() for w in ("document", "presentation", "spreadsheet", "pdf document", "report")):
+            if is_doc_cmd or intent_up in ("DOCUMENT_GENERATION", "CREATE_DOCUMENT"):
                 topic = act_res.get("topic") or act_res.get("subject") or ""
                 if not topic:
                     m_top = re.search(r'\b(?:about|on|for)\s+([A-Za-z0-9\s_-]+?)(?:\s+(?:document|presentation|report|slides|spreadsheet|file)|\.|$)', effective_input, re.I)
@@ -201,6 +209,13 @@ class SpeechAdapter:
                         "PDF" if "pdf" in (effective_input + s).lower() else "document"
                     )
                 )
+
+                # If the raw output contains a clean, substantive confirmation sentence, preserve it
+                clean_s = re.sub(r'[A-Za-z]:\\[^\s,]+', '', s).strip()
+                if clean_s and len(clean_s.split()) >= 4 and not clean_s.startswith(("/", "\\")):
+                    if not clean_s.endswith((".", "!", "?")):
+                        clean_s += "."
+                    return clean_s
 
                 if topic:
                     clean_top = topic.strip().title()
@@ -218,14 +233,12 @@ class SpeechAdapter:
             # File Operations / Generic Action
             clean_act = re.sub(r'[A-Za-z]:\\[^\s,]+', '', s)
             clean_act = re.sub(r'/[^\s,]+/[^\s,]+', '', clean_act)
-            clean_act = re.sub(r'\b[A-Za-z0-9_\-]+\.(?:docx|pptx|xlsx|pdf|txt|py|csv)\b', '', clean_act)
             clean_act = re.sub(r'\s+', ' ', clean_act).strip()
-            sents = re.split(r'(?<=[.!?])\s+', clean_act)
-            first_s = sents[0] if sents else "Done."
-            first_words = first_s.split()
-            if len(first_words) > 10:
-                first_s = " ".join(first_words[:8]).rstrip(",:;") + "."
-            return first_s if first_s else "Done."
+            if not clean_act:
+                return "Done."
+            if not clean_act.endswith((".", "!", "?")):
+                clean_act += "."
+            return clean_act
 
         # ── 1.5 Recommendation Queries (Concise 1–3s Spoken Summary) ──────────
         is_rec = (
@@ -255,7 +268,10 @@ class SpeechAdapter:
                     if title_part and len(title_part) >= 2:
                         items.append(title_part)
 
-            if len(items) >= 2:
+            if len(items) > 2:
+                item_str = ", ".join(items[:-1]) + f", or {items[-1]}"
+                return f"I'd suggest {item_str}."
+            elif len(items) == 2:
                 return f"I'd suggest {items[0]} or {items[1]}."
             elif len(items) == 1:
                 return f"I'd suggest {items[0]}."
@@ -283,7 +299,7 @@ class SpeechAdapter:
         filtered_sents = []
         for sent in raw_sents:
             sent_str = sent.strip()
-            if not sent_str or len(sent_str) < 6:
+            if not sent_str or len(sent_str) < 4:
                 continue
             # Filter meta or filler statements
             if any(sent_str.lower().startswith(p) for p in (
@@ -296,21 +312,15 @@ class SpeechAdapter:
         if not filtered_sents:
             filtered_sents = [s] if s else ["I have found the relevant information."]
 
-        # For spoken responsiveness, target 1 concise sentence (~1-3 seconds, ~6-16 words)
-        first_sent = filtered_sents[0].strip()
-        first_words = first_sent.split()
-        if len(first_words) > 16:
-            # Trim at natural clause boundary if available
-            clause_parts = re.split(r'[,;]\s+', first_sent)
-            if clause_parts and len(clause_parts[0].split()) >= 4:
-                first_sent = clause_parts[0].rstrip(",;:") + "."
-            else:
-                first_sent = " ".join(first_words[:14]).rstrip(",;:") + "."
+        # Preserve the complete intended spoken response with all informative sentences
+        spoken_sents = []
+        for sent in filtered_sents:
+            s_clean = sent.strip()
+            if not s_clean.endswith((".", "!", "?")):
+                s_clean += "."
+            spoken_sents.append(s_clean)
 
-        spoken_summary = first_sent
-        if not spoken_summary.endswith((".", "!", "?")):
-            spoken_summary += "."
-
+        spoken_summary = " ".join(spoken_sents)
         return spoken_summary
 
     def adapt_for_speech(
@@ -360,6 +370,11 @@ class SpeechAdapter:
         # 3. Handle raw URLs before symbol processing
         s = self._normalize_urls(s)
 
+        # 3.5 Handle dates, times, currencies, and technical units before math parsing
+        s = self._normalize_dates_and_times(s)
+        s = self._normalize_currencies(s)
+        s = self._normalize_technical_terms(s)
+
         # 4. Handle mathematical expressions and units
         s = self._normalize_math_and_units(s)
 
@@ -385,7 +400,7 @@ class SpeechAdapter:
         words = s.split()
         spoken_chars = len(s)
         spoken_words = len(words)
-        expected_dur = round(max(0.5, spoken_words / 2.5), 2)  # ~150 words/min = 2.5 words/sec
+        expected_dur = round(max(0.5, spoken_words / 2.25), 2)  # ~135 words/min conversational baseline = 2.25 words/sec
 
         meta["spoken_char_count"] = spoken_chars
         meta["spoken_word_count"] = spoken_words
@@ -399,6 +414,71 @@ class SpeechAdapter:
     # -------------------------------------------------------------------------
     # Internal Transformations
     # -------------------------------------------------------------------------
+
+    MONTH_NAMES = {
+        1: "January", 2: "February", 3: "March", 4: "April", 5: "May", 6: "June",
+        7: "July", 8: "August", 9: "September", 10: "October", 11: "November", 12: "December"
+    }
+
+    @staticmethod
+    def _ordinal_number(n: int) -> str:
+        if 11 <= (n % 100) <= 13:
+            return f"{n}th"
+        suffixes = {1: "st", 2: "nd", 3: "rd"}
+        return f"{n}{suffixes.get(n % 10, 'th')}"
+
+    def _normalize_dates_and_times(self, text: str) -> str:
+        s = text
+        # ISO Dates: 2026-10-16 -> October 16th, 2026
+        def _sub_iso_date(m):
+            year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return f"{self.MONTH_NAMES[month]} {self._ordinal_number(day)}, {year}"
+            return m.group(0)
+
+        s = re.sub(r'\b(20\d\d|19\d\d)-(0?[1-9]|1[0-2])-(0?[1-9]|[12]\d|3[01])\b', _sub_iso_date, s)
+
+        # Year ranges: 2024-2026 -> 2024 to 2026
+        s = re.sub(r'\b(20\d\d|19\d\d)\s*-\s*(20\d\d|19\d\d)\b', r'\1 to \2', s)
+
+        # Numeric ranges before units/nouns: 10-15 minutes -> 10 to 15 minutes
+        s = re.sub(
+            r'\b(\d+)\s*-\s*(\d+)\s*(minutes?|mins?|seconds?|secs?|hours?|hrs?|days?|weeks?|months?|years?|items?|requests?|percent|%|degrees?)\b',
+            r'\1 to \2 \3',
+            s,
+            flags=re.IGNORECASE
+        )
+
+        # Time formatting: 07:30 PM -> 7:30 PM (strip leading zero from hour)
+        s = re.sub(r'\b0([1-9]):([0-5]\d)\s*(AM|PM|am|pm)\b', r'\1:\2 \3', s)
+        s = re.sub(r'\b0([1-9]):([0-5]\d)\b', r'\1:\2', s)
+
+        return s
+
+    def _normalize_currencies(self, text: str) -> str:
+        s = text
+        # $1,500 / $150 -> 1,500 dollars / 150 dollars
+        s = re.sub(r'\$(?:\s*)(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)', r'\1 dollars', s)
+        # ₹500 -> 500 rupees
+        s = re.sub(r'₹(?:\s*)(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)', r'\1 rupees', s)
+        # €50 -> 50 euros
+        s = re.sub(r'€(?:\s*)(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)', r'\1 euros', s)
+        # £50 -> 50 pounds
+        s = re.sub(r'£(?:\s*)(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)', r'\1 pounds', s)
+        return s
+
+    def _normalize_technical_terms(self, text: str) -> str:
+        s = text
+        # Memory/storage units: 500MB -> 500 megabytes, 16GB -> 16 gigabytes
+        s = re.sub(r'\b(\d+)\s*(?:KB|kb)\b', r'\1 kilobytes', s)
+        s = re.sub(r'\b(\d+)\s*(?:MB|mb)\b', r'\1 megabytes', s)
+        s = re.sub(r'\b(\d+)\s*(?:GB|gb)\b', r'\1 gigabytes', s)
+        s = re.sub(r'\b(\d+)\s*(?:TB|tb)\b', r'\1 terabytes', s)
+        # Latency/time: 50ms -> 50 milliseconds
+        s = re.sub(r'\b(\d+)\s*(?:ms|msec)\b', r'\1 milliseconds', s)
+        s = re.sub(r'\b(\d+)\s*(?:GHz|ghz)\b', r'\1 gigahertz', s)
+        s = re.sub(r'\b(\d+)\s*(?:MHz|mhz)\b', r'\1 megahertz', s)
+        return s
 
     def _clean_robotic_prefixes(self, text: str) -> str:
         s = text
@@ -455,8 +535,8 @@ class SpeechAdapter:
         s = re.sub(r'(\b\d+)\s*/\s*(\d+\b)', r'\1 divided by \2', s)
         # Additions: 10 + 5 -> 10 plus 5
         s = re.sub(r'(\b\d+)\s*\+\s*(\d+\b)', r'\1 plus \2', s)
-        # Subtractions: 20 - 5 -> 20 minus 5
-        s = re.sub(r'(\b\d+)\s*-\s*(\d+\b)', r'\1 minus \2', s)
+        # Subtractions: 20 - 5 -> 20 minus 5 (requires whitespace around '-' to protect hyphens/dashes)
+        s = re.sub(r'(\b\d+)\s+-\s+(\d+\b)', r'\1 minus \2', s)
         # Equals: = 450 -> equals 450
         s = re.sub(r'\s*=\s*(\d+)', r' equals \1', s)
 

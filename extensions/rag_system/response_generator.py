@@ -88,6 +88,10 @@ class RAGResponseGenerator:
         # 8. Calendar
         if "holidays" in data:
             sections.append(f"=== CALENDAR HOLIDAYS ===\n{data['holidays']}")
+        if "personal_events" in data:
+            sections.append(f"=== PERSONAL EVENTS ===\n{data['personal_events']}")
+        if "speech_response" in data and data.get("speech_response"):
+            sections.append(f"=== CALENDAR INTELLIGENCE ===\n{data['speech_response']}")
 
         # Fallback for any other custom keys not explicitly handled above
         handled_keys = {
@@ -160,10 +164,10 @@ class RAGResponseGenerator:
             res += "\n\nSources:\n" + "\n".join(sources)
         return res
 
-    def generate(self, query, intent, data):
+    def generate(self, query, intent, data, user_id=None):
         """Final response generator using LLM as a reasoning layer."""
         # Check if retrieval already provided a valid direct answer
-        if intent in ["dynamic_fact_query", "real_time_info", "web_search"]:
+        if intent in ["dynamic_fact_query", "real_time_info", "web_search", "calendar_query"]:
             direct_ans = self.extract_direct_answer(data)
             if direct_ans:
                 print(f"[PIPELINE - GENERATION] Valid direct answer available from retrieval ({data.get('provider', 'retriever')}). Using direct retrieval answer.")
@@ -284,7 +288,7 @@ class RAGResponseGenerator:
 
         try:
             print(f"[PIPELINE - GENERATION] Calling LLM with intent: {intent} (has_ground_truth={has_ground_truth})")
-            response = self.llm.get_completion(prompt=query, system_prompt=full_system_prompt)
+            response = self.llm.get_completion(prompt=query, system_prompt=full_system_prompt, user_id=user_id)
             if not response:
                 # LLM synthesis unavailable: check if retrieval data has usable direct answer or snippets
                 if data and isinstance(data, dict):

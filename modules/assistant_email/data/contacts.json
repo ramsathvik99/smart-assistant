@@ -5,10 +5,6 @@
             "sathvik"
         ]
     },
-    "test": {
-        "email": "mobilemassgamingking@gmail.com",
-        "aliases": []
-    },
     "karthikeya": {
         "email": "karthikeyakumara3@gmail.com",
         "aliases": []
@@ -18,5 +14,9 @@
         "aliases": [
             "my professor"
         ]
+    },
+    "gamer": {
+        "email": "mobilemassgamingking@gmail.com",
+        "aliases": []
     }
 }

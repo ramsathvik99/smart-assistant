@@ -1,8 +1,13 @@
 {
   "ui_preferences": {
     "8": {
-      "dnd_from": "22:00",
-      "dnd_to": "08:00"
+      "ambient_3d_state_reactive": "True",
+      "voice_volume": "1.0",
+      "assistant_voice_volume": "1.0",
+      "hotword_threshold": "0.35",
+      "wake_word_enabled": "True",
+      "voice_activation_enabled": "True",
+      "primary_provider": "openai"
     }
   }
 }

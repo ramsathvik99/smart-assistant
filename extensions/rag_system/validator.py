@@ -6,16 +6,18 @@ class RAGValidator:
         Validates that the retrieved data is sufficient for the intent.
         Returns True if valid, False otherwise.
         """
-        if not data:
+        if not data or not isinstance(data, dict):
             return False
             
-        if "error" in data:
-            print(f"[RAG VALIDATOR] Error in data: {data['error']}")
+        if data.get("error") or data.get("status") in ("error", "timeout", "empty"):
+            print(f"[RAG VALIDATOR] Data indicates failure or empty: error={data.get('error')}, status={data.get('status')}")
             return False
             
         if intent == "calendar_query":
-            # Check if holiday info exists or specific data was found
-            return "holidays" in data and len(data["holidays"]) > 0 or "today" in str(data)
+            # Check if calendar controller processed query successfully or holiday/event info exists
+            if data.get("status") == "success" and (data.get("speech_response") or "holidays" in data or "personal_events" in data):
+                return True
+            return ("holidays" in data and len(data["holidays"]) > 0) or ("personal_events" in data) or ("today" in str(data))
             
         if intent == "memory_storage":
             # Storage is valid if the fact was saved successfully

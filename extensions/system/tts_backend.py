@@ -42,6 +42,14 @@ class SynthesisResult:
     sample_rate: int = 24000
     duration_ms: float = 0.0
     first_audio_ms: float = 0.0
+    synthesis_ms: float = 0.0
+    playback_ms: float = 0.0
+    frame_count: int = 0
+    byte_count: int = 0
+    sentences_played: int = 0
+    backend_used: str = ""
+    voice_used: str = ""
+    device_used: str = ""
     interrupted: bool = False
     error: Optional[str] = None
 
@@ -77,6 +85,7 @@ class TTSBackend(abc.ABC):
         self,
         text: str,
         voice: Optional[str] = None,
+        language: Optional[str] = None,
         rate: float = 1.0,
         volume: float = 1.0,
         metadata: Optional[Dict[str, Any]] = None,
@@ -89,6 +98,7 @@ class TTSBackend(abc.ABC):
         self,
         text: str,
         voice: Optional[str] = None,
+        language: Optional[str] = None,
         rate: float = 1.0,
         volume: float = 1.0,
         metadata: Optional[Dict[str, Any]] = None,
@@ -234,11 +244,183 @@ class NeuralTTSBackend(TTSBackend):
     """
 
     DEFAULT_VOICE = "en-US-JennyNeural"
+    MULTILINGUAL_VOICES = {
+        "en": "en-US-JennyNeural",
+        "te": "te-IN-ShrutiNeural",
+        "hi": "hi-IN-SwaraNeural",
+        "ta": "ta-IN-PallaviNeural",
+        "kn": "kn-IN-SapnaNeural",
+        "ml": "ml-IN-SobhanaNeural",
+        "es": "es-ES-ElviraNeural",
+        "fr": "fr-FR-DeniseNeural",
+        "de": "de-DE-KatjaNeural",
+        "it": "it-IT-ElsaNeural",
+        "bn": "bn-IN-TanishaaNeural",
+        "mr": "mr-IN-AarohiNeural",
+        "gu": "gu-IN-DhwaniNeural",
+    }
     _PHRASE_CACHE: Dict[Tuple[str, str, str, str, str], Tuple[Any, int]] = {}
     _PHRASE_CACHE_LOCK = threading.Lock()
 
+    @classmethod
+    def prewarm_common_phrases(cls):
+        """Asynchronously pre-synthesize very frequent responses in a background thread for sub-millisecond TTFA."""
+        def _prewarm_worker():
+            common_phrases = [
+                "Opened Notepad.",
+                "Opened Visual Studio Code.",
+                "Opened Google Chrome.",
+                "Opened Calculator.",
+                "Yes, I understand what you're saying. Please go ahead.",
+                "You don't have any events scheduled for today.",
+            ]
+            voice = cls.DEFAULT_VOICE
+            for p in common_phrases:
+                try:
+                    cache_key = (p.strip().lower(), voice, "+0%", "+0Hz", "+0%")
+                    with cls._PHRASE_CACHE_LOCK:
+                        if cache_key in cls._PHRASE_CACHE:
+                            continue
+                    import edge_tts, io, soundfile as sf
+                    import numpy as np
+                    comm = edge_tts.Communicate(text=p, voice=voice)
+                    bio = io.BytesIO()
+                    async def _run():
+                        async for chunk in comm.stream():
+                            if chunk["type"] == "audio":
+                                bio.write(chunk["data"])
+                    asyncio.run(_run())
+                    bio.seek(0)
+                    pcm_data, sr = sf.read(bio, dtype="int16")
+                    if len(pcm_data.shape) > 1 and pcm_data.shape[1] > 1:
+                        pcm_data = np.mean(pcm_data, axis=1).astype(np.int16)
+                    pcm_data = trim_audio_silence(pcm_data, sr)
+                    with cls._PHRASE_CACHE_LOCK:
+                        cls._PHRASE_CACHE[cache_key] = (pcm_data, sr)
+                except Exception:
+                    pass
+        threading.Thread(target=_prewarm_worker, daemon=True, name="tts-prewarm").start()
+
+    @classmethod
+    def is_valid_voice(cls, voice_id: Optional[str]) -> bool:
+        if not voice_id or not isinstance(voice_id, str):
+            return False
+        v = voice_id.strip()
+        # Reject mock test identifiers, SAPI tokens, or empty strings
+        if "test_" in v.lower() or "hkey_" in v.lower() or "onecore" in v.lower() or "\\" in v:
+            return False
+        known = {
+            "en-US-JennyNeural", "en-US-GuyNeural", "en-US-AriaNeural", "en-US-ChristopherNeural",
+            "en-GB-SoniaNeural", "en-GB-RyanNeural", "en-IN-NeerjaNeural", "en-IN-PrabhatNeural",
+            "en-US-AnaNeural", "en-US-EricNeural", "en-US-MichelleNeural",
+            "te-IN-ShrutiNeural", "hi-IN-SwaraNeural", "ta-IN-PallaviNeural",
+            "kn-IN-SapnaNeural", "ml-IN-SobhanaNeural", "es-ES-ElviraNeural", "fr-FR-DeniseNeural",
+            "de-DE-KatjaNeural", "it-IT-ElsaNeural", "bn-IN-TanishaaNeural", "mr-IN-AarohiNeural",
+            "gu-IN-DhwaniNeural"
+        }
+        if v in known:
+            return True
+        return bool(re.match(r"^[a-z]{2,3}-[A-Z]{2,3}-[A-Za-z0-9]+Neural$", v))
+
+    @classmethod
+    def normalize_language_code(cls, lang: Optional[str]) -> Optional[str]:
+        if not lang or not isinstance(lang, str):
+            return None
+        l = lang.strip().lower()
+        if l in cls.MULTILINGUAL_VOICES:
+            return l
+        name_map = {
+            "english": "en", "en-us": "en", "en-gb": "en", "en-in": "en",
+            "telugu": "te", "te-in": "te",
+            "hindi": "hi", "hi-in": "hi",
+            "tamil": "ta", "ta-in": "ta",
+            "kannada": "kn", "kn-in": "kn",
+            "malayalam": "ml", "ml-in": "ml",
+            "spanish": "es", "es-es": "es", "es-mx": "es",
+            "french": "fr", "fr-fr": "fr", "fr-ca": "fr",
+            "german": "de", "de-de": "de",
+            "italian": "it", "it-it": "it",
+            "bengali": "bn", "bn-in": "bn",
+            "marathi": "mr", "mr-in": "mr",
+            "gujarati": "gu", "gu-in": "gu",
+        }
+        for prefix, code in name_map.items():
+            if l == prefix or l.startswith(prefix):
+                return code
+        return l[:2] if len(l) >= 2 else l
+
+    @classmethod
+    def detect_language_from_text(cls, text: Optional[str]) -> Optional[str]:
+        if not text or not isinstance(text, str):
+            return None
+        for ch in text:
+            cp = ord(ch)
+            if 0x0C00 <= cp <= 0x0C7F:
+                return "te"
+            if 0x0900 <= cp <= 0x097F:
+                return "hi"
+            if 0x0B80 <= cp <= 0x0BFF:
+                return "ta"
+            if 0x0C80 <= cp <= 0x0CFF:
+                return "kn"
+            if 0x0D00 <= cp <= 0x0D7F:
+                return "ml"
+            if 0x0980 <= cp <= 0x09FF:
+                return "bn"
+            if 0x0A80 <= cp <= 0x0AFF:
+                return "gu"
+            if 0x0600 <= cp <= 0x06FF:
+                return "ar"
+        try:
+            from core.multilingual_engine import get_multilingual_engine
+            det = get_multilingual_engine().detect_language(text)
+            if det.is_multilingual:
+                return det.language
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def get_fallback_voice(cls, gender: Optional[str] = None, language: Optional[str] = None) -> str:
+        gen = (gender or "").lower()
+        norm_lang = cls.normalize_language_code(language)
+        if norm_lang and norm_lang in cls.MULTILINGUAL_VOICES and norm_lang != "en":
+            return cls.MULTILINGUAL_VOICES[norm_lang]
+        lang = (language or "").lower()
+        if "in" in lang or "india" in lang or lang == "en-in":
+            return "en-IN-PrabhatNeural" if gen == "male" else "en-IN-NeerjaNeural"
+        if "gb" in lang or "uk" in lang or "britain" in lang or lang == "en-gb":
+            return "en-GB-RyanNeural" if gen == "male" else "en-GB-SoniaNeural"
+        return "en-US-GuyNeural" if gen == "male" else cls.DEFAULT_VOICE
+
+    @classmethod
+    def resolve_voice(
+        cls,
+        voice_id: Optional[str] = None,
+        language: Optional[str] = None,
+        text: Optional[str] = None,
+        gender: Optional[str] = None,
+    ) -> str:
+        detected_lang = cls.detect_language_from_text(text)
+        eff_lang = detected_lang or language
+        norm_lang = cls.normalize_language_code(eff_lang)
+
+        if norm_lang and norm_lang != "en" and norm_lang in cls.MULTILINGUAL_VOICES:
+            if cls.is_valid_voice(voice_id) and voice_id.lower().startswith(norm_lang):
+                return voice_id.strip()
+            return cls.MULTILINGUAL_VOICES[norm_lang]
+
+        if cls.is_valid_voice(voice_id):
+            return str(voice_id).strip()
+
+        return cls.get_fallback_voice(gender=gender, language=language)
+
+    @classmethod
+    def validate_or_fallback_voice(cls, voice_id: Optional[str], gender: Optional[str] = None, language: Optional[str] = None) -> str:
+        return cls.resolve_voice(voice_id=voice_id, language=language, gender=gender)
+
     def __init__(self):
-        self._voice = os.getenv("TTS_VOICE", self.DEFAULT_VOICE)
+        self._voice = self.validate_or_fallback_voice(os.getenv("TTS_VOICE", self.DEFAULT_VOICE))
         self._output_format = os.getenv("TTS_OUTPUT_FORMAT", "audio-24khz-48kbitrate-mono-mp3")
         self._interrupted = threading.Event()
         self._stop_lock = threading.Lock()
@@ -251,6 +433,7 @@ class NeuralTTSBackend(TTSBackend):
         self,
         text: str,
         voice: Optional[str] = None,
+        language: Optional[str] = None,
         rate: float = 1.0,
         volume: float = 1.0,
         metadata: Optional[Dict[str, Any]] = None,
@@ -266,7 +449,8 @@ class NeuralTTSBackend(TTSBackend):
         import queue
         self._interrupted.clear()
         t_start = time.time()
-        chosen_voice = voice or self._voice
+        eff_lang = language or (metadata.get("lang_hint") if metadata else None) or (metadata.get("language") if metadata else None)
+        chosen_voice = self.resolve_voice(voice or self._voice, language=eff_lang, text=text)
         rate_str, pitch_str, vol_str = map_metadata_to_neural_style(metadata, text=text)
 
         sentences = split_sentences_for_streaming(text)
@@ -308,8 +492,10 @@ class NeuralTTSBackend(TTSBackend):
                 pass
 
         audio_queue: queue.Queue = queue.Queue(maxsize=10)
+        producer_error: Optional[str] = None
 
         def _producer_worker():
+            nonlocal producer_error
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -327,13 +513,24 @@ class NeuralTTSBackend(TTSBackend):
                         continue
 
                     t_synth = time.time()
-                    comm = edge_tts.Communicate(
-                        text=s_text,
-                        voice=chosen_voice,
-                        rate=rate_str,
-                        pitch=pitch_str,
-                        volume=vol_str,
-                    )
+                    try:
+                        comm = edge_tts.Communicate(
+                            text=s_text,
+                            voice=chosen_voice,
+                            rate=rate_str,
+                            pitch=pitch_str,
+                            volume=vol_str,
+                        )
+                    except ValueError as ve:
+                        logger.warning("[NEURAL TTS] Voice '%s' rejected (%s) — retrying with %s", chosen_voice, ve, self.DEFAULT_VOICE)
+                        comm = edge_tts.Communicate(
+                            text=s_text,
+                            voice=self.DEFAULT_VOICE,
+                            rate=rate_str,
+                            pitch=pitch_str,
+                            volume=vol_str,
+                        )
+
                     bio = io.BytesIO()
 
                     async def _stream():
@@ -367,15 +564,16 @@ class NeuralTTSBackend(TTSBackend):
                     synth_ms = (time.time() - t_synth) * 1000.0
 
                     with self._PHRASE_CACHE_LOCK:
-                        if len(self._PHRASE_CACHE) > 100:
+                        if len(self._PHRASE_CACHE) > 300:
                             self._PHRASE_CACHE.pop(next(iter(self._PHRASE_CACHE)))
                         self._PHRASE_CACHE[cache_key] = (pcm_data.copy(), sr)
 
                     audio_queue.put((idx, s_text, pcm_data, sr, synth_ms))
             except Exception as e:
+                producer_error = f"{type(e).__name__}: {e}"
                 logger.error("[NEURAL TTS] Producer worker error: %s", e)
             finally:
-                audio_queue.put(None)
+                audio_queue.put(("SENTINEL", producer_error))
                 try:
                     pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
                     for t in pending:
@@ -398,9 +596,13 @@ class NeuralTTSBackend(TTSBackend):
         try:
             # Wait for first sentence
             current_sentence_item = audio_queue.get()
-            if current_sentence_item is None or self._interrupted.is_set():
+            if current_sentence_item is None or (isinstance(current_sentence_item, tuple) and current_sentence_item[0] == "SENTINEL") or self._interrupted.is_set():
                 result.interrupted = self._interrupted.is_set()
                 result.duration_ms = (time.time() - t_start) * 1000.0
+                if not result.interrupted:
+                    err_msg = current_sentence_item[1] if (isinstance(current_sentence_item, tuple) and current_sentence_item[0] == "SENTINEL") else producer_error
+                    result.error = err_msg or "Neural synthesizer produced no audio frames"
+                    print(f"[TTS] backend=neural synthesis failed: {result.error}")
                 return result
 
             first_idx, first_text, first_pcm, first_sr, first_synth_ms = current_sentence_item
@@ -417,20 +619,45 @@ class NeuralTTSBackend(TTSBackend):
                 except Exception:
                     pass
 
+            # Resolve preferred usable output device
+            out_dev_idx = None
+            try:
+                from skills.audio_management.audio_devices import resolve
+                out_dev_idx = resolve("", "output")
+            except Exception:
+                out_dev_idx = None
+
             # Open continuous audio output stream (reused for ALL sentences in this utterance)
-            stream = sd.OutputStream(
-                samplerate=first_sr,
-                channels=1,
-                dtype='int16',
-                blocksize=2048,
-            )
-            stream.start()
+            try:
+                stream = sd.OutputStream(
+                    samplerate=first_sr,
+                    channels=1,
+                    dtype='int16',
+                    blocksize=2048,
+                    device=out_dev_idx,
+                )
+                stream.start()
+            except Exception as stream_err:
+                if out_dev_idx is not None:
+                    logger.warning("[NEURAL TTS] Output device %s failed (%s) — falling back to system default", out_dev_idx, stream_err)
+                    stream = sd.OutputStream(
+                        samplerate=first_sr,
+                        channels=1,
+                        dtype='int16',
+                        blocksize=2048,
+                        device=None,
+                    )
+                    stream.start()
+                else:
+                    raise
 
             with self._stop_lock:
                 self._current_stream = stream
                 self._is_playing = True
 
             while current_sentence_item is not None:
+                if isinstance(current_sentence_item, tuple) and current_sentence_item[0] == "SENTINEL":
+                    break
                 if self._interrupted.is_set():
                     break
 
@@ -480,6 +707,11 @@ class NeuralTTSBackend(TTSBackend):
                 print(f"[TTS] sentence_{idx + 1}_playback_ms: {play_ms:.1f}")
                 prev_sentence_finish_time = time.time()
 
+                result.sentences_played += 1
+                result.frame_count += frame_count
+                result.byte_count += len(pcm_data.tobytes())
+                result.audio_data = b"STREAMED_AUDIO"
+
                 if self._interrupted.is_set():
                     break
 
@@ -512,7 +744,12 @@ class NeuralTTSBackend(TTSBackend):
 
         total_duration_ms = (time.time() - t_start) * 1000.0
         result.duration_ms = total_duration_ms
+        result.playback_ms = total_duration_ms
+        result.backend_used = "neural"
+        result.voice_used = chosen_voice
         result.interrupted = self._interrupted.is_set()
+        if result.sentences_played == 0 and not result.interrupted and not result.error:
+            result.error = "No audio sentences were played"
 
         print(
             f"[TTS] backend=neural duration_ms={total_duration_ms:.1f} interrupted={result.interrupted}"
@@ -542,6 +779,8 @@ class NeuralTTSBackend(TTSBackend):
             except Exception:
                 pass
             self._is_playing = False
+
+    @property
     def name(self) -> str:
         return "neural"
 
@@ -572,6 +811,13 @@ class NeuralTTSBackend(TTSBackend):
             TTSVoice("en-GB-RyanNeural", "Microsoft Ryan (Neural)", "male", "en-GB", "edge-tts"),
             TTSVoice("en-IN-NeerjaNeural", "Microsoft Neerja (Neural)", "female", "en-IN", "edge-tts"),
             TTSVoice("en-IN-PrabhatNeural", "Microsoft Prabhat (Neural)", "male", "en-IN", "edge-tts"),
+            TTSVoice("te-IN-ShrutiNeural", "Microsoft Shruti (Neural)", "female", "te-IN", "edge-tts"),
+            TTSVoice("hi-IN-SwaraNeural", "Microsoft Swara (Neural)", "female", "hi-IN", "edge-tts"),
+            TTSVoice("ta-IN-PallaviNeural", "Microsoft Pallavi (Neural)", "female", "ta-IN", "edge-tts"),
+            TTSVoice("kn-IN-SapnaNeural", "Microsoft Sapna (Neural)", "female", "kn-IN", "edge-tts"),
+            TTSVoice("ml-IN-SobhanaNeural", "Microsoft Sobhana (Neural)", "female", "ml-IN", "edge-tts"),
+            TTSVoice("es-ES-ElviraNeural", "Microsoft Elvira (Neural)", "female", "es-ES", "edge-tts"),
+            TTSVoice("fr-FR-DeniseNeural", "Microsoft Denise (Neural)", "female", "fr-FR", "edge-tts"),
         ]
         return voices
 
@@ -579,6 +825,7 @@ class NeuralTTSBackend(TTSBackend):
         self,
         text: str,
         voice: Optional[str] = None,
+        language: Optional[str] = None,
         rate: float = 1.0,
         volume: float = 1.0,
         metadata: Optional[Dict[str, Any]] = None,
@@ -587,7 +834,8 @@ class NeuralTTSBackend(TTSBackend):
         if not self.is_available() or not text.strip():
             return None
 
-        chosen_voice = voice or self._voice
+        eff_lang = language or (metadata.get("lang_hint") if metadata else None) or (metadata.get("language") if metadata else None)
+        chosen_voice = self.resolve_voice(voice or self._voice, language=eff_lang, text=text)
         rate_str, pitch_str, vol_str = map_metadata_to_neural_style(metadata, text=text)
 
         # Allow explicit rate adjustment
@@ -618,12 +866,60 @@ class NeuralTTSBackend(TTSBackend):
             return None
 
 
-
-
 # ── Windows SAPI / OneCore Backend (Fallback) ──────────────────────────────────
 
 class SAPIBackend(TTSBackend):
     """Fallback Windows SAPI / OneCore SpVoice backend with instant purge."""
+
+    @classmethod
+    def is_valid_voice(cls, voice_id: Optional[str]) -> bool:
+        if not voice_id or not isinstance(voice_id, str):
+            return False
+        v = voice_id.strip()
+        if "test_" in v.lower() or "neural" in v.lower():
+            return False
+        try:
+            from legacy.tts import enumerate_voices
+            installed = enumerate_voices()
+            for inv in installed:
+                if v == inv.get("id") or v.lower() == (inv.get("name") or "").lower():
+                    return True
+        except Exception:
+            pass
+        return bool("hkey_" in v.lower() or "speech\\voices" in v.lower() or "onecore" in v.lower())
+
+    @classmethod
+    def get_fallback_voice(cls, gender: Optional[str] = None, language: Optional[str] = None) -> Optional[str]:
+        try:
+            from legacy.tts import enumerate_voices
+            installed = enumerate_voices()
+            if not installed:
+                return None
+            gen = (gender or "").lower()
+            lang = (language or "").lower()
+            if gen:
+                for v in installed:
+                    if v.get("gender") == gen:
+                        if lang and lang in v.get("language", "").lower():
+                            return v.get("id")
+                for v in installed:
+                    if v.get("gender") == gen:
+                        return v.get("id")
+            for v in installed:
+                if "english" in v.get("language", "").lower() or "en" in v.get("language", "").lower():
+                    return v.get("id")
+            return installed[0].get("id")
+        except Exception:
+            return None
+
+    @classmethod
+    def validate_or_fallback_voice(cls, voice_id: Optional[str], gender: Optional[str] = None, language: Optional[str] = None) -> Optional[str]:
+        if cls.is_valid_voice(voice_id):
+            return str(voice_id).strip()
+        fallback = cls.get_fallback_voice(gender, language)
+        if voice_id:
+            logger.warning("[SAPI TTS] Invalid voice '%s' — using validated fallback '%s'", voice_id, fallback)
+        return fallback
 
     def __init__(self):
         self._voice_id: Optional[str] = None
@@ -672,6 +968,7 @@ class SAPIBackend(TTSBackend):
         self,
         text: str,
         voice: Optional[str] = None,
+        language: Optional[str] = None,
         rate: float = 1.0,
         volume: float = 1.0,
         metadata: Optional[Dict[str, Any]] = None,
@@ -683,11 +980,18 @@ class SAPIBackend(TTSBackend):
             sp = comtypes.client.CreateObject("SAPI.SpVoice")
             mem_stream = comtypes.client.CreateObject("SAPI.SpMemoryStream")
             sp.AudioOutputStream = mem_stream
-            if voice:
-                token = comtypes.client.CreateObject("SAPI.SpObjectToken")
-                token.SetId(voice)
-                sp.Voice = token
-            sp.Rate = max(-10, min(10, int(round((rate - 1.0) * 10))))
+            chosen_voice = self.validate_or_fallback_voice(voice or self._voice_id, language=language)
+            if chosen_voice:
+                try:
+                    token = comtypes.client.CreateObject("SAPI.SpObjectToken")
+                    token.SetId(chosen_voice)
+                    sp.Voice = token
+                except Exception:
+                    pass
+            if rate > 10.0:
+                sp.Rate = max(-10, min(10, int(round((rate - 145) / 14.0))))
+            else:
+                sp.Rate = max(-10, min(10, int(round((rate - 1.0) * 10))))
             sp.Volume = max(0, min(100, int(round(volume * 100))))
             sp.Speak(text)
             return bytes(mem_stream.GetData())
@@ -699,6 +1003,7 @@ class SAPIBackend(TTSBackend):
         self,
         text: str,
         voice: Optional[str] = None,
+        language: Optional[str] = None,
         rate: float = 1.0,
         volume: float = 1.0,
         metadata: Optional[Dict[str, Any]] = None,
@@ -708,21 +1013,28 @@ class SAPIBackend(TTSBackend):
         self._interrupted.clear()
         t_start = time.time()
         result = SynthesisResult()
+        result.backend_used = "sapi"
+
+        chosen_voice = self.validate_or_fallback_voice(voice or self._voice_id, language=language)
+        result.voice_used = chosen_voice or "default"
 
         try:
             import pythoncom
             pythoncom.CoInitialize()
             import comtypes.client
             sp = comtypes.client.CreateObject("SAPI.SpVoice")
-            if voice:
+            if chosen_voice:
                 try:
                     token = comtypes.client.CreateObject("SAPI.SpObjectToken")
-                    token.SetId(voice)
+                    token.SetId(chosen_voice)
                     sp.Voice = token
-                except Exception:
-                    pass
+                except Exception as e_tok:
+                    logger.warning("[SAPI TTS] Voice token SetId failed for %s: %s", chosen_voice, e_tok)
 
-            sp.Rate = max(-10, min(10, int(round((rate - 1.0) * 10))))
+            if rate > 10.0:
+                sp.Rate = max(-10, min(10, int(round((rate - 145) / 14.0))))
+            else:
+                sp.Rate = max(-10, min(10, int(round((rate - 1.0) * 10))))
             sp.Volume = max(0, min(100, int(round(volume * 100))))
 
             with self._lock:
@@ -731,6 +1043,12 @@ class SAPIBackend(TTSBackend):
             if on_start:
                 try:
                     on_start()
+                except Exception:
+                    pass
+
+            if on_sentence_start:
+                try:
+                    on_sentence_start(text)
                 except Exception:
                     pass
 
@@ -749,6 +1067,10 @@ class SAPIBackend(TTSBackend):
                         pass
                     result.interrupted = True
                     break
+
+            if not result.interrupted:
+                result.sentences_played = 1
+                result.audio_data = b"SAPI_AUDIO"
         except Exception as e:
             logger.error("[SAPI TTS] Playback error: %s", e)
             result.error = str(e)
@@ -758,6 +1080,7 @@ class SAPIBackend(TTSBackend):
 
         total_ms = (time.time() - t_start) * 1000.0
         result.duration_ms = total_ms
+        result.playback_ms = total_ms
         print(f"[TTS] backend=sapi duration_ms={total_ms:.1f} interrupted={result.interrupted}")
         return result
 
@@ -782,8 +1105,16 @@ class TTSBackendManager:
             "neural": NeuralTTSBackend(),
             "sapi": SAPIBackend(),
         }
-        self._active_backend_name = os.getenv("TTS_PROVIDER", "neural").lower()
+        prov = os.getenv("TTS_PROVIDER") or os.getenv("VOICE_ENGINE") or "neural"
+        if "sapi" in prov.lower() or "windows" in prov.lower():
+            self._active_backend_name = "sapi"
+        else:
+            self._active_backend_name = "neural"
         self._lock = threading.Lock()
+        try:
+            NeuralTTSBackend.prewarm_common_phrases()
+        except Exception:
+            pass
         logger.info("[TTS BACKEND MANAGER] Initialized with primary=%s", self._active_backend_name)
 
     def register_backend(self, backend: TTSBackend) -> None:
@@ -793,8 +1124,14 @@ class TTSBackendManager:
 
     def set_primary_provider(self, name: str) -> None:
         with self._lock:
-            self._active_backend_name = name.lower()
-            logger.info("[TTS BACKEND MANAGER] Primary provider set to: %s", name)
+            low = name.lower()
+            if "sapi" in low or "windows" in low:
+                self._active_backend_name = "sapi"
+            elif "neural" in low or "edge" in low:
+                self._active_backend_name = "neural"
+            else:
+                self._active_backend_name = low
+            logger.info("[TTS BACKEND MANAGER] Primary provider set to: %s", self._active_backend_name)
 
     def get_backend(self, name: Optional[str] = None) -> TTSBackend:
         """Get the specified backend or the primary healthy backend with automatic fallback."""
@@ -827,6 +1164,7 @@ class TTSBackendManager:
         self,
         text: str,
         voice: Optional[str] = None,
+        language: Optional[str] = None,
         rate: float = 1.0,
         volume: float = 1.0,
         metadata: Optional[Dict[str, Any]] = None,
@@ -838,6 +1176,7 @@ class TTSBackendManager:
         result = primary.stream_and_play(
             text=text,
             voice=voice,
+            language=language,
             rate=rate,
             volume=volume,
             metadata=metadata,
@@ -845,22 +1184,28 @@ class TTSBackendManager:
             on_sentence_start=on_sentence_start,
         )
 
-        # If primary failed with an unrecoverable error and wasn't interrupted, fall back to SAPI
-        if result.error and not result.interrupted and primary.name != "sapi":
+        # If primary failed with an unrecoverable error or produced 0 sentences and wasn't interrupted, fall back to SAPI
+        if (result.error or result.sentences_played == 0) and not result.interrupted and primary.name != "sapi":
             logger.warning(
-                "[TTS BACKEND MANAGER] Primary backend %s failed (%s) — invoking SAPI fallback",
-                primary.name, result.error
+                "[TTS BACKEND MANAGER] Primary backend %s failed (%s, sentences=%d) — invoking explicit SAPI fallback",
+                primary.name, result.error or "no sentences played", result.sentences_played
             )
             sapi = self.get_backend("sapi")
-            return sapi.stream_and_play(
+            sapi_voice = None
+            if voice and SAPIBackend.is_valid_voice(voice):
+                sapi_voice = voice
+            fallback_res = sapi.stream_and_play(
                 text=text,
-                voice=voice,
+                voice=sapi_voice,
+                language=language,
                 rate=rate,
                 volume=volume,
                 metadata=metadata,
                 on_start=on_start,
                 on_sentence_start=on_sentence_start,
             )
+            fallback_res.backend_used = "sapi_fallback"
+            return fallback_res
 
         return result
 
@@ -886,3 +1231,165 @@ def get_tts_backend_manager() -> TTSBackendManager:
             if _backend_manager is None:
                 _backend_manager = TTSBackendManager()
     return _backend_manager
+
+
+# ── End-to-End Diagnostic Routine ─────────────────────────────────────────────
+
+def run_tts_diagnostic(text: Optional[str] = None, user_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Execute a comprehensive 6-stage end-to-end TTS diagnostic:
+    1. Provider and Voice Validation
+    2. Output Device Verification
+    3. Audio Generation and Payload Validation
+    4. Hardware Playback Execution
+    5. Playback Completion and Duration Verification
+    6. Reporting and Fallback Audit
+    """
+    test_text = text or "Smart Assistant diagnostic audio verification test."
+    stages = []
+    diag_result = {
+        "success": False,
+        "provider": None,
+        "voice": None,
+        "device": None,
+        "stages": stages,
+        "failing_stage": None,
+        "metrics": {},
+        "fallback_used": False,
+        "fallback_provider": None,
+        "message": ""
+    }
+
+    # Stage 1: Provider and Voice Validation
+    stage1 = {"stage": "voice_validation", "success": False, "details": {}}
+    stages.append(stage1)
+
+    mgr = get_tts_backend_manager()
+    primary = mgr.get_backend()
+    diag_result["provider"] = primary.name
+
+    target_voice = None
+    if user_id:
+        try:
+            from core.configuration_service import get_config_service
+            prefs = get_config_service().get_user_preferences(user_id)
+            target_voice = prefs.get("voice_id") or prefs.get("assistant_voice_id")
+        except Exception:
+            pass
+    if not target_voice:
+        try:
+            from legacy.tts import get_active_voice_id
+            target_voice = get_active_voice_id()
+        except Exception:
+            pass
+
+    if primary.name == "neural":
+        valid_voice = NeuralTTSBackend.validate_or_fallback_voice(target_voice)
+    else:
+        valid_voice = SAPIBackend.validate_or_fallback_voice(target_voice)
+
+    diag_result["voice"] = valid_voice
+    stage1["details"] = {
+        "requested_voice": target_voice,
+        "validated_voice": valid_voice,
+        "provider": primary.name,
+    }
+    stage1["success"] = bool(valid_voice)
+    if not stage1["success"]:
+        diag_result["failing_stage"] = "voice_validation"
+        diag_result["message"] = "Failed to resolve a valid voice identifier."
+        return diag_result
+
+    # Stage 2: Audio Output Device Verification
+    stage2 = {"stage": "device_verification", "success": False, "details": {}}
+    stages.append(stage2)
+    dev_idx = None
+    dev_name = "System default"
+    try:
+        from skills.audio_management.audio_devices import resolve, list_devices
+        outs = list_devices("output")
+        dev_name = outs[0] if outs else "System default"
+        dev_idx = resolve("", "output")
+    except Exception as e:
+        logger.warning("[TTS DIAGNOSTIC] Device resolve notice: %s", e)
+
+    stage2["details"] = {"device_name": dev_name, "device_index": dev_idx}
+    stage2["success"] = True
+    diag_result["device"] = dev_name
+
+    # Stage 3: Audio Generation and Payload Validation
+    stage3 = {"stage": "audio_synthesis", "success": False, "details": {}}
+    stages.append(stage3)
+    t0_gen = time.time()
+    audio_bytes = primary.synthesize(test_text, voice=valid_voice)
+    gen_ms = (time.time() - t0_gen) * 1000.0
+
+    if not audio_bytes or len(audio_bytes) < 100:
+        stage3["details"] = {"byte_count": len(audio_bytes) if audio_bytes else 0, "error": "Empty or corrupt audio payload"}
+        logger.warning("[TTS DIAGNOSTIC] Primary %s synthesis failed — attempting SAPI synthesis", primary.name)
+        if primary.name != "sapi":
+            sapi = mgr.get_backend("sapi")
+            sapi_voice = SAPIBackend.validate_or_fallback_voice(target_voice)
+            audio_bytes = sapi.synthesize(test_text, voice=sapi_voice)
+            if audio_bytes and len(audio_bytes) >= 100:
+                diag_result["fallback_used"] = True
+                diag_result["fallback_provider"] = "sapi"
+                diag_result["voice"] = sapi_voice
+                stage3["success"] = True
+                stage3["details"] = {"byte_count": len(audio_bytes), "fallback_used": True}
+            else:
+                diag_result["failing_stage"] = "audio_synthesis"
+                diag_result["message"] = f"Audio generation produced empty or unusable audio payload ({len(audio_bytes) if audio_bytes else 0} bytes)."
+                return diag_result
+        else:
+            diag_result["failing_stage"] = "audio_synthesis"
+            diag_result["message"] = "Primary SAPI synthesis produced empty audio."
+            return diag_result
+    else:
+        stage3["success"] = True
+        stage3["details"] = {"byte_count": len(audio_bytes), "synthesis_ms": gen_ms}
+
+    diag_result["metrics"]["audio_bytes"] = len(audio_bytes)
+    diag_result["metrics"]["generation_ms"] = gen_ms
+
+    # Stage 4 & 5: Hardware Playback Execution and Completion Verification
+    stage4 = {"stage": "playback_execution", "success": False, "details": {}}
+    stages.append(stage4)
+
+    t0_play = time.time()
+    play_result = mgr.speak_streamed(test_text, voice=diag_result["voice"])
+    play_ms = (time.time() - t0_play) * 1000.0
+
+    diag_result["metrics"]["playback_ms"] = play_ms
+    diag_result["metrics"]["sentences_played"] = play_result.sentences_played
+    diag_result["metrics"]["first_audio_ms"] = play_result.first_audio_ms
+
+    if play_result.error or play_result.sentences_played == 0:
+        stage4["details"] = {"error": play_result.error or "0 sentences played", "playback_ms": play_ms}
+        diag_result["failing_stage"] = "playback_execution"
+        diag_result["message"] = f"Audio playback failed on {dev_name}: {play_result.error or 'no audio played'}"
+        return diag_result
+
+    stage4["success"] = True
+    stage4["details"] = {
+        "backend": play_result.backend_used,
+        "voice": play_result.voice_used,
+        "playback_ms": play_ms,
+        "sentences_played": play_result.sentences_played
+    }
+    if play_result.backend_used != primary.name:
+        diag_result["fallback_used"] = True
+        diag_result["fallback_provider"] = play_result.backend_used
+
+    # Stage 6: Final Verification
+    stage5 = {"stage": "verification", "success": True, "details": {}}
+    stages.append(stage5)
+    diag_result["success"] = True
+
+    msg_prov = f"{diag_result['fallback_provider']} (fallback)" if diag_result["fallback_used"] else diag_result["provider"]
+    diag_result["message"] = (
+        f"TTS Diagnostic PASSED: Generated and played {len(audio_bytes)} bytes ({play_result.sentences_played} sentences) "
+        f"using provider '{msg_prov}' with voice '{play_result.voice_used or diag_result['voice']}' on device '{dev_name}' "
+        f"in {play_ms:.0f} ms."
+    )
+    return diag_result

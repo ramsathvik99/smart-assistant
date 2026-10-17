@@ -3,16 +3,7 @@ Native Assistant Skills Package
 Provides specialized capabilities integrated into the assistant architecture.
 """
 
-from . import device_management
-from . import task_management
-from . import smart_home
-from . import audio_management
-from . import window_management
-from . import learning
-from . import undo
-from . import device_location
-from . import clipboard
-from . import clock_manager
+import importlib
 
 __all__ = [
     "device_management",
@@ -26,3 +17,13 @@ __all__ = [
     "clipboard",
     "clock_manager",
 ]
+
+def __getattr__(name: str):
+    if name in __all__:
+        module = importlib.import_module(f".{name}", __name__)
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+def __dir__():
+    return __all__

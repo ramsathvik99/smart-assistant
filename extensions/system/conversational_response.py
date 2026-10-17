@@ -689,7 +689,7 @@ class ConversationalResponseComposer:
         if not is_media_query:
             try:
                 from extensions.dialogue_state_manager import get_dialogue_manager
-                dm = get_dialogue_manager(user_id=int(user_id) if str(user_id).isdigit() else 1)
+                dm = get_dialogue_manager(user_id=int(user_id) if (user_id and str(user_id).isdigit()) else None)
                 active_goal = dm.get_active_goal()
                 if active_goal:
                     title = active_goal.get("title") or active_goal.get("topic") or "your project"
@@ -733,7 +733,7 @@ class ConversationalResponseComposer:
     def _get_contextual_follow_up(self, ctx: Dict[str, Any], user_id: Any) -> Optional[str]:
         try:
             from extensions.dialogue_state_manager import get_dialogue_manager
-            dm = get_dialogue_manager(user_id=int(user_id) if str(user_id).isdigit() else 1)
+            dm = get_dialogue_manager(user_id=int(user_id) if (user_id and str(user_id).isdigit()) else None)
             active_goal = dm.get_active_goal()
             if active_goal:
                 rem_subtasks = active_goal.get("remaining_subtasks") or []

@@ -584,8 +584,8 @@ class DialogueStateManager:
                     print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (distributed plural action: '{v}')")
                     return resolved, True
                 else:
-                    # Guard: Document refinement commands like "add references to both" must NOT replace 'both' with filenames
-                    if re.search(r'\b(?:add\s+references|make|turn|convert|put)\b', clean_text, re.IGNORECASE):
+                    # Guard: Document refinement commands like "add references to both" or conflict resolutions like "keep both" must NOT replace 'both' with filenames/topics
+                    if re.search(r'\b(?:add\s+references|make|turn|convert|put|keep\s+both|keep\s+them|keep)\b', clean_text, re.IGNORECASE):
                         return user_input, False
                     replacement = " and ".join(entities) if len(entities) == 2 else (", ".join(entities[:-1]) + f" and {entities[-1]}" if len(entities) > 2 else entities[0])
                     clean_text = re.sub(r"\b(both of them|both|all of them|all|them|those two|those|these two|the two)\b", lambda m: replacement, clean_text, flags=re.IGNORECASE)
@@ -2606,6 +2606,13 @@ class DialogueStateManager:
             if len(self.current_state.recent_failed_actions) > 20:
                 self.current_state.recent_failed_actions.pop(0)
 
+    def record_execution_result(self, execution_result: Dict[str, Any], intents: Optional[List[str]] = None) -> None:
+        """Alias/wrapper for recording execution results into DialogueStateManager."""
+        self.update_state(
+            execution_result=execution_result,
+            intents=intents or []
+        )
+
     def record_goal_outcome(self, outcome: Any) -> Dict[str, Any]:
         """
         Record final outcome of a goal and enforce goal boundary (PHASE 8).
@@ -3271,9 +3278,20 @@ class DialogueStateManager:
 _dialogue_managers: Dict[str, DialogueStateManager] = {}
 
 
-def get_dialogue_manager(user_id: Any = "default") -> DialogueStateManager:
-    """Get or create dialogue manager for user"""
-    uid_str = str(user_id if user_id is not None else "default")
+def get_dialogue_manager(user_id: Any = None) -> DialogueStateManager:
+    """Get or create dialogue manager for user with active session resolution."""
+    resolved_uid = user_id
+    if resolved_uid is None or str(resolved_uid).lower() in ("default", "none"):
+        try:
+            from instance.config import settings
+            cur_uid = getattr(settings, 'CURRENT_USER_ID', None)
+            if cur_uid is not None:
+                resolved_uid = cur_uid
+            elif hasattr(settings, 'get_last_user'):
+                resolved_uid = settings.get_last_user()
+        except Exception:
+            pass
+    uid_str = str(resolved_uid if resolved_uid is not None else "default")
     if uid_str not in _dialogue_managers:
         _dialogue_managers[uid_str] = DialogueStateManager(uid_str)
     return _dialogue_managers[uid_str]

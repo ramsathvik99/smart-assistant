@@ -13,12 +13,13 @@ so the UI reacts to real state changes without polling latency.
 
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime
 from typing import Callable, Dict, Optional
 
-from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal, QEvent, QPointF
-from PyQt6.QtGui import QAction, QColor, QIcon, QPixmap, QPainter, QBrush, QRadialGradient, QPalette
+from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal, QEvent, QPointF, QRectF
+from PyQt6.QtGui import QAction, QColor, QIcon, QPixmap, QPainter, QBrush, QRadialGradient, QPalette, QPen, QConicalGradient
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QVBoxLayout, QFrame, QLabel, QPushButton,
     QStackedWidget, QWidget, QSizePolicy, QToolButton, QLineEdit, QScrollArea,
@@ -148,7 +149,7 @@ class AssistantOrb(QWidget):
             speed = 2.0 if self._state == "thinking" else 4.5
             p.rotate(math.degrees(self._pulse * speed))
             rr = w * 0.44
-            arc_g = QConicalGradient_fallback(0, 0, 0)
+            arc_g = QConicalGradient(0.0, 0.0, 0.0)
             arc_g.setColorAt(0.0, QColor(r, g, b, 250))
             arc_g.setColorAt(0.35, QColor(r, g, b, 40))
             arc_g.setColorAt(0.75, QColor(r, g, b, 0))
@@ -597,6 +598,7 @@ class DashboardMainWindow(QWidget):
     restored = pyqtSignal()
     logout_requested = pyqtSignal()
     assistant_name_changed = pyqtSignal(str)
+    accent_changed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -693,6 +695,16 @@ class DashboardMainWindow(QWidget):
             self.pages.addWidget(page)
             self._page_map[pid] = page
 
+        # Wire settings page configuration signals to main window
+        settings_page = self._page_map.get("settings")
+        if settings_page:
+            if hasattr(settings_page, "accent_changed"):
+                settings_page.accent_changed.connect(self.set_accent)
+            if hasattr(settings_page, "dashboard_color_changed"):
+                settings_page.dashboard_color_changed.connect(self.set_accent)
+            if hasattr(settings_page, "identity_changed"):
+                settings_page.identity_changed.connect(self._on_settings_identity_changed)
+
         center.addWidget(self.pages, 1)
 
         self.status = StatusStrip()
@@ -716,36 +728,57 @@ class DashboardMainWindow(QWidget):
     def _apply_theme(self):
         self.setStyleSheet(dashboard_stylesheet(self._accent))
 
+    def _on_settings_identity_changed(self):
+        try:
+            ident = get_identity()
+            new_name = ident.get("assistant_name")
+            if new_name:
+                self.set_assistant_name(new_name)
+                self.assistant_name_changed.emit(new_name)
+        except Exception as e:
+            print(f"[DASHBOARD] _on_settings_identity_changed error: {e}")
+
     def set_accent(self, accent_hex: str):
         try:
-            self._accent = ensure_visible_accent(accent_hex or C.ACC)
-            C.ACCENT = self._accent
-            C.ACCENT_CYAN = self._accent
-            C.ACC = self._accent
-            C.SEC_DASHBOARD = self._accent
-            if hasattr(self, 'ambient_engine') and self.ambient_engine:
-                self.ambient_engine.set_accent(self._accent)
-            if hasattr(self, 'sidebar') and hasattr(self.sidebar, '_nav_accents'):
-                self.sidebar._nav_accents["home"] = self._accent
-            app = QApplication.instance()
-            if app:
-                app.setStyleSheet(dashboard_stylesheet(self._accent))
-            self._apply_theme()
-            if hasattr(self, 'sidebar') and hasattr(self.sidebar, '_current') and self.sidebar._current:
-                self.sidebar.set_current(self.sidebar._current)
-                accent = self.sidebar._nav_accents.get(self.sidebar._current, C.SEC_SETTINGS)
-                label = self.sidebar._current
-                for pid, lab, _ic, _cls in _NAV_ITEMS:
-                    if pid == self.sidebar._current:
-                        label = lab
-                        break
-                self.topbar.set_crumb(label, accent)
-            for page in self._page_map.values():
-                if hasattr(page, "on_accent_changed"):
-                    try:
-                        page.on_accent_changed(self._accent)
-                    except Exception:
-                        pass
+            target_accent = ensure_visible_accent(accent_hex or C.ACC)
+            curr = getattr(self, '_accent', None)
+            if curr and str(curr).strip().lower() == str(target_accent).strip().lower():
+                return  # Prevent redundant re-theming and infinite signal recursion
+            if getattr(self, '_in_accent_update', False):
+                return
+            self._in_accent_update = True
+            try:
+                self._accent = target_accent
+                C.ACCENT = self._accent
+                C.ACCENT_CYAN = self._accent
+                C.ACC = self._accent
+                C.SEC_DASHBOARD = self._accent
+                if hasattr(self, 'ambient_engine') and self.ambient_engine:
+                    self.ambient_engine.set_accent(self._accent)
+                if hasattr(self, 'sidebar') and hasattr(self.sidebar, '_nav_accents'):
+                    self.sidebar._nav_accents["home"] = self._accent
+                app = QApplication.instance()
+                if app:
+                    app.setStyleSheet(dashboard_stylesheet(self._accent))
+                self._apply_theme()
+                if hasattr(self, 'sidebar') and hasattr(self.sidebar, '_current') and self.sidebar._current:
+                    self.sidebar.set_current(self.sidebar._current)
+                    accent = self.sidebar._nav_accents.get(self.sidebar._current, C.SEC_SETTINGS)
+                    label = self.sidebar._current
+                    for pid, lab, _ic, _cls in _NAV_ITEMS:
+                        if pid == self.sidebar._current:
+                            label = lab
+                            break
+                    self.topbar.set_crumb(label, accent)
+                for page in self._page_map.values():
+                    if hasattr(page, "on_accent_changed"):
+                        try:
+                            page.on_accent_changed(self._accent)
+                        except Exception:
+                            pass
+                self.accent_changed.emit(self._accent)
+            finally:
+                self._in_accent_update = False
         except Exception as e:
             print(f"[DASHBOARD] set_accent error: {e}")
 
@@ -961,12 +994,15 @@ class DashboardMainWindow(QWidget):
 
     def set_assistant_name(self, name: str):
         """Set assistant name (compatibility with pyqt_app.py)"""
+        clean_name = str(name).strip() if name else "Trevon"
+        if getattr(self, '_assistant_name', None) == clean_name:
+            return
         ident = get_identity()
         if ident:
-            ident["assistant_name"] = name
-        self.sidebar.update_identity(ident.get("username"), name)
-        self.setWindowTitle(f"Smart Assistant — {name}")
-        self._assistant_name = name
+            ident["assistant_name"] = clean_name
+        self.sidebar.update_identity(ident.get("username") if ident else None, clean_name)
+        self.setWindowTitle(f"Smart Assistant — {clean_name}")
+        self._assistant_name = clean_name
 
     def set_user_name(self, name: str):
         """Set user name (compatibility with pyqt_app.py)"""

@@ -120,6 +120,8 @@ class QuickActionsPanel(QWidget):
     def set_accent_color(self, hex_color: str):
         """Dynamically update Quick Actions HUD border and title accent."""
         hex_color = ensure_visible_accent(hex_color)
+        if hasattr(self, '_custom_hex') and str(self._custom_hex).strip().lower() == str(hex_color).strip().lower():
+            return
         self._custom_hex = hex_color
         self._card.setStyleSheet(f"""
             QFrame#QuickCard {{
@@ -479,6 +481,9 @@ class AssistantControlCenterPanel(QWidget):
     def set_accent_color(self, hex_color: str):
         """Re-theme the Control Center panel (border, shadow, titles, assistant badge, button hovers)."""
         acc = ensure_visible_accent(str(hex_color).strip())
+        if hasattr(self, '_custom_hex') and str(self._custom_hex).strip().lower() == str(acc).strip().lower():
+            return
+        self._custom_hex = acc
         r, g, b = hex_to_rgb(acc)
         # Card border + shadow
         if hasattr(self, '_card'):
@@ -583,7 +588,8 @@ class FloatingLauncher(QWidget):
     # State colors: (R, G, B)
     _STATE_COLORS = {
         "idle":       (0, 212, 255),    # Cyan
-        "listening":  (0, 170, 255),    # Blue
+        "listening":  (0, 212, 255),    # Electric Cyan
+        "processing": (168, 85, 247),   # Violet
         "thinking":   (168, 85, 247),   # Violet
         "planning":   (138, 43, 226),   # Purple
         "executing":  (255, 140, 0),    # Amber
@@ -600,10 +606,11 @@ class FloatingLauncher(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(86, 86)
+        self.setFixedSize(148, 114)
 
         # State
         self._state = "idle"
+        self._status_message = ""
         self._assistant_name = "Trevon"
         self._username = "User"
         self._initial_letter = "T"
@@ -641,11 +648,14 @@ class FloatingLauncher(QWidget):
 
         # Initial placement: Bottom-Right screen
         screen = QApplication.primaryScreen().availableGeometry()
-        self.move(screen.width() - 110, screen.height() - 140)
+        self.move(screen.width() - 170, screen.height() - 150)
 
     def set_assistant_name(self, name: str):
         """Update assistant identity while maintaining the centered initial."""
-        self._assistant_name = name or "Trevon"
+        clean_name = name or "Trevon"
+        if getattr(self, '_assistant_name', None) == clean_name:
+            return
+        self._assistant_name = clean_name
         self._initial_letter = self._assistant_name[0].upper() if self._assistant_name else "T"
         self.setToolTip(f"{self._assistant_name} (Click: Focus | Double-click: Quick Actions | Right-click: Controls)")
         if hasattr(self, '_quick_hud') and self._quick_hud:
@@ -669,6 +679,9 @@ class FloatingLauncher(QWidget):
         """
         from modules.ui.design_system import hex_to_rgb, ensure_visible_accent
         safe_hex = ensure_visible_accent(str(hex_color).strip())
+        curr = getattr(self, '_custom_hex', None)
+        if curr and str(curr).strip().lower() == str(safe_hex).strip().lower():
+            return
         self._custom_hex = safe_hex
         self._custom_rgb = hex_to_rgb(safe_hex)
         # Propagate to Quick Actions HUD
@@ -692,10 +705,16 @@ class FloatingLauncher(QWidget):
         if hasattr(self, '_visual_panel') and self._visual_panel:
             self._visual_panel.dismiss()
 
-    def set_state(self, state: str):
-        """Update state: idle, listening, thinking, planning, executing, speaking, error."""
-        if state != self._state:
-            self._state = state
+    def set_state(self, state: str, message: str = ""):
+        """Update state: idle, listening, processing, thinking, planning, executing, speaking, error."""
+        clean_state = (state or "idle").lower().strip()
+        state_changed = (clean_state != self._state)
+        msg_changed = (message != "" and message != self._status_message)
+
+        if state_changed or msg_changed:
+            self._state = clean_state
+            if message or clean_state in ("idle", "listening", "processing", "speaking"):
+                self._status_message = message or ""
             # If quick HUD is open, adapt contextually
             if self._quick_hud and self._quick_hud.isVisible():
                 self._quick_hud.update_context(self._state, self._assistant_name)
@@ -723,7 +742,7 @@ class FloatingLauncher(QWidget):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
         w, h = float(self.width()), float(self.height())
-        cx, cy = w / 2.0, h / 2.0
+        cx, cy = w / 2.0, 44.0
         r, g, b = self._state_rgb()
 
         # Dynamic size with audio reactivity and hover boost
@@ -733,7 +752,7 @@ class FloatingLauncher(QWidget):
             base_radius += 1.5
 
         # 1. Subtle Expanding Pulse Wave (Radiating ripple effect)
-        wave_speed = 1.2 if self._state == "thinking" else 0.7
+        wave_speed = 1.2 if self._state in ("thinking", "processing") else 0.7
         wave_prog = (self._t * wave_speed) % 1.0
         wave_r = base_radius + 2.0 + (wave_prog * 9.5)
         wave_alpha = int(max(0, 42 * (1.0 - wave_prog)))
@@ -745,7 +764,7 @@ class FloatingLauncher(QWidget):
             p.drawEllipse(QPointF(cx, cy), wave_r, wave_r)
 
         # 2. Outer Subtle Pulse Ring (Ambient breathing ring)
-        pulse_freq = 3.2 if self._state == "thinking" else 2.2
+        pulse_freq = 3.2 if self._state in ("thinking", "processing") else 2.2
         pulse_r = base_radius + 5.5 + (math.sin(self._t * pulse_freq) * 1.8) + (audio_boost * 1.0)
         pulse_alpha = int(48 + 48 * self._glow_phase)
         pulse_pen = QPen(QColor(r, g, b, pulse_alpha))
@@ -753,6 +772,15 @@ class FloatingLauncher(QWidget):
         p.setPen(pulse_pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawEllipse(QPointF(cx, cy), pulse_r, pulse_r)
+
+        # 2.5 Distinct Listening Ring (Reactive outer aura when actively capturing user voice)
+        if self._state == "listening":
+            listen_r = base_radius + 6.8 + (self._audio_lvl * 8.0)
+            listen_pen = QPen(QColor(r, g, b, int(200 + 55 * self._glow_phase)))
+            listen_pen.setWidthF(2.2 + self._audio_lvl * 1.6)
+            p.setPen(listen_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), listen_r, listen_r)
 
         # 3. Ambient Glow Halo behind the segmented ring
         halo_r = base_radius + 7.5
@@ -776,7 +804,7 @@ class FloatingLauncher(QWidget):
         num_segments = 4
         seg_span = 64.0   # Arc length in degrees
         gap_span = 26.0   # Gap length in degrees
-        rot_speed = 52.0 if self._state == "thinking" else (30.0 if self._state == "executing" else 22.0)
+        rot_speed = 52.0 if self._state in ("thinking", "processing") else (30.0 if self._state == "executing" else 22.0)
         rot_deg = (self._t * rot_speed) % 360.0
 
         seg_alpha = int(210 + 45 * self._glow_phase)
@@ -790,6 +818,18 @@ class FloatingLauncher(QWidget):
         for i in range(num_segments):
             start_angle = (rot_deg + i * (seg_span + gap_span)) % 360.0
             p.drawArc(rect_seg, int(start_angle * 16), int(seg_span * 16))
+
+        # 5.5 Processing Dual Orbit Arc (When utterance ended and recognition is computing)
+        if self._state in ("processing", "thinking"):
+            proc_r = base_radius + 4.5
+            proc_deg = (self._t * 90.0) % 360.0
+            proc_pen = QPen(QColor(168, 85, 247, 240))
+            proc_pen.setWidthF(2.0)
+            proc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(proc_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawArc(QRectF(cx - proc_r, cy - proc_r, proc_r * 2.0, proc_r * 2.0), int(proc_deg * 16), int(75 * 16))
+            p.drawArc(QRectF(cx - proc_r, cy - proc_r, proc_r * 2.0, proc_r * 2.0), int((proc_deg + 180.0) * 16), int(75 * 16))
 
         # 6. Central Dark Cybernetic Glass Core Disc
         core_r = base_radius - 5.5
@@ -811,7 +851,7 @@ class FloatingLauncher(QWidget):
         p.setBrush(QBrush(glow_grad))
         p.drawEllipse(QPointF(cx, cy), core_glow_r, core_glow_r)
 
-        # 8. Center 'F'
+        # 8. Center Initial Letter
         letter = self._initial_letter or "F"
         letter_font = QFont(F.PRIMARY, 19, QFont.Weight.Bold)
         letter_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
@@ -826,6 +866,96 @@ class FloatingLauncher(QWidget):
         p.setPen(QPen(QColor(245, 250, 255)))
         p.drawText(QRectF(cx - 20, cy - 20, 40, 40),
                    Qt.AlignmentFlag.AlignCenter, letter)
+
+        # 8.5 Micro Cybernetic Microphone Glyph (Active during listening)
+        if self._state == "listening":
+            mic_x = cx + 12.0
+            mic_y = cy + 10.0
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(r, g, b, 230)))
+            # Mic capsule
+            p.drawRoundedRect(QRectF(mic_x - 2.0, mic_y - 4.5, 4.0, 7.0), 2.0, 2.0)
+            # Mic cradle arc
+            cradle_pen = QPen(QColor(245, 250, 255, 230))
+            cradle_pen.setWidthF(1.2)
+            p.setPen(cradle_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawArc(QRectF(mic_x - 3.5, mic_y - 2.5, 7.0, 6.0), int(190 * 16), int(160 * 16))
+            # Stem and base
+            p.drawLine(QPointF(mic_x, mic_y + 3.5), QPointF(mic_x, mic_y + 6.0))
+            p.drawLine(QPointF(mic_x - 2.5, mic_y + 6.0), QPointF(mic_x + 2.5, mic_y + 6.0))
+
+        # 9. Clear, Reliable Runtime Status Pill
+        show_pill = (self._state != "idle") or self._hovered
+        if show_pill:
+            pill_w = 126.0
+            pill_h = 22.0
+            pill_x = cx - (pill_w / 2.0)
+            pill_y = 88.0
+            pill_rect = QRectF(pill_x, pill_y, pill_w, pill_h)
+
+            # Dark cybernetic translucent glass pill
+            pill_grad = QLinearGradient(pill_x, pill_y, pill_x, pill_y + pill_h)
+            pill_grad.setColorAt(0.0, QColor(10, 16, 26, 235))
+            pill_grad.setColorAt(1.0, QColor(6, 10, 18, 245))
+            p.setBrush(QBrush(pill_grad))
+            p.setPen(QPen(QColor(r, g, b, 140), 1.0))
+            p.drawRoundedRect(pill_rect, 9.0, 9.0)
+
+            # Determine icon & label
+            if self._state == "listening":
+                label = "Listening…"
+                dot_alpha = int(180 + 75 * math.sin(self._t * 7.0))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(QColor(r, g, b, dot_alpha)))
+                p.drawEllipse(QPointF(pill_x + 14.0, pill_y + 11.0), 3.5, 3.5)
+            elif self._state in ("processing", "thinking"):
+                label = "Processing…"
+                spin_angle = (self._t * 6.0) % (2.0 * math.pi)
+                sx = pill_x + 14.0 + 3.0 * math.cos(spin_angle)
+                sy = pill_y + 11.0 + 3.0 * math.sin(spin_angle)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(QColor(168, 85, 247, 240)))
+                p.drawEllipse(QPointF(sx, sy), 2.8, 2.8)
+            elif self._state == "speaking":
+                label = "Responding…"
+                p.setPen(QPen(QColor(0, 229, 107), 1.2))
+                p.setBrush(QBrush(QColor(0, 229, 107)))
+                p.drawRect(QRectF(pill_x + 10.0, pill_y + 8.5, 3.0, 5.0))
+                p.drawPolygon([
+                    QPointF(pill_x + 13.0, pill_y + 8.5),
+                    QPointF(pill_x + 16.5, pill_y + 6.0),
+                    QPointF(pill_x + 16.5, pill_y + 16.0),
+                    QPointF(pill_x + 13.0, pill_y + 13.5),
+                ])
+            elif self._state == "error":
+                label = self._status_message if self._status_message else "Error"
+                if len(label) > 17:
+                    label = label[:15] + "…"
+                p.setPen(QPen(QColor(255, 71, 87), 1.2))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawPolygon([
+                    QPointF(pill_x + 14.0, pill_y + 6.5),
+                    QPointF(pill_x + 8.5, pill_y + 16.0),
+                    QPointF(pill_x + 19.5, pill_y + 16.0),
+                ])
+                p.setPen(QPen(QColor(255, 255, 255), 1.2))
+                p.drawPoint(QPointF(pill_x + 14.0, pill_y + 13.5))
+            elif self._state == "idle" and self._hovered:
+                label = "Ready"
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(QColor(0, 212, 255, 200)))
+                p.drawEllipse(QPointF(pill_x + 14.0, pill_y + 11.0), 3.0, 3.0)
+            else:
+                label = self._status_message if self._status_message else self._state.capitalize()
+
+            # Render text
+            pill_font = QFont(F.MONO, 7, QFont.Weight.Bold)
+            pill_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+            p.setFont(pill_font)
+            p.setPen(QPen(QColor(r, g, b)))
+            text_rect = QRectF(pill_x + 22.0, pill_y, pill_w - 26.0, pill_h)
+            p.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
 
         p.end()
 

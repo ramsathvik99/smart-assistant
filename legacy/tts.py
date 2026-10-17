@@ -1,8 +1,18 @@
 import os
+import sys
 import time
 import queue
 import threading
 import tempfile
+
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+except Exception:
+    pass
+
 from gtts import gTTS
 from playsound import playsound
 import pyttsx3
@@ -39,12 +49,25 @@ floating_ref = None
 # pyttsx3 call.  Thread-safe: written only from the main thread at login/settings-save,
 # read only from the TTS worker thread which calls _speak_pyttsx3().
 _voice_id:     str | None = None   # SAPI5 voice id string; None = pyttsx3 default
-_voice_rate:   int        = 155    # words-per-minute
+_voice_rate:   int        = 135    # words-per-minute (conversational default: 125-145 wpm)
 _voice_volume: float      = 1.0   # 0.0 – 1.0
 _last_playback_metrics: dict = {}
 
 def get_last_playback_metrics() -> dict:
     return dict(_last_playback_metrics)
+
+def get_active_voice_id() -> str | None:
+    return _voice_id
+
+
+_cached_voices: list[dict] | None = None
+_cached_voices_lock = threading.Lock()
+
+def invalidate_voice_cache() -> None:
+    """Clear voice enumeration cache if voices are installed or updated."""
+    global _cached_voices
+    with _cached_voices_lock:
+        _cached_voices = None
 
 
 def enumerate_voices() -> list[dict]:
@@ -52,8 +75,12 @@ def enumerate_voices() -> list[dict]:
     Return a list of all real installed voices on this Windows system
     (covering both SAPI5 and OneCore voice tokens).
     Each entry: {id, name, gender, language, provider}
-    Safe to call from any thread.
+    Safe to call from any thread; cached after first successful discovery.
     """
+    global _cached_voices
+    with _cached_voices_lock:
+        if _cached_voices is not None:
+            return list(_cached_voices)
     import winreg
     import locale
 
@@ -167,31 +194,137 @@ def enumerate_voices() -> list[dict]:
     for v in results:
         print(f"[VOICE DISCOVERY] Voice:\n    name={v.get('name')}\n    id={v.get('id')}\n    languages={v.get('language')}")
 
+    with _cached_voices_lock:
+        _cached_voices = list(results)
+
     return results
 
 
-def apply_voice_profile(voice_id: str | None, rate: int = 155, volume: float = 1.0):
+def validate_user_voice(
+    voice_id: str | None,
+    provider: str | None = None,
+    user_prefs: dict | None = None,
+) -> tuple[str, str]:
     """
-    Set the per-user voice identity that all subsequent pyttsx3 calls will use.
-    Call this once at login and again whenever the user saves new settings.
-    Thread-safe: only call from the main/UI thread.
+    Validate requested voice_id against active/target provider.
+    Rejects test IDs, SAPI registry IDs on Neural backends, and Neural strings on SAPI backends.
+    Returns (valid_provider, valid_voice_id).
+    """
+    prefs = user_prefs or {}
+    target_prov = (provider or prefs.get("voice_engine") or prefs.get("voice_provider") or prefs.get("assistant_voice_provider") or "").lower()
+
+    vid_str = str(voice_id).strip() if voice_id else ""
+    vid_lower = vid_str.lower()
+
+    if not target_prov:
+        if "hkey_" in vid_lower or "speech\\voices" in vid_lower or "onecore" in vid_lower or "desktop" in vid_lower:
+            target_prov = "sapi"
+        elif "neural" in vid_lower:
+            target_prov = "neural"
+        else:
+            try:
+                from extensions.system.tts_backend import get_tts_backend_manager
+                target_prov = get_tts_backend_manager().get_backend().name
+            except Exception:
+                target_prov = os.getenv("TTS_PROVIDER", "neural").lower()
+
+    gender = prefs.get("gender") or prefs.get("voice_gender")
+    language = prefs.get("language") or prefs.get("voice_language")
+
+    if "sapi" in target_prov or "windows" in target_prov:
+        from extensions.system.tts_backend import SAPIBackend
+        valid_voice = SAPIBackend.validate_or_fallback_voice(vid_str if vid_str else None, gender=gender, language=language)
+        return "sapi", valid_voice or "default"
+    else:
+        from extensions.system.tts_backend import NeuralTTSBackend
+        valid_voice = NeuralTTSBackend.validate_or_fallback_voice(vid_str if vid_str else None, gender=gender, language=language)
+        return "neural", valid_voice
+
+
+def apply_voice_profile(voice_id: str | None, rate: int = 135, volume: float = 1.0, user_id: int | None = None, provider: str | None = None):
+    """
+    Set the per-user voice identity that all subsequent TTS calls will use.
+    Performs provider-aware voice validation, corrects obsolete/test IDs,
+    and persists corrected valid profiles per-user.
     """
     global _voice_id, _voice_rate, _voice_volume
-    _voice_id     = voice_id
-    _voice_rate   = max(80, min(300, int(rate)))
-    _voice_volume = max(0.0, min(1.0, float(volume)))
-    if voice_id:
-        print(f"[VOICE] Applying voice: {voice_id}")
-    print(f"[TTS] Voice profile applied — id={voice_id!r}, rate={_voice_rate}, volume={_voice_volume}")
+    target_rate   = max(80, min(300, int(rate)))
+    target_volume = max(0.0, min(1.0, float(volume)))
+
+    eff_uid = user_id
+    if eff_uid is None:
+        try:
+            import config as settings
+            eff_uid = getattr(settings, "CURRENT_USER_ID", None) or settings.get_last_user()
+        except Exception:
+            eff_uid = None
+
+    user_prefs = {}
+    if eff_uid:
+        try:
+            from core.configuration_service import get_config_service
+            user_prefs = get_config_service().get_user_preferences(eff_uid)
+        except Exception:
+            pass
+
+    valid_provider, valid_voice = validate_user_voice(voice_id, provider=provider, user_prefs=user_prefs)
+
+    # If the requested voice was invalid/test ID and had to be corrected, persist the correction
+    if voice_id and voice_id != valid_voice and eff_uid:
+        print(f"[VOICE] Correcting invalid voice {voice_id!r} -> {valid_voice!r} (provider={valid_provider}) for user {eff_uid}")
+        try:
+            from core.configuration_service import get_config_service
+            cfg = get_config_service()
+            cfg.set_preference(eff_uid, "voice_id", valid_voice)
+            cfg.set_preference(eff_uid, "voice_provider", valid_provider)
+        except Exception as e_pers:
+            print(f"[VOICE] Could not persist corrected voice: {e_pers}")
+
+    # Deduplication guard: ignore redundant re-applications of identical voice settings
+    if _voice_id == valid_voice and _voice_rate == target_rate and _voice_volume == target_volume:
+        return
+
+    _voice_id     = valid_voice
+    _voice_rate   = target_rate
+    _voice_volume = target_volume
+    print(f"[VOICE] Applying voice: {_voice_id} (provider={valid_provider})")
+    print(f"[TTS] Voice profile applied — id={_voice_id!r}, rate={_voice_rate}, volume={_voice_volume}")
+
+    try:
+        from extensions.system.tts_backend import get_tts_backend_manager
+        backend_mgr = get_tts_backend_manager()
+        backend_mgr.set_primary_provider(valid_provider)
+        if valid_provider == "neural":
+            neural_be = backend_mgr.get_backend("neural")
+            if hasattr(neural_be, "_voice"):
+                neural_be._voice = valid_voice
+        elif valid_provider == "sapi":
+            sapi_be = backend_mgr.get_backend("sapi")
+            if hasattr(sapi_be, "_voice_id"):
+                sapi_be._voice_id = valid_voice
+    except Exception as e:
+        print(f"[TTS] Voice sync warning: {e}")
 
 
 def preview_voice(voice_id: str, rate: int = 155, volume: float = 1.0, text: str = "Hello. This is a preview of my voice.") -> bool:
     """
     Speak a short preview sample using THAT SPECIFIC voice token immediately.
     Logs [VOICE] Previewing voice: <voice_id>
+    Provider-aware: uses Neural TTS for neural voices, SAPI for Windows voices.
     """
     print(f"[VOICE] Previewing voice: {voice_id}")
-    return _speak_pyttsx3(text, voice_id=voice_id, rate=rate, volume=volume)
+    prov, valid_voice = validate_user_voice(voice_id)
+    if prov == "neural":
+        try:
+            from extensions.system.tts_backend import get_tts_backend_manager
+            be = get_tts_backend_manager().get_backend("neural")
+            if be.is_available():
+                res = be.stream_and_play(text, voice=valid_voice, rate=rate / 155.0, volume=volume)
+                if not res.error and res.sentences_played > 0:
+                    return True
+        except Exception as e:
+            print(f"[VOICE] Neural preview failed ({e}) — falling back to SAPI")
+    return _speak_pyttsx3(text, voice_id=valid_voice, rate=rate, volume=volume)
 
 # Speech listener callbacks (e.g. for chat feed updates)
 _speech_callbacks = []
@@ -270,6 +403,11 @@ def _tts_worker():
 
         _start_animation()
         _tts_active.set()         # mark TTS as speaking
+        try:
+            from core.voice_lifecycle import get_voice_lifecycle
+            get_voice_lifecycle().on_tts_started()
+        except Exception:
+            pass
         _notify_speech_callbacks(text)
 
         meta = None
@@ -282,6 +420,10 @@ def _tts_worker():
             pass
 
         t_start = time.monotonic()
+        playback_backend = "unknown"
+        playback_voice = _voice_id
+        sentences_played = 0
+        byte_count = 0
         try:
             success = False
             if _tts_interrupted.is_set():
@@ -293,31 +435,50 @@ def _tts_worker():
                 backend_mgr = get_tts_backend_manager()
                 active_backend = backend_mgr.get_backend()
                 if active_backend.name != "sapi" and active_backend.is_available():
-                    res = active_backend.stream_and_play(text, metadata=meta)
+                    playback_backend = active_backend.name
+                    # If lang_hint is English (or omitted) and _voice_id is set, pass it;
+                    # otherwise let active_backend resolve to the proper target multilingual neural voice.
+                    req_voice = _voice_id if (not lang_hint or str(lang_hint).lower() in ("en", "en-us", "en-gb", "en-in")) else None
+                    res = active_backend.stream_and_play(
+                        text,
+                        voice=req_voice,
+                        language=lang_hint,
+                        rate=_voice_rate / 155.0,
+                        volume=_voice_volume,
+                        metadata=meta,
+                    )
+                    playback_voice = res.voice_used or _voice_id
+                    sentences_played = res.sentences_played
+                    byte_count = res.byte_count
                     if res.interrupted or _tts_interrupted.is_set():
                         continue
-                    if not res.error:
+                    if not res.error and res.sentences_played > 0:
                         success = True
+                    else:
+                        print(f"[TTS DIAGNOSTIC] Neural backend stream error ({res.error or '0 sentences'}) [voice={req_voice}, lang={lang_hint}] — falling back to SAPI/pyttsx3")
             except Exception as _neural_err:
-                print(f"[TTS] Neural backend notice ({_neural_err}) — falling back to SAPI/pyttsx3")
+                print(f"[TTS DIAGNOSTIC] Neural backend exception: {_neural_err} [voice={_voice_id}, lang={lang_hint}] — falling back to SAPI/pyttsx3")
 
             # ── 2. Fallback to native Windows SAPI / OneCore (English) ──
             if not success and not _tts_interrupted.is_set():
+                playback_backend = "sapi_fallback"
                 if lang_hint == 'en':
                     success = _speak_pyttsx3(text)
                     if not success and not _tts_interrupted.is_set():
                         # pyttsx3 failed — fall back to gTTS for English
-                        print("[TTS] pyttsx3 failed; trying gTTS fallback for English")
+                        print("[TTS DIAGNOSTIC] pyttsx3 failed; trying gTTS fallback for English")
+                        playback_backend = "gtts_fallback"
                         success = _speak_gtts(text, 'en')
                 else:
+                    playback_backend = "gtts_fallback"
                     success = _speak_gtts(text, lang_hint)
                     if not success and not _tts_interrupted.is_set():
-                        print(f"[TTS] gTTS failed for lang={lang_hint}")
+                        print(f"[TTS DIAGNOSTIC] gTTS failed for lang={lang_hint}")
 
             if not success and not _tts_interrupted.is_set():
-                print(f"[TTS] Both synthesis engines failed for text: {text[:60]!r}")
+                print(f"[TTS DIAGNOSTIC] Both synthesis engines failed for text: {text[:60]!r}")
         finally:
-            duration = max(0.01, time.monotonic() - t_start)
+            duration = max(0.001, time.monotonic() - t_start)
             ui_text = (meta.get("ui_text") or meta.get("text") or text) if isinstance(meta, dict) else text
             metrics = {
                 "ui_text": ui_text,
@@ -325,15 +486,38 @@ def _tts_worker():
                 "word_count": len(text.split()),
                 "char_count": len(text),
                 "duration": duration,
+                "playback_duration_sec": duration,
+                "success": bool(success),
+                "interrupted": bool(_tts_interrupted.is_set()),
+                "backend_used": playback_backend,
+                "voice_used": playback_voice,
+                "sentences_played": sentences_played,
+                "byte_count": byte_count,
                 "timestamp": time.time(),
             }
             global _last_playback_metrics
             _last_playback_metrics = metrics
-            print(f"[TTS METRICS] UI text: {ui_text[:100]!r} | Speech text: {text!r} | Words: {metrics['word_count']} | Chars: {metrics['char_count']} | Duration: {duration:.2f}s")
+            try:
+                if success:
+                    print(f"[TTS METRICS] UI text: {ui_text[:100]!r} | Speech text: {text!r} | Words: {metrics['word_count']} | Chars: {metrics['char_count']} | Duration: {duration:.2f}s | Backend: {playback_backend}")
+                elif _tts_interrupted.is_set():
+                    print(f"[TTS METRICS] INTERRUPTED: UI text: {ui_text[:60]!r} | Duration: {duration:.2f}s")
+                else:
+                    print(f"[TTS METRICS] PLAYBACK FAILED: UI text: {ui_text[:60]!r} | Duration: {duration:.2f}s | Backend: {playback_backend}")
+            except Exception:
+                try:
+                    print(f"[TTS METRICS] UI text: {ascii(ui_text[:100])} | Speech text: {ascii(text)} | Duration: {duration:.2f}s | Backend: {playback_backend}")
+                except Exception:
+                    pass
             with _tts_state_lock:
                 _active_tts_text = ""
             _tts_active.clear()   # mark TTS as idle
             _stop_animation()
+            try:
+                from core.voice_lifecycle import get_voice_lifecycle
+                get_voice_lifecycle().on_tts_finished()
+            except Exception:
+                pass
             _tts_queue.task_done()
             try:
                 from legacy.sst import get_echo_guard
@@ -399,9 +583,12 @@ def _speak_pyttsx3(text: str, voice_id: str | None = None, rate: int | None = No
     Supports instantaneous barge-in cancellation via SAPI purge flags.
     """
     global _active_sp_voice
-    effective_vid = voice_id if voice_id is not None else _voice_id
+    raw_vid = voice_id if voice_id is not None else _voice_id
     effective_rate = rate if rate is not None else _voice_rate
     effective_vol = volume if volume is not None else _voice_volume
+
+    from extensions.system.tts_backend import SAPIBackend
+    effective_vid = SAPIBackend.validate_or_fallback_voice(raw_vid)
 
     # Try native Windows SAPI SpVoice first (supports SAPI5 and OneCore tokens flawlessly)
     try:
@@ -419,8 +606,8 @@ def _speak_pyttsx3(text: str, voice_id: str | None = None, rate: int | None = No
             except Exception as e_tok:
                 print(f"[TTS] Saved voice_id {effective_vid!r} not available ({e_tok}) — using engine default")
 
-        # Convert WPM (80-300, baseline 155) to SAPI Rate (-10 to +10)
-        sapi_rate = max(-10, min(10, int(round((effective_rate - 155) / 12.0))))
+        # Convert WPM (80-300, baseline ~145 conversational) to SAPI Rate (-10 to +10)
+        sapi_rate = max(-10, min(10, int(round((effective_rate - 145) / 14.0))))
         sp.Rate = sapi_rate
         sp.Volume = max(0, min(100, int(round(effective_vol * 100))))
 
@@ -534,6 +721,16 @@ def speak(text, lang_hint='en', block=False, user_id=None):
     if not text.strip():
         return
 
+    # Adapt text for natural spoken conversation (pauses, numbers, clean structure)
+    try:
+        from extensions.system.speech_adapter import adapt_for_speech
+        text, _ = adapt_for_speech(text)
+    except Exception:
+        pass
+
+    if not text.strip():
+        return
+
     # Silence raw fenced code blocks
     if text.strip().startswith("```") and "```" in text.strip()[3:]:
         text = "I've created the code file for you."
@@ -543,7 +740,13 @@ def speak(text, lang_hint='en', block=False, user_id=None):
         _asst_label = CONFIG.get_assistant_name() or "Assistant"
     except Exception:
         _asst_label = "Assistant"
-    print(f"{_asst_label}: {text}")
+    try:
+        print(f"{_asst_label}: {text}")
+    except Exception:
+        try:
+            print(f"{_asst_label}: {ascii(text)}")
+        except Exception:
+            pass
 
     # Log to messages table if explicit user_id is provided
     target_uid = user_id or CONFIG.get("CURRENT_USER_ID")
@@ -614,6 +817,11 @@ def stop_speaking(interrupted: bool = False):
         _tts_active.clear()
         _stop_animation()
         try:
+            from core.voice_lifecycle import get_voice_lifecycle
+            get_voice_lifecycle().on_tts_finished()
+        except Exception:
+            pass
+        try:
             from legacy.sst import get_echo_guard
             _eg = get_echo_guard()
             if _eg is not None:
@@ -639,4 +847,11 @@ def clear_interrupted_speech() -> None:
 def is_interrupted() -> bool:
     """Return True if TTS was interrupted."""
     return _tts_interrupted.is_set()
+
+
+def run_tts_diagnostic(text: str | None = None, user_id: int | None = None) -> dict:
+    """Run full 6-stage end-to-end TTS diagnostic."""
+    from extensions.system.tts_backend import run_tts_diagnostic as _diag
+    return _diag(text=text, user_id=user_id)
+
 

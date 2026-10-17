@@ -37,11 +37,17 @@ class TaskStatus(str, Enum):
     QUEUED = "QUEUED"
     PLANNING = "PLANNING"
     RUNNING = "RUNNING"
-    WAITING = "WAITING"
-    BLOCKED = "BLOCKED"
+    GENERATING = "GENERATING"
+    SAVING = "SAVING"
+    VALIDATING = "VALIDATING"
+    TESTING = "TESTING"
+    REPAIRING = "REPAIRING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    NEEDS_INPUT = "NEEDS_INPUT"
+    WAITING = "WAITING"
+    BLOCKED = "BLOCKED"
     PAUSED = "PAUSED"
 
 
@@ -219,7 +225,12 @@ class Task:
 
     @property
     def is_active(self) -> bool:
-        return self.status in (TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.WAITING)
+        return self.status in (
+            TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.RUNNING,
+            TaskStatus.GENERATING, TaskStatus.SAVING, TaskStatus.VALIDATING,
+            TaskStatus.TESTING, TaskStatus.REPAIRING, TaskStatus.NEEDS_INPUT,
+            TaskStatus.WAITING, TaskStatus.BLOCKED, TaskStatus.PAUSED
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1004,10 +1015,10 @@ class TaskExecutionManager:
 
     def get_task(self, task_id: str) -> Optional[Task]:
         with self._lock:
-            task = self._tasks.get(task_id)
+            task = self._tasks.get(task_id) or self._tasks.get(task_id.upper())
             if task is not None:
                 return task
-        return self._load_task_from_db(task_id)
+        return self._load_task_from_db(task_id) or self._load_task_from_db(task_id.upper())
 
     # ------------------------------------------------------------------------
     # Persistence & Startup Reconciliation
@@ -1086,23 +1097,40 @@ class TaskExecutionManager:
                 with pool.get_cursor() as cur:
                     # 1. Reconcile concurrent_tasks
                     cur.execute("""
-                        SELECT task_id, user_request, normalized_goal
+                        SELECT task_id, user_request, normalized_goal, metadata
                         FROM concurrent_tasks
-                        WHERE status IN ('RUNNING', 'PLANNING');
+                        WHERE status IN ('RUNNING', 'PLANNING', 'GENERATING', 'SAVING', 'VALIDATING', 'TESTING', 'REPAIRING', 'QUEUED');
                     """)
                     stale_tasks = cur.fetchall()
 
                     for row in stale_tasks:
-                        tid, u_req, n_goal = row
-                        cur.execute("""
-                            UPDATE concurrent_tasks
-                            SET status = 'FAILED',
-                                error = 'Task interrupted by system restart before completion.',
-                                completed_at = CURRENT_TIMESTAMP
-                            WHERE task_id = %s;
-                        """, (tid,))
+                        tid, u_req, n_goal, meta = row
+                        import json
+                        meta_dict = meta if isinstance(meta, dict) else (json.loads(meta) if meta and isinstance(meta, str) else {})
+                        checkpoint = meta_dict.get("checkpoint") or {}
+                        saved_files = checkpoint.get("saved_files") or []
+                        proj_path = checkpoint.get("project_path") or meta_dict.get("project_path")
+
+                        if proj_path and os.path.exists(proj_path) and saved_files:
+                            err_text = f"Task was interrupted by system restart. Verified checkpoint preserved: {len(saved_files)} files saved at {proj_path}."
+                            cur.execute("""
+                                UPDATE concurrent_tasks
+                                SET status = 'FAILED',
+                                    error = %s,
+                                    completed_at = CURRENT_TIMESTAMP
+                                WHERE task_id = %s;
+                            """, (err_text, tid))
+                            logger.info(f"[RECONCILIATION] Interrupted task {tid} has verified checkpoint ({len(saved_files)} files at {proj_path}).")
+                        else:
+                            cur.execute("""
+                                UPDATE concurrent_tasks
+                                SET status = 'FAILED',
+                                    error = 'Task interrupted by system restart before completion.',
+                                    completed_at = CURRENT_TIMESTAMP
+                                WHERE task_id = %s;
+                            """, (tid,))
+                            logger.info(f"[RECONCILIATION] Reconciled interrupted task {tid} ('{n_goal}') to FAILED.")
                         reconciled += 1
-                        logger.info(f"[RECONCILIATION] Reconciled interrupted task {tid} ('{n_goal}') to FAILED.")
 
                     # 2. Reconcile document_tasks
                     cur.execute("""
@@ -1195,6 +1223,14 @@ class TaskExecutionManager:
             fname = m_file.group(1).lower()
             mode = "WRITE" if any(w in req_low for w in ("create", "write", "modify", "delete", "edit")) else "READ"
             resources.append(Resource(f"filesystem:{fname}", "filesystem", mode, "SHARED" if mode == "READ" else "EXCLUSIVE"))
+
+        # Project directory locks (prevents concurrent tasks from clobbering the same project)
+        m_proj = re.search(r'\b(?:project|website|app|portfolio|api)\s+([a-zA-Z0-9_\-]+)', req_low)
+        if m_proj:
+            pname = m_proj.group(1).lower()
+            resources.append(Resource(f"filesystem:project_{pname}", "filesystem", "WRITE", "EXCLUSIVE"))
+        elif any(k in req_low for k in ("portfolio website", "portfolio site", "portfolio")):
+            resources.append(Resource("filesystem:project_portfolio", "filesystem", "WRITE", "EXCLUSIVE"))
 
         return resources
 

@@ -19,6 +19,9 @@ class C:
     PANEL    = "#080d12"       # raised panel
     PANEL2   = "#0e141b"       # card/inner panel
     PANEL3   = "#141e28"       # hover / elevated panel
+    CARD_BG  = "#0e161f"       # default card body
+    CARD_BG_ALT = "#121c27"    # alternate card background
+    CARD_HIGHLIGHT = "#121c27" # elevated card
     GLASS    = "rgba(8, 13, 18, 220)"
 
     # Accent — electric cyan

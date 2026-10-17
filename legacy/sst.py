@@ -461,6 +461,13 @@ def _listen_pyaudio(
 
             with sr.Microphone(**mic_kwargs) as source:
                 try:
+                    from core.voice_lifecycle import get_voice_lifecycle
+                    vl_single = get_voice_lifecycle()
+                    vl_single.on_mic_opened(attempt_device)
+                except Exception:
+                    vl_single = None
+
+                try:
                     recognizer.adjust_for_ambient_noise(
                         source, duration=ambient_adjust
                     )
@@ -468,6 +475,8 @@ def _listen_pyaudio(
                     pass
 
                 print("\n🎤 Listening...")
+                if vl_single:
+                    vl_single.on_speech_detected()
 
                 try:
                     audio = recognizer.listen(
@@ -477,10 +486,14 @@ def _listen_pyaudio(
                     )
                 except sr.WaitTimeoutError:
                     print(f"[SST] No speech detected within {timeout}s.")
+                    if vl_single:
+                        vl_single.on_transcription_error("Didn't catch that — try again.")
                     _tts_speak("I didn't catch that.")
                     return ""
                 except Exception as exc:
                     print(f"[SST listen error] {exc}")
+                    if vl_single:
+                        vl_single.on_transcription_error("Didn't catch that — try again.")
                     return ""
 
             return _recognise(audio)
@@ -488,37 +501,76 @@ def _listen_pyaudio(
         except OSError as exc:
             # Device open failed (unplugged, in-use, wrong index)
             print(f"[SST] Microphone open failed (device={attempt_device}): {exc}")
+            try:
+                from core.voice_lifecycle import get_voice_lifecycle
+                get_voice_lifecycle().on_mic_error("Microphone unavailable")
+            except Exception:
+                pass
             _invalidate_device_cache()
             # loop will retry with device_index=None on the next iteration
             continue
 
         except Exception as exc:
             print(f"[SST] Unexpected microphone error: {exc}")
+            try:
+                from core.voice_lifecycle import get_voice_lifecycle
+                get_voice_lifecycle().on_mic_error("Microphone unavailable")
+            except Exception:
+                pass
             _invalidate_device_cache()
             return ""
 
     # Both attempts exhausted
     print("[SST] Could not open any microphone.")
+    try:
+        from core.voice_lifecycle import get_voice_lifecycle
+        get_voice_lifecycle().on_mic_error("Microphone unavailable")
+    except Exception:
+        pass
     return ""
 
 
 def _recognise(audio: sr.AudioData) -> str:
-    """Run Google STT on audio data.  Returns recognised text or ''."""
+    """Run Multilingual STT on audio data.  Returns recognised text or ''."""
     print("🧠 Recognizing...")
     try:
-        text = recognizer.recognize_google(
-            audio,
-            language=CONFIG.get("LANGUAGE", "en-US"),
-        )
-        print(f"You: {text}")
-        return text.strip()
+        from core.voice_lifecycle import get_voice_lifecycle
+        vl_rec = get_voice_lifecycle()
+        vl_rec.on_transcription_started()
+    except Exception:
+        vl_rec = None
+
+    try:
+        from core.multilingual_engine import get_multilingual_engine
+        engine = get_multilingual_engine()
+        text, detected_lang, conf = engine.recognize_multilingual_audio(audio)
+        if not text:
+            print("[SST] Speech not recognised.")
+            if vl_rec:
+                vl_rec.on_transcription_error("Didn't catch that — try again.")
+            return ""
+
+        try:
+            print(f"You ({detected_lang}): {text}")
+        except Exception:
+            safe_text = str(text).encode("ascii", errors="backslashreplace").decode("ascii")
+            print(f"You ({detected_lang}): {safe_text}")
+
+        clean_text = text.strip()
+        if vl_rec and clean_text:
+            vl_rec.on_transcription_completed(clean_text)
+        return clean_text
 
     except sr.UnknownValueError:
         print("[SST] Speech not recognised.")
+        if vl_rec:
+            vl_rec.on_transcription_error("Didn't catch that — try again.")
         return ""  # Silence: no "I didn't catch that" for ordinary silence
 
     except sr.RequestError as exc:
         print(f"[SST] Google STT service error: {exc}")
+        if vl_rec:
+            vl_rec.on_transcription_error("Speech service unavailable")
         _tts_speak("Speech service unavailable. Please type your command.")
         try:
             return input("You: ")
@@ -527,6 +579,8 @@ def _recognise(audio: sr.AudioData) -> str:
 
     except Exception as exc:
         print(f"[SST recognise error]: {exc}")
+        if vl_rec:
+            vl_rec.on_transcription_error("Didn't catch that — try again.")
         return ""
 
 
@@ -751,6 +805,13 @@ def _continuous_audio_stream_loop():
         _continuous_audio_state['stream'] = stream
         _continuous_audio_state['device_index'] = device_index
 
+        try:
+            from core.voice_lifecycle import get_voice_lifecycle
+            get_voice_lifecycle().on_mic_opened(device_index)
+            get_voice_lifecycle().on_vad_listening()
+        except Exception:
+            pass
+
         print("[CONTINUOUS AUDIO] Microphone opened — calibrating ambient noise floor...")
 
         # ── High-pass filter & Calibration ─────────────────────────────────────
@@ -822,6 +883,9 @@ def _continuous_audio_stream_loop():
                 speech_thresh  = max(noise_floor * 2.2, noise_floor + 900.0, 1200.0)
                 silence_thresh = max(noise_floor * 1.35, noise_floor + 300.0, 600.0)
 
+                # Live normalized audio energy (0.0 to 1.0) based on dynamic noise floor
+                norm_audio_lvl = max(0.0, min(1.0, (frame_rms - silence_thresh) / max(1.0, speech_thresh * 1.8)))
+
                 # During TTS playback, assistant speaker adds acoustic energy to the room;
                 # require elevated energy margin and EchoGuard confirmation to distinguish
                 # genuine user speech from assistant echo.
@@ -870,6 +934,15 @@ def _continuous_audio_stream_loop():
                         _ptt_active_in_utterance = _ptt_held
                         consecutive_silence = 0
                         speech_frame_count  = max(positives, 1)
+
+                        try:
+                            from core.voice_lifecycle import get_voice_lifecycle
+                            _vl = get_voice_lifecycle()
+                            _vl.on_speech_detected()
+                            _vl.on_audio_level(norm_audio_lvl)
+                        except Exception:
+                            pass
+
                         print(f"[VAD] LISTENING -> SPEAKING  "
                               f"{'(PTT active) ' if _ptt_held else ''}"
                               f"{'(BARGE-IN) ' if tts_speaking else ''}"
@@ -882,6 +955,13 @@ def _continuous_audio_stream_loop():
                 # STATE: SPEAKING
                 # ═════════════════════════════════════════════════════════════
                 elif vad_state == STATE_SPEAKING:
+                    # Emit genuine live audio level while speech is actively captured
+                    try:
+                        from core.voice_lifecycle import get_voice_lifecycle
+                        get_voice_lifecycle().on_audio_level(norm_audio_lvl)
+                    except Exception:
+                        pass
+
                     # Safeguard: ensure TTS is silenced immediately during active speech
                     if _is_tts_speaking():
                         try:
@@ -922,6 +1002,11 @@ def _continuous_audio_stream_loop():
                         utterance_frames         = []
                         speech_frame_count       = 0
                         consecutive_silence      = 0
+                        try:
+                            from core.voice_lifecycle import get_voice_lifecycle
+                            get_voice_lifecycle().on_end_of_utterance()
+                        except Exception:
+                            pass
                         continue
 
                     # Finalize if PTT was released OR consecutive silence threshold reached
@@ -943,6 +1028,11 @@ def _continuous_audio_stream_loop():
                         utterance_frames         = []
                         speech_frame_count       = 0
                         consecutive_silence      = 0
+                        try:
+                            from core.voice_lifecycle import get_voice_lifecycle
+                            get_voice_lifecycle().on_end_of_utterance()
+                        except Exception:
+                            pass
 
             except Exception as exc:
                 print(f"[CONTINUOUS AUDIO] Audio read error: {exc}")
@@ -952,10 +1042,20 @@ def _continuous_audio_stream_loop():
         stream.stop_stream()
         stream.close()
         p.terminate()
+        try:
+            from core.voice_lifecycle import get_voice_lifecycle
+            get_voice_lifecycle().on_mic_closed()
+        except Exception:
+            pass
         print("[CONTINUOUS AUDIO] Microphone closed")
 
     except Exception as exc:
         print(f"[CONTINUOUS AUDIO] Fatal error: {exc}")
+        try:
+            from core.voice_lifecycle import get_voice_lifecycle
+            get_voice_lifecycle().on_mic_error("Microphone unavailable")
+        except Exception:
+            pass
         import traceback
         traceback.print_exc()
 
@@ -992,6 +1092,13 @@ def _vad_finish_utterance(
 def _process_utterance(audio_data: np.ndarray):
     """Process a complete utterance through STT and intent pipeline."""
     try:
+        from core.voice_lifecycle import get_voice_lifecycle
+        vl = get_voice_lifecycle()
+        vl.on_transcription_started()
+    except Exception:
+        vl = None
+
+    try:
         # If TTS is still in flight when utterance finishes, halt it immediately
         if _is_tts_speaking():
             try:
@@ -1012,14 +1119,23 @@ def _process_utterance(audio_data: np.ndarray):
         text = _recognise(audio_sr)
         
         if text and text.strip():
+            clean_cmd = text.strip()
+            if vl:
+                vl.on_transcription_completed(clean_cmd)
+                vl.on_assistant_executing(clean_cmd)
             # Process through existing pipeline
             from legacy.assistant import process_input
-            print(f"[CONTINUOUS AUDIO] Processing: {text}")
-            process_input(text)
+            print(f"[CONTINUOUS AUDIO] Processing: {clean_cmd}")
+            process_input(clean_cmd)
+        else:
+            if vl:
+                vl.on_transcription_error("Didn't catch that — try again.")
             
     except Exception as e:
         import traceback
         traceback.print_exc()
+        if vl:
+            vl.on_transcription_error("Didn't catch that — try again.")
         print(f"[CONTINUOUS AUDIO] Utterance processing error: {e}")
 
 

@@ -31,11 +31,20 @@ legacy.tts.speak() so speech is never silently dropped.
 """
 
 import logging
+import sys
 import threading
 import time
 from enum import Enum
 from queue import PriorityQueue
 from typing import Callable, Optional
+
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +202,11 @@ class TTSCoordinator:
                     except Exception:
                         pass
 
-        request = TTSRequest(adapted_text, priority, lang_hint, metadata=meta)
+        effective_lang_hint = lang_hint
+        if (not effective_lang_hint or effective_lang_hint == "en") and meta:
+            effective_lang_hint = meta.get("lang_hint") or meta.get("language") or effective_lang_hint or "en"
+
+        request = TTSRequest(adapted_text, priority, effective_lang_hint, metadata=meta)
         self.queue.put(request)
         logger.debug("[TTS COORDINATOR] Queued: %s", request)
 
@@ -274,11 +287,17 @@ class TTSCoordinator:
                 except Exception:
                     _engine_label = "Windows SAPI/pyttsx3"
 
-                print(f"[TTS COORDINATOR] SPEECH START (Priority: {request.priority.name}, Engine: {_engine_label}): {request.text[:60]!r}")
+                try:
+                    print(f"[TTS COORDINATOR] SPEECH START (Priority: {request.priority.name}, Engine: {_engine_label}): {request.text[:60]!r}")
+                except Exception:
+                    try:
+                        print(f"[TTS COORDINATOR] SPEECH START (Priority: {request.priority.name}, Engine: {_engine_label}): {ascii(request.text[:60])}")
+                    except Exception:
+                        pass
                 logger.info(
-                    "[TTS COORDINATOR] Speaking (%s): %r",
+                    "[TTS COORDINATOR] Speaking (%s): %s",
                     request.priority.name,
-                    request.text[:60]
+                    ascii(request.text[:60])
                 )
                 # Invoke legacy.tts.speak() — it enqueues to the FIFO
                 # worker which calls pyttsx3 / gTTS on its own thread.
@@ -287,13 +306,35 @@ class TTSCoordinator:
                                 block=False)
 
                 # Wait for utterance to finish or be preempted
+                last_metrics = {}
                 try:
-                    from legacy.tts import wait_for_silence
+                    from legacy.tts import wait_for_silence, get_last_playback_metrics
                     wait_for_silence(timeout=30.0)
+                    last_metrics = get_last_playback_metrics()
                 except Exception:
                     pass
 
-                print(f"[TTS COORDINATOR] SPEECH END: {request.text[:60]!r}")
+                if last_metrics.get("interrupted"):
+                    try:
+                        print(f"[TTS COORDINATOR] SPEECH INTERRUPTED: {request.text[:60]!r}")
+                    except Exception:
+                        pass
+                elif last_metrics.get("success", False):
+                    dur = last_metrics.get("duration", 0.0)
+                    backend = last_metrics.get("backend_used", _engine_label)
+                    try:
+                        print(f"[TTS COORDINATOR] SPEECH END ({backend}, {dur:.2f}s): {request.text[:60]!r}")
+                    except Exception:
+                        try:
+                            print(f"[TTS COORDINATOR] SPEECH END ({backend}, {dur:.2f}s): {ascii(request.text[:60])}")
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        print(f"[TTS COORDINATOR] SPEECH FAILED: {request.text[:60]!r}")
+                    except Exception:
+                        pass
+                    logger.warning("[TTS COORDINATOR] Speech playback failed for: %s", ascii(request.text[:60]))
             except Exception as exc:
                 logger.error("[TTS COORDINATOR] Error dispatching request: %s", exc)
             finally:

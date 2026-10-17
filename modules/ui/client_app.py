@@ -171,6 +171,7 @@ class ClientApp(QObject):
         self._win.command_submitted.connect(self._on_command_submitted)
         self._win.logout_requested.connect(self._on_logout)
         self._win.assistant_name_changed.connect(self._on_assistant_name_updated)
+        self._win.accent_changed.connect(self._on_accent_changed)
         self._win.minimized.connect(lambda: self._launcher.set_state("idle"))
 
         # ── System tray ──
@@ -358,6 +359,16 @@ class ClientApp(QObject):
             )
         except Exception as e:
             print(f"[CLIENT APP] Could not persist assistant name: {e}")
+
+    @pyqtSlot(str)
+    def _on_accent_changed(self, hex_color: str):
+        """Handle accent color update from settings or configuration."""
+        if not hex_color:
+            return
+        if self._launcher:
+            self._launcher.set_accent_color(hex_color)
+        if self._win:
+            self._win.set_accent_color(hex_color)
 
     # ── Logout ───────────────────────────────────────────────────────────────
 

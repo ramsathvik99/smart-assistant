@@ -129,6 +129,8 @@ class ContextManager:
             self.history = self.history[-self.max_history * 2:]
 
     def get_recent_context(self):
+        if not self.history:
+            self._load_persisted_context()
         return "\n".join([f"{h['role'].capitalize()}: {h['text']}" for h in self.history])
 
     def get_last_intent(self):
@@ -145,15 +147,37 @@ class ContextManager:
         self._load_persisted_context()
 
     def _load_persisted_context(self):
-        if not self.db_manager or not self.current_user_id: return
-        data = self.db_manager.load_context(self.current_user_id)
-        if data:
-            # Load basic fields
-            for k in ["last_app", "last_browser", "last_action"]:
-                if k in data: self.active_context[k] = data[k]
-            # Load active state if valid? active_context usually resets on restart
-            # But we can load history/preferences here if expanded
-            print(f"[CONTEXT] Loaded persisted context for user {self.current_user_id}")
+        if not self.current_user_id:
+            self.current_user_id = self._resolve_uid()
+        if not self.current_user_id:
+            return
+
+        if self.db_manager:
+            try:
+                data = self.db_manager.load_context(self.current_user_id)
+                if data:
+                    for k in ["last_app", "last_browser", "last_action"]:
+                        if k in data: self.active_context[k] = data[k]
+                    print(f"[CONTEXT] Loaded persisted context for user {self.current_user_id}")
+            except Exception:
+                pass
+
+        # Seed conversation history from PostgreSQL messages if currently empty
+        if not self.history:
+            try:
+                from core.chatgpt_memory import get_chatgpt_memory
+                recent = get_chatgpt_memory().get_recent_conversation(int(self.current_user_id), limit=self.max_history)
+                for item in recent:
+                    u = item.get("user")
+                    a = item.get("assistant")
+                    if u:
+                        self.history.append({'role': 'user', 'text': u, 'intent': None, 'timestamp': time.time()})
+                    if a:
+                        self.history.append({'role': 'assistant', 'text': a, 'intent': None, 'timestamp': time.time()})
+                if self.history:
+                    print(f"[CONTEXT] Seeded {len(self.history)} turns from PostgreSQL for user {self.current_user_id}")
+            except Exception as e:
+                print(f"[CONTEXT] Failed to seed history from DB: {e}")
 
 
     # --- DOMAIN CONTEXT TRACKING ---
@@ -198,14 +222,21 @@ class ContextManager:
 
     def clear_context(self):
         self.history = []
+        self.user_artifacts.clear()
+        self.current_user_id = None
         self.active_context = {
             "type": ContextType.NONE,
             "name": None,
             "metadata": {},
             "timestamp": 0,
-            "awaiting_confirmation": False
+            "awaiting_confirmation": False,
+            "last_app": None,
+            "last_browser": None,
+            "last_action": None,
+            "awaiting_input": False,
+            "awaiting_type": None
         }
-        print("[CONTEXT] All contexts cleared.")
+        print("[CONTEXT] All contexts and user artifacts cleared.")
 
     def is_context_active(self, name_to_check: str) -> bool:
         return self.active_context["name"] == name_to_check.lower()
@@ -217,4 +248,7 @@ def get_manager():
     if _instance is None:
         _instance = ContextManager()
     return _instance
+
+get_context_manager = get_manager
+context_manager = get_manager()
 

@@ -123,11 +123,22 @@ def close_connection(conn=None):
 # ──────────────────────────────────────────────
 #  STARTUP — RESTORE MEMORY FROM DB
 # ──────────────────────────────────────────────
+# ──────────────────────────────────────────────
 def restore_memory_on_startup():
     """
     Load most recent MEMORY_LIMIT interactions from PostgreSQL into
     in-memory deque. Called once automatically when this module is imported.
     """
+    try:
+        from instance.config import settings
+        uid = getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user()
+    except Exception:
+        uid = None
+
+    if uid:
+        restore_memory_for_user(uid)
+        return
+
     conn = _get_connection()
     if conn is None:
         print("[CONV_MEMORY] [WARN] Skipping memory restore -- no DB connection.")
@@ -135,26 +146,110 @@ def restore_memory_on_startup():
 
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT role, content
                 FROM messages
                 ORDER BY id DESC
                 LIMIT %s;
-            """, (MEMORY_LIMIT,))
+            """, (MEMORY_LIMIT * 2,))
             rows = cur.fetchall()
 
-        # Rows are DESC (newest first) — reverse to get chronological order
-        for role, content in reversed(rows):
-            recent_memory.append({
-                "user_command":       content if role == "user" else "",
-                "assistant_response": content if role == "assistant" else "",
-            })
+        chrono_rows = list(reversed(rows))
+        with _lock:
+            recent_memory.clear()
+            pending_user = None
+            for role, content in chrono_rows:
+                if role == "user":
+                    if pending_user is not None:
+                        recent_memory.append({
+                            "user_command": pending_user,
+                            "assistant_response": "",
+                        })
+                    pending_user = content
+                elif role == "assistant":
+                    if pending_user is not None:
+                        recent_memory.append({
+                            "user_command": pending_user,
+                            "assistant_response": content,
+                        })
+                        pending_user = None
+                    else:
+                        recent_memory.append({
+                            "user_command": "",
+                            "assistant_response": content,
+                        })
+            if pending_user is not None:
+                recent_memory.append({
+                    "user_command": pending_user,
+                    "assistant_response": "",
+                })
 
-        print(f"[CONV_MEMORY] [OK] Restored {len(rows)} interaction(s) from PostgreSQL.")
-
+        print(f"[CONV_MEMORY] [OK] Restored {len(recent_memory)} interaction(s) from PostgreSQL.")
     except Exception as e:
         print(f"[CONV_MEMORY] [WARN] Error restoring memory from DB: {e}")
+    finally:
+        close_connection(conn)
+
+
+def restore_memory_for_user(user_id: int):
+    """
+    Load most recent interactions for the given user from PostgreSQL,
+    grouping user/assistant turns properly without cross-user leakage.
+    """
+    if not user_id:
+        return
+    uid = int(user_id)
+    conn = _get_connection()
+    if conn is None:
+        return
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT role, content
+                FROM messages
+                WHERE user_id = %s
+                ORDER BY id DESC
+                LIMIT %s;
+            """, (uid, MEMORY_LIMIT * 2))
+            rows = cur.fetchall()
+
+        chrono_rows = list(reversed(rows))
+        with _lock:
+            recent_memory.clear()
+            pending_user = None
+            for role, content in chrono_rows:
+                if role == "user":
+                    if pending_user is not None:
+                        recent_memory.append({
+                            "user_command": pending_user,
+                            "assistant_response": "",
+                            "user_id": uid,
+                        })
+                    pending_user = content
+                elif role == "assistant":
+                    if pending_user is not None:
+                        recent_memory.append({
+                            "user_command": pending_user,
+                            "assistant_response": content,
+                            "user_id": uid,
+                        })
+                        pending_user = None
+                    else:
+                        recent_memory.append({
+                            "user_command": "",
+                            "assistant_response": content,
+                            "user_id": uid,
+                        })
+            if pending_user is not None:
+                recent_memory.append({
+                    "user_command": pending_user,
+                    "assistant_response": "",
+                    "user_id": uid,
+                })
+        print(f"[CONV_MEMORY] [OK] Restored {len(recent_memory)} paired turns for user {uid}.")
+    except Exception as e:
+        print(f"[CONV_MEMORY] [WARN] Error restoring memory for user {uid}: {e}")
     finally:
         close_connection(conn)
 

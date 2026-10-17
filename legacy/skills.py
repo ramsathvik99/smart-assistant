@@ -728,10 +728,30 @@ def lock_system():
 # WEATHER
 # ======================================================
 
-def get_weather(location):
-    api_key = os.getenv("OPENWEATHER_API_KEY", "")
+def get_weather(location, user_id=None):
+    api_key = ""
+    if user_id:
+        try:
+            from core.credential_manager import get_credential_manager
+            api_key = get_credential_manager().get_credential(user_id, "openweather")
+        except Exception:
+            pass
     if not api_key:
-        speak("Weather service not configured.")
+        try:
+            from instance.config import settings
+            cur_uid = getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user()
+            if cur_uid:
+                from core.credential_manager import get_credential_manager
+                api_key = get_credential_manager().get_credential(cur_uid, "openweather")
+        except Exception:
+            pass
+    if not api_key:
+        import sys
+        if os.getenv("APP_ENV", "").lower() != "production" and not getattr(sys, "frozen", False):
+            api_key = os.getenv("OPENWEATHER_API_KEY", "")
+
+    if not api_key:
+        speak("Weather service is not configured. Please add your OpenWeatherMap key in Settings.")
         return
 
     STATES = {
@@ -1618,7 +1638,7 @@ def handle_bored_flow():
 # MOVIE RECOMMENDATIONS
 # ======================================================
 
-def suggest_movies(language="en", genre=None):
+def suggest_movies(language="en", genre=None, user_id=None):
     """
     Suggest latest movies with good ratings.
     Prioritizes recent releases over classics.
@@ -1630,8 +1650,27 @@ def suggest_movies(language="en", genre=None):
         # Using public endpoint
         url = "https://api.themoviedb.org/3/discover/movie"
         
-        # TMDb API key from environment
-        api_key = os.getenv("TMDB_API_KEY", "")
+        # TMDb API key from user credentials or environment
+        api_key = ""
+        if user_id:
+            try:
+                from core.credential_manager import get_credential_manager
+                api_key = get_credential_manager().get_credential(user_id, "tmdb")
+            except Exception:
+                pass
+        if not api_key:
+            try:
+                from instance.config import settings
+                cur_uid = getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user()
+                if cur_uid:
+                    from core.credential_manager import get_credential_manager
+                    api_key = get_credential_manager().get_credential(cur_uid, "tmdb")
+            except Exception:
+                pass
+        if not api_key:
+            import sys
+            if os.getenv("APP_ENV", "").lower() != "production" and not getattr(sys, "frozen", False):
+                api_key = os.getenv("TMDB_API_KEY", "")
         
         params = {
             "api_key": api_key,
@@ -1795,12 +1834,19 @@ def greet_user():
 # DETERMINISTIC MEMORY SYSTEM
 # ======================================================
 
-def detect_and_store_fact(user_id, text):
+def detect_and_store_fact(user_id=None, text=None):
     """
     Automatically detect and store declarative user facts/preferences into PostgreSQL user_memory.
     Returns (True, response_str) if fact was detected and stored, or (False, None).
     Does NOT speak directly to avoid duplicate TTS with assistant.py.
     """
+    if isinstance(user_id, str) and not user_id.isdigit() and text is not None:
+        user_id, text = text, user_id
+    elif user_id is not None and text is None and isinstance(user_id, str):
+        from instance.config import settings
+        text = user_id
+        user_id = getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user() or 1
+
     if not user_id or not text:
         return False, None
 
@@ -1842,39 +1888,94 @@ def detect_and_store_fact(user_id, text):
 
         # Canonical key
         key = raw_entity.replace(" ", "_")
-        update_user_memory(user_id, key, val)
+        try:
+            from core.chatgpt_memory import get_chatgpt_memory
+            get_chatgpt_memory().set_user_fact(user_id, key, val, confidence=0.98, source="explicit_user_store")
+        except Exception:
+            update_user_memory(user_id, key, val)
 
         # Dual-store for UK/US spelling if favorite/favourite
         if "favorite" in key:
             alt_key = key.replace("favorite", "favourite")
-            update_user_memory(user_id, alt_key, val)
+            try:
+                from core.chatgpt_memory import get_chatgpt_memory
+                get_chatgpt_memory().set_user_fact(user_id, alt_key, val, confidence=0.98, source="explicit_user_store")
+            except Exception:
+                update_user_memory(user_id, alt_key, val)
         elif "favourite" in key:
             alt_key = key.replace("favourite", "favorite")
-            update_user_memory(user_id, alt_key, val)
+            try:
+                from core.chatgpt_memory import get_chatgpt_memory
+                get_chatgpt_memory().set_user_fact(user_id, alt_key, val, confidence=0.98, source="explicit_user_store")
+            except Exception:
+                update_user_memory(user_id, alt_key, val)
 
         resp = f"Understood. I'll remember that your {raw_entity} is {val}."
         return True, resp
 
-    # Pattern 2: "remember that X" / "remember X"
+    # Pattern 2: "remember that X is Y" / "remember X is Y" / "remember that X" (both with and without "my")
     match = re.search(r"^(?:please\s+)?(?:remember|note)\s+(?:that\s+)?(.+)$", text_lower)
     if match:
         fact = match.group(1).strip().rstrip(".!?")
-        sub_m = re.search(r"^my\s+([a-zA-Z0-9_\s]+?)\s+(?:is|was|=)\s+(.+)$", fact)
+        sub_m = re.search(r"^(?:my\s+|the\s+)?([a-zA-Z0-9_\s]+?)\s+(?:is|was|=)\s+(.+)$", fact)
         if sub_m:
             raw_entity = sub_m.group(1).strip()
             val = sub_m.group(2).strip().rstrip(".!?")
             entity_words = raw_entity.split()
-            if len(entity_words) <= 3 and not any(w in entity_words for w in ["what", "now", "it", "has", "is", "when", "how"]):
+            if len(entity_words) <= 6 and not any(w in entity_words for w in ["what", "now", "it", "when", "how", "why"]):
                 key = raw_entity.replace(" ", "_")
-                update_user_memory(user_id, key, val)
+                try:
+                    from core.chatgpt_memory import get_chatgpt_memory
+                    get_chatgpt_memory().set_user_fact(user_id, key, val, confidence=0.98, source="explicit_user_store")
+                except Exception:
+                    update_user_memory(user_id, key, val)
                 if "favorite" in key:
-                    update_user_memory(user_id, key.replace("favorite", "favourite"), val)
+                    alt_key = key.replace("favorite", "favourite")
+                    try:
+                        from core.chatgpt_memory import get_chatgpt_memory
+                        get_chatgpt_memory().set_user_fact(user_id, alt_key, val, confidence=0.98, source="explicit_user_store")
+                    except Exception:
+                        update_user_memory(user_id, alt_key, val)
                 elif "favourite" in key:
-                    update_user_memory(user_id, key.replace("favourite", "favorite"), val)
-                resp = f"Understood. I'll remember that your {raw_entity} is {val}."
+                    alt_key = key.replace("favourite", "favorite")
+                    try:
+                        from core.chatgpt_memory import get_chatgpt_memory
+                        get_chatgpt_memory().set_user_fact(user_id, alt_key, val, confidence=0.98, source="explicit_user_store")
+                    except Exception:
+                        update_user_memory(user_id, alt_key, val)
+                resp = f"Understood. I'll remember that {raw_entity} is {val}."
                 return True, resp
 
-    # Pattern 3: "I like X" / "I love X" / "I prefer X"
+    # Pattern 3: Declarative technical/system facts without explicit "remember"
+    # e.g., "The database for this project is PostgreSQL", "The backend is Python"
+    match = re.search(r"^(?:the\s+)?([a-zA-Z0-9_\s]+?)\s+(?:for\s+this\s+project\s+)?(?:is|was|=)\s+([a-zA-Z0-9_\s\.\-]+)$", text_lower)
+    if match:
+        raw_entity = match.group(1).strip()
+        val = match.group(2).strip().rstrip(".!?")
+        if raw_entity in ("database", "backend", "frontend", "project name", "server", "operating system", "language") or any(k in raw_entity for k in ("database", "backend", "tech")):
+            key = raw_entity.replace(" ", "_")
+            try:
+                from core.chatgpt_memory import get_chatgpt_memory
+                get_chatgpt_memory().set_user_fact(user_id, key, val, confidence=0.98, source="declarative_system_fact")
+            except Exception:
+                update_user_memory(user_id, key, val)
+            resp = f"Understood. I'll remember that {raw_entity} is {val}."
+            return True, resp
+
+    # Pattern 4: Response style preference: "I prefer concise answers"
+    match = re.search(r"^i\s+prefer\s+([a-zA-Z0-9_\s]+)\s+answers?$", text_lower)
+    if match:
+        style_val = match.group(1).strip()
+        update_user_memory(user_id, "response_style", style_val)
+        try:
+            from core.chatgpt_memory import get_chatgpt_memory
+            get_chatgpt_memory().set_user_fact(user_id, "response_style", style_val, confidence=0.98, source="preference")
+        except Exception:
+            pass
+        resp = f"Understood. I'll remember that your preferred response style is {style_val}."
+        return True, resp
+
+    # Pattern 5: "I like X" / "I love X" / "I prefer X"
     match = re.search(r"^i\s+(?:like|love|enjoy|prefer)\s+(.+)$", text_lower)
     if match:
         val = match.group(1).strip().rstrip(".!?")
@@ -1883,24 +1984,39 @@ def detect_and_store_fact(user_id, text):
         if words and len(words) <= 5:
             key = f"likes_{words[0].replace(' ', '_')}"
             update_user_memory(user_id, key, clean_val)
+            try:
+                from core.chatgpt_memory import get_chatgpt_memory
+                get_chatgpt_memory().set_user_fact(user_id, key, clean_val, confidence=0.95, source="preference")
+            except Exception:
+                pass
             resp = f"Got it. I'll remember that you like {clean_val}."
             return True, resp
 
-    # Pattern 4: "my name is X"
+    # Pattern 6: "my name is X"
     match = re.search(r"^my\s+name\s+is\s+(.+)$", text_lower)
     if match:
         val = match.group(1).strip().rstrip(".!?")
         if val and len(val.split()) <= 4:
             update_user_memory(user_id, "name", val)
+            try:
+                from core.chatgpt_memory import get_chatgpt_memory
+                get_chatgpt_memory().set_user_fact(user_id, "name", val, confidence=0.98, source="identity")
+            except Exception:
+                pass
             resp = f"Nice to meet you, {val}. I'll remember your name."
             return True, resp
 
-    # Pattern 5: "I am X"
+    # Pattern 7: "I am X"
     match = re.search(r"^i\s+am\s+(?:a\s+|an\s+)?(.+)$", text_lower)
     if match and len(match.group(1).split()) <= 4:
         val = match.group(1).strip().rstrip(".!?")
         if val not in ["bored", "sad", "happy", "here", "back", "tired", "fine", "ok", "okay"]:
             update_user_memory(user_id, "identity", val)
+            try:
+                from core.chatgpt_memory import get_chatgpt_memory
+                get_chatgpt_memory().set_user_fact(user_id, "identity", val, confidence=0.95, source="identity")
+            except Exception:
+                pass
             resp = f"Understood. I'll remember that you are {val}."
             return True, resp
 
@@ -1913,6 +2029,19 @@ def query_memory_first(user_id, text):
     """
     text_clean = text.strip().rstrip(".!?")
     text_lower = text_clean.lower()
+
+    if user_id:
+        try:
+            from core.chatgpt_memory import get_chatgpt_memory
+            chatgpt_mem = get_chatgpt_memory()
+            fact_ans = chatgpt_mem.answer_historical_fact_query(int(user_id), text)
+            if fact_ans:
+                return fact_ans
+            cmd_ans = chatgpt_mem.answer_historical_command_query(int(user_id), text)
+            if cmd_ans:
+                return cmd_ans
+        except Exception:
+            pass
 
     # 1. Assistant Identity: "who are you" / "what is your name" / "who created you"
     if re.search(r'\b(?:who\s+are\s+you|what(?:\'s|\s+is)\s+your\s+name)\b', text_lower):

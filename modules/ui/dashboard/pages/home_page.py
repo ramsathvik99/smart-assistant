@@ -371,32 +371,38 @@ class HomePage(QWidget):
             "offline": "Offline",
         }
         self._orb_sub.setText(labels.get(s, "Ready"))
-        # current activity
-        task = data.get("active_operation") or data.get("task")
-        prog = data.get("progress") or 0
-        from ..ds import clear_layout
-        clear_layout(self._act_stack)
-        if task:
-            # Build activity widget
-            row_w = QWidget()
-            rl = QHBoxLayout(row_w); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(Spacing.MD)
-            chip = StatusChip("RUNNING", "executing")
-            rl.addWidget(chip)
-            lbl = QLabel(str(task))
-            lbl.setStyleSheet(f"font-weight: 600; color: {C.TEXT};")
-            rl.addWidget(lbl)
-            rl.addStretch(1)
-            if prog:
-                from PyQt6.QtWidgets import QProgressBar
-                bar = QProgressBar()
-                bar.setFixedWidth(200)
-                bar.setFixedHeight(8)
-                bar.setValue(int(prog))
-                bar.setTextVisible(False)
-                rl.addWidget(bar)
-            self._act_stack.addWidget(row_w)
-        else:
-            self._act_stack.addWidget(self._act_empty)
+        try:
+            # current activity
+            task = data.get("active_operation") or data.get("task")
+            prog = data.get("progress") or 0
+            from ..ds import clear_layout
+            clear_layout(self._act_stack)
+            if task:
+                # Build activity widget
+                row_w = QWidget()
+                rl = QHBoxLayout(row_w); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(Spacing.MD)
+                chip = StatusChip("RUNNING", "executing")
+                rl.addWidget(chip)
+                lbl = QLabel(str(task))
+                lbl.setStyleSheet(f"font-weight: 600; color: {C.TEXT};")
+                rl.addWidget(lbl)
+                rl.addStretch(1)
+                if prog:
+                    from PyQt6.QtWidgets import QProgressBar
+                    bar = QProgressBar()
+                    bar.setFixedWidth(200)
+                    bar.setFixedHeight(8)
+                    bar.setValue(int(prog))
+                    bar.setTextVisible(False)
+                    rl.addWidget(bar)
+                self._act_stack.addWidget(row_w)
+            else:
+                empty = EmptyState(ICONS.POWER, "All systems idle",
+                                   "Assistant isn't doing anything right now.",
+                                   accent=C.STATUS_ACTIVE)
+                self._act_stack.addWidget(empty)
+        except Exception as e:
+            print(f"[HOME_PAGE] Error updating activity state: {e}")
 
     # ---------------------- attention ---------------------------------------------
     def _refresh_attention(self):

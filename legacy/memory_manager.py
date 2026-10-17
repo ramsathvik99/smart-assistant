@@ -686,6 +686,17 @@ def set_user_preference_db(user_id, key: str, value) -> bool:
     except Exception as e:
         print(f"[JSON PREF ERROR] mirror to json: {e}")
 
+    # 3. Synchronize into ConfigurationService cache if active
+    try:
+        import sys
+        if "core.configuration_service" in sys.modules:
+            from core.configuration_service import get_configuration_service
+            cfg_svc = get_configuration_service()
+            with cfg_svc._cache_lock:
+                cfg_svc._prefs_cache.setdefault(str(user_id), {})[key] = val_str
+    except Exception:
+        pass
+
     return db_success or True
 
 
@@ -720,7 +731,7 @@ def has_voice_profile_db(user_id) -> bool:
     """Return True if this user has already configured a voice identity."""
     if not user_id:
         return False
-    val = get_user_preference_db(user_id, "assistant_voice_id", None)
+    val = get_user_preference_db(user_id, "assistant_voice_id", None) or get_user_preference_db(user_id, "voice_id", None)
     return bool(val and str(val).strip())
 
 
@@ -733,18 +744,19 @@ def get_voice_profile_db(user_id) -> dict:
     if not user_id:
         return {}
     profile = {}
-    profile["voice_id"]       = get_user_preference_db(user_id, "assistant_voice_id",       None)
-    profile["voice_gender"]   = get_user_preference_db(user_id, "assistant_voice_gender",   "male")
-    profile["voice_tone"]     = get_user_preference_db(user_id, "assistant_voice_tone",     "professional")
-    profile["voice_provider"] = get_user_preference_db(user_id, "assistant_voice_provider", "windows")
-    rate_str                  = get_user_preference_db(user_id, "assistant_voice_rate",     "155")
-    vol_str                   = get_user_preference_db(user_id, "assistant_voice_volume",   "1.0")
+    profile["voice_id"]       = get_user_preference_db(user_id, "assistant_voice_id",       None) or get_user_preference_db(user_id, "voice_id", None)
+    profile["voice_gender"]   = get_user_preference_db(user_id, "assistant_voice_gender",   None) or get_user_preference_db(user_id, "voice_gender", "female")
+    profile["voice_tone"]     = get_user_preference_db(user_id, "assistant_voice_tone",     None) or get_user_preference_db(user_id, "voice_tone", "friendly")
+    profile["voice_provider"] = get_user_preference_db(user_id, "assistant_voice_provider", None) or get_user_preference_db(user_id, "voice_provider", "windows")
+    rate_str                  = get_user_preference_db(user_id, "assistant_voice_rate",     None) or get_user_preference_db(user_id, "voice_rate", "135")
+    vol_str                   = get_user_preference_db(user_id, "assistant_voice_volume",   None) or get_user_preference_db(user_id, "voice_volume", "1.0")
     try:
         profile["voice_rate"] = int(rate_str)
     except (TypeError, ValueError):
-        profile["voice_rate"] = 155
+        profile["voice_rate"] = 135
     try:
-        profile["voice_volume"] = float(vol_str)
+        vol_flt = float(vol_str)
+        profile["voice_volume"] = vol_flt / 100.0 if vol_flt > 1.0 else vol_flt
     except (TypeError, ValueError):
         profile["voice_volume"] = 1.0
     return profile
@@ -761,11 +773,17 @@ def set_voice_profile_db(user_id, voice_id: str, voice_gender: str,
         return False
     ok = True
     ok &= set_user_preference_db(user_id, "assistant_voice_id",       str(voice_id))
+    ok &= set_user_preference_db(user_id, "voice_id",                 str(voice_id))
     ok &= set_user_preference_db(user_id, "assistant_voice_gender",   str(voice_gender))
+    ok &= set_user_preference_db(user_id, "voice_gender",             str(voice_gender))
     ok &= set_user_preference_db(user_id, "assistant_voice_tone",     str(voice_tone))
+    ok &= set_user_preference_db(user_id, "voice_tone",               str(voice_tone))
     ok &= set_user_preference_db(user_id, "assistant_voice_rate",     str(voice_rate))
+    ok &= set_user_preference_db(user_id, "voice_rate",               str(voice_rate))
     ok &= set_user_preference_db(user_id, "assistant_voice_volume",   str(voice_volume))
+    ok &= set_user_preference_db(user_id, "voice_volume",             str(voice_volume))
     ok &= set_user_preference_db(user_id, "assistant_voice_provider", str(voice_provider))
+    ok &= set_user_preference_db(user_id, "voice_provider",           str(voice_provider))
     print(f"[DB] Voice profile saved for user {user_id}: gender={voice_gender}, "
           f"tone={voice_tone}, rate={voice_rate}, volume={voice_volume}, provider={voice_provider}")
     return ok

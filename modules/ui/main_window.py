@@ -1,5 +1,11 @@
+# ════════════════════════════════════════════════════════════════════════
+# SUPERSEDED — This file is NOT the active production desktop UI.
+# Active Production UI: modules/ui/dashboard/main_window.py (DashboardMainWindow)
+# Canonical Entry:       assistant.py -> modules/ui/pyqt_app.py
+# Preserved for reference and component compatibility.
+# ════════════════════════════════════════════════════════════════════════
 """
-Smart Assistant — Main Window
+Smart Assistant — Legacy Main Window (Superseded by DashboardMainWindow)
 Futuristic PyQt6 main assistant interface with 6-page HUD architecture:
   Dashboard | Chat | Tasks | Memory | Telemetry | Settings
 Frameless window with custom draggable title bar, animated background,

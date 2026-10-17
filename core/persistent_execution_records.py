@@ -21,6 +21,16 @@ from core.execution_graph import ExecutionGraph, ExecutionNode, GraphStatus, Nod
 
 logger = logging.getLogger(__name__)
 
+def _safe_json_dumps(obj: Any) -> str:
+    """Safely serialize data structures containing datetime, date, UUID, or custom types preserving ISO formatting."""
+    def _default_serializer(o):
+        if hasattr(o, "isoformat"):
+            return o.isoformat()
+        if isinstance(o, uuid.UUID):
+            return str(o)
+        return str(o)
+    return json.dumps(obj, default=_default_serializer)
+
 
 # ============================================================================
 # Action Record Data Model
@@ -229,8 +239,8 @@ class PersistentExecutionRecordsManager:
                     """, (
                         rec.action_id, rec.user_id, rec.goal_id, rec.execution_node_id,
                         rec.capability, rec.operation, rec.intended_action, rec.target,
-                        json.dumps(rec.parameters), rec.execution_method, rec.status,
-                        json.dumps(rec.related_environment_state), rec.created_at,
+                        _safe_json_dumps(rec.parameters), rec.execution_method, rec.status,
+                        _safe_json_dumps(rec.related_environment_state), rec.created_at,
                     ))
         except Exception as exc:
             logger.debug("[PERSISTENT_RECORDS] Failed to write intended action to PostgreSQL: %s", exc)
@@ -324,12 +334,12 @@ class PersistentExecutionRecordsManager:
                         WHERE action_id = %s
                     """, (
                         status,
-                        json.dumps(actual_result or {}),
+                        _safe_json_dumps(actual_result or {}),
                         verified,
-                        json.dumps(verification_result or {}),
+                        _safe_json_dumps(verification_result or {}),
                         error_message,
                         affected_resource,
-                        json.dumps(related_environment_state) if related_environment_state else None,
+                        _safe_json_dumps(related_environment_state) if related_environment_state else None,
                         completed_time,
                         action_id,
                     ))
@@ -491,7 +501,7 @@ class PersistentExecutionRecordsManager:
                             updated_at = EXCLUDED.updated_at
                     """, (
                         graph.graph_id, graph.goal_id or None, graph.user_id,
-                        graph.title, graph.status.value, json.dumps(graph.metadata),
+                        graph.title, graph.status.value, _safe_json_dumps(graph.metadata),
                         graph.created_at, graph.updated_at,
                     ))
 
@@ -525,14 +535,14 @@ class PersistentExecutionRecordsManager:
                         """, (
                             node.node_id, graph.graph_id, node.goal_id or None, graph.user_id,
                             node.capability, node.operation, node.parent_node_id,
-                            json.dumps(node.dependencies), json.dumps(node.inputs),
-                            json.dumps(node.preconditions), json.dumps(node.expected_result),
+                            _safe_json_dumps(node.dependencies), _safe_json_dumps(node.inputs),
+                            _safe_json_dumps(node.preconditions), _safe_json_dumps(node.expected_result),
                             node.execution_method, node.status.value,
-                            json.dumps(node.actual_result or {}), node.error,
-                            json.dumps(node.verification_result or {}), node.retry_count,
+                            _safe_json_dumps(node.actual_result or {}), node.error,
+                            _safe_json_dumps(node.verification_result or {}), node.retry_count,
                             node.start_time, node.start_time,
                             node.end_time, node.end_time,
-                            json.dumps(node.metadata), time.time(),
+                            _safe_json_dumps(node.metadata), time.time(),
                         ))
                 return True
         except Exception as exc:

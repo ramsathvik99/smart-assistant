@@ -35,7 +35,7 @@ from .email_ai import (
 )
 from .email_reader import (
     fetch_latest_emails, fetch_latest_emails_with_status,
-    get_latest_email, count_unread_emails, organize_email_message, invalidate_cache,
+    get_latest_email, count_unread_emails, count_inbox_emails, organize_email_message, invalidate_cache,
     list_mailboxes, find_folder_by_role, move_email_message
 )
 from .email_ui import get_email_credentials_popup, show_email_editor
@@ -151,6 +151,8 @@ def _audio_available() -> bool:
 # ──────────────────────────────────────────────────────────────────
 
 _pending_email_sessions: Dict[str, Dict[str, Any]] = {}
+_last_retrieved_emails: Dict[str, List[Dict[str, Any]]] = {}
+_last_active_email: Dict[str, Dict[str, Any]] = {}
 
 def get_pending_email(user: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Retrieve the active pending draft for a given user."""
@@ -175,6 +177,138 @@ STATE_EMAIL_SEND_FAILED = "EMAIL_SEND_FAILED"
 STATE_EMAIL_AMBIGUOUS_OUTCOME = "EMAIL_SEND_AMBIGUOUS"
 STATE_EMAIL_PARTIAL_DELIVERY = "EMAIL_PARTIAL_DELIVERY"
 STATE_UNVERIFIED_RECIPIENT = "UNVERIFIED_RECIPIENT"
+STATE_WAITING_FOR_RECIPIENT_ADDRESS = "WAITING_FOR_RECIPIENT_ADDRESS"
+STATE_PENDING_BULK_MARK = "PENDING_BULK_MARK"
+
+_last_established_recipient: Dict[str, Dict[str, Any]] = {}
+_last_email_count_context: Dict[str, Dict[str, Any]] = {}
+
+def set_established_recipient(user: str, email: str, name: Optional[str] = None) -> None:
+    """Store the established recipient for cross-turn conversational continuity."""
+    u = _resolve_user(user)
+    rec_data = {
+        "email": email,
+        "name": name or email,
+        "timestamp": time.time()
+    }
+    _last_established_recipient[u] = rec_data
+    try:
+        from extensions.dialogue_state_manager import get_dialogue_manager
+        dm = get_dialogue_manager(u)
+        dm.current_state.entities["last_email_recipient"] = rec_data
+    except Exception:
+        pass
+
+def get_established_recipient(user: str) -> Optional[Dict[str, Any]]:
+    """Retrieve the established recipient for cross-turn conversational continuity."""
+    u = _resolve_user(user)
+    rec = _last_established_recipient.get(u)
+    if rec and rec.get("email"):
+        return rec
+    try:
+        from extensions.dialogue_state_manager import get_dialogue_manager
+        dm = get_dialogue_manager(u)
+        ent = dm.current_state.entities.get("last_email_recipient")
+        if ent and isinstance(ent, dict) and ent.get("email"):
+            return ent
+    except Exception:
+        pass
+    return None
+
+def find_recent_recipient_candidates(user: str, pronoun: str = "him") -> List[Dict[str, Any]]:
+    """
+    Find recent recipient candidates from established session memory and dialogue manager.
+    Returns list of dicts with keys 'name' and 'email'.
+    """
+    u = _resolve_user(user)
+    candidates: List[Dict[str, Any]] = []
+    seen_emails: set = set()
+
+    est = get_established_recipient(u)
+    if est and est.get("email"):
+        e_norm = est["email"].lower().strip()
+        candidates.append({"name": est.get("name") or est["email"], "email": est["email"]})
+        seen_emails.add(e_norm)
+
+    try:
+        from extensions.dialogue_state_manager import get_dialogue_manager
+        dm = get_dialogue_manager(u)
+        for ent in getattr(dm.current_state, "recent_entities", []):
+            if isinstance(ent, dict):
+                em = ent.get("email")
+                nm = ent.get("name") or ent.get("recipient")
+                if em and em.lower().strip() not in seen_emails:
+                    candidates.append({"name": nm or em, "email": em})
+                    seen_emails.add(em.lower().strip())
+                elif nm and not em:
+                    res = resolve_recipient_detailed(nm)
+                    if res.get("status") == "resolved" and res.get("email") and res["email"].lower().strip() not in seen_emails:
+                        candidates.append({"name": res.get("name") or nm, "email": res["email"]})
+                        seen_emails.add(res["email"].lower().strip())
+    except Exception:
+        pass
+
+    return candidates
+
+
+def extract_provided_email_and_recipient(text: str) -> Dict[str, Any]:
+    """
+    Extracts email address and recipient name from conversational follow-up turns.
+    Handles speech-recognition patterns, punctuation, and varied phrasing.
+    """
+    if not text or not isinstance(text, str):
+        return {"has_address": False, "email": None, "recipient_name": None, "send_now": False, "raw_text": ""}
+
+    # 1. Clean markdown links: [foo@bar.com](mailto:foo@bar.com) -> foo@bar.com
+    t = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text.strip())
+    t = re.sub(r'\bmailto:\s*', '', t, flags=re.I)
+
+    # 2. Normalize speech transcription " at " and " dot " if it forms an email
+    # e.g. "gamer at gmail dot com" -> "gamer@gmail.com"
+    t_norm = re.sub(r'\s+at\s+([a-zA-Z0-9-]+\s+dot\s+[a-zA-Z0-9-.]+)', r'@\1', t, flags=re.I)
+    t_norm = re.sub(r'(@[a-zA-Z0-9-]+)\s+dot\s+([a-zA-Z0-9-.]+)', r'\1.\2', t_norm, flags=re.I)
+
+    # 3. Find email address via regex
+    m_email = re.search(r'\b([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\b', t_norm)
+    email_found = None
+    if m_email:
+        email_found = m_email.group(1).rstrip('.?!,;:')
+
+    # 4. Extract recipient name if specified in the utterance
+    recipient_name = None
+    # Pattern: "<Name>'s email is <address>" or "<Name> email address is <address>"
+    m_n1 = re.search(r'\b([A-Za-z0-9_\s]+?)(?:\'s|\s+)\s*email(?:\s+address)?\s+(?:is|=)\b', t, re.I)
+    if m_n1:
+        recipient_name = m_n1.group(1).strip()
+
+    # Pattern: "<address> is <Name>'s email"
+    if not recipient_name:
+        m_n2 = re.search(r'(?:is|=)\s+([A-Za-z0-9_\s]+?)(?:\'s|\s+)\s*email\b', t, re.I)
+        if m_n2:
+            recipient_name = m_n2.group(1).strip()
+
+    # Pattern: "use <address> for <Name>" or "send to <address> for <Name>"
+    if not recipient_name:
+        m_n3 = re.search(r'\b(?:use|set)\s+(?:address\s+)?[^\s]+@[^\s]+\s+for\s+([A-Za-z0-9_\s]+?)(?:[.,]|\s+(?:and|please|send)|$)', t, re.I)
+        if m_n3:
+            recipient_name = m_n3.group(1).strip()
+
+    # Filter invalid / pronoun recipient names
+    if recipient_name:
+        clean_rn = recipient_name.lower().strip()
+        if clean_rn in {"his", "her", "their", "him", "the", "my", "this", "that", "it", "him the", "the mail", "the email", "send him"}:
+            recipient_name = None
+
+    # 5. Check if utterance explicitly requests to send the mail
+    send_now = bool(re.search(r'\b(?:and\s+)?send\s+(?:him\s+|her\s+|them\s+|it\s+)?(?:the\s+)?(?:mail|email|message)?\b', t, re.I))
+
+    return {
+        "has_address": bool(email_found),
+        "email": email_found,
+        "recipient_name": recipient_name,
+        "send_now": send_now,
+        "raw_text": text
+    }
 
 
 def is_in_email_dictation(user: Optional[Any] = None) -> bool:
@@ -194,6 +328,15 @@ def is_active_email_session(user: Optional[Any] = None) -> bool:
         session = next(iter(_pending_email_sessions.values()))
     if not session:
         return False
+    # Safely expire stale tasks (> 30 minutes)
+    if "creation_time" in session:
+        try:
+            created_dt = datetime.datetime.fromisoformat(session["creation_time"])
+            if (datetime.datetime.now() - created_dt).total_seconds() > 1800:
+                _pending_email_sessions.pop(u, None)
+                return False
+        except Exception:
+            pass
     status = session.get("status")
     return status in (
         STATE_RECORDING_EMAIL_MESSAGE,
@@ -205,8 +348,12 @@ def is_active_email_session(user: Optional[Any] = None) -> bool:
         STATE_EMAIL_AMBIGUOUS_OUTCOME,
         STATE_EMAIL_PARTIAL_DELIVERY,
         STATE_UNVERIFIED_RECIPIENT,
+        STATE_WAITING_FOR_RECIPIENT_ADDRESS,
+        STATE_PENDING_BULK_MARK,
         "PENDING_CONFIRMATION",
-        "NEED_PURPOSE"
+        "NEED_PURPOSE",
+        "NEED_RECIPIENT",
+        "waiting_for_recipient_address"
     )
 
 
@@ -215,6 +362,78 @@ def get_email_session_state(user: Optional[Any] = None) -> str:
     u = _resolve_user(user)
     session = _pending_email_sessions.get(u)
     return session.get("status", STATE_IDLE) if session else STATE_IDLE
+
+
+def is_email_session_input(command: str, user: Optional[Any] = None) -> bool:
+    """
+    Checks whether an input utterance is intended for an in-flight email session.
+    When in WAITING_FOR_RECIPIENT_ADDRESS or EMAIL_AMBIGUOUS_OUTCOME, unrelated commands
+    (e.g., 'what time is it', 'open notepad') must NOT be hijacked, while preserving
+    the active email task in _pending_email_sessions.
+    """
+    if not command or not isinstance(command, str):
+        return False
+    u = _resolve_user(user)
+    session = _pending_email_sessions.get(u)
+    if not session and user is None and len(_pending_email_sessions) == 1:
+        session = next(iter(_pending_email_sessions.values()))
+    if not session:
+        return False
+
+    status = session.get("status")
+    cmd_lower = command.lower().strip()
+    cmd_clean = re.sub(r'[^\w\s]', '', cmd_lower).strip()
+
+    if status in (STATE_RECORDING_EMAIL_MESSAGE, STATE_PENDING_EMAIL_CONFIRMATION, "PENDING_CONFIRMATION", STATE_PENDING_BULK_MARK):
+        return True
+
+    if status in (STATE_WAITING_FOR_RECIPIENT_ADDRESS, "waiting_for_recipient_address"):
+        ext = extract_provided_email_and_recipient(command)
+        if ext.get("has_address"):
+            return True
+        if re.search(r'\b[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+\b', command):
+            return True
+        if any(p in cmd_lower for p in [
+            "where can i enter", "where do i enter", "where do i type",
+            "where should i enter", "where to enter", "how can i enter",
+            "how do i enter", "where can i provide", "where to type", "where can i type"
+        ]):
+            return True
+        if cmd_clean in ("yes i have it", "i have it", "yes", "yeah", "yep", "sure", "i have his email", "i have their email", "i know it", "i got it"):
+            return True
+        if any(w in cmd_lower for w in ["cancel", "discard", "abort", "don't send", "dont send", "stop", "never mind", "nevermind", "no", "nope"]):
+            return True
+        recip_name = str(session.get("recipient_name") or session.get("recipient_raw") or "").lower()
+        if recip_name and recip_name in cmd_lower:
+            return True
+        if any(p in cmd_lower for p in [
+            "his email", "her email", "their email", "the email", "email address",
+            "use this address", "send to", "send him the mail", "send her the mail"
+        ]):
+            return True
+        return False
+
+    if status == STATE_EMAIL_AMBIGUOUS_OUTCOME:
+        is_cancel = any(w in cmd_lower for w in ("cancel", "discard", "abort", "don't send", "dont send", "never mind", "nevermind", "no", "nope"))
+        is_retry = any(w in cmd_lower for w in ("retry", "resend", "send again", "checked sent", "check sent", "sent folder", "not in sent", "wasn't sent", "not sent", "confirm retry send", "send", "send it", "yes", "yeah", "sure", "proceed"))
+        return bool(is_cancel or is_retry)
+
+    if status in (STATE_EMAIL_RECIPIENT_RESOLUTION, STATE_UNVERIFIED_RECIPIENT):
+        ext = extract_provided_email_and_recipient(command)
+        if ext.get("has_address"):
+            return True
+        if any(w in cmd_lower for w in ["cancel", "discard", "abort", "don't send", "dont send", "stop", "never mind", "nevermind", "no", "nope", "first", "second", "1", "2"]):
+            return True
+        cands = session.get("candidates", [])
+        for c in cands:
+            if c.get("name", "").lower() in cmd_lower or c.get("email", "").lower() in cmd_lower:
+                return True
+        recip_name = str(session.get("recipient_name") or session.get("recipient_raw") or "").lower()
+        if recip_name and recip_name in cmd_lower:
+            return True
+        return False
+
+    return True
 
 def _format_spoken_error(send_res_or_msg: Any, context: str = "send", draft_retained: bool = True) -> str:
     """
@@ -370,6 +589,18 @@ def _dispatch_pending_email_impl(user: str, email_id: Optional[str], email_pass:
         pending["sent_at"] = datetime.datetime.now().isoformat()
         _pending_email_sessions.pop(user, None)  # ONLY remove on confirmed success!
         invalidate_cache(email_id)
+
+        # Requirement 4: Distinguish submission, sent-folder verification, and confirmed delivery
+        sent_folder_verified = False
+        try:
+            from .email_reader import verify_email_in_sent_folder
+            sent_folder_verified = verify_email_in_sent_folder(subject, email_id, email_pass, to_email=to_addr)
+        except Exception:
+            sent_folder_verified = False
+
+        # Requirement 3: Preserve established recipient for conversational continuity
+        set_established_recipient(user, to_addr, pending.get("recipient_name") or to_addr)
+
         att_note = f" with {send_res.get('attachments_count', 0)} attachment(s)" if (isinstance(send_res, dict) and send_res.get("attachments_count")) else ""
         msg = f"Email successfully sent to {to_addr}{att_note}."
         try:
@@ -379,9 +610,15 @@ def _dispatch_pending_email_impl(user: str, email_id: Optional[str], email_pass:
         return {
             "success": True,
             "status": "success",
+            "submission_status": "confirmed",
+            "sent_folder_verified": sent_folder_verified,
+            "delivery_status": "provider_accepted",
+            "confirmed_delivery": False,
             "recipient": to_addr,
             "subject": subject,
-            "message": msg
+            "body": body,
+            "message": msg,
+            "draft": pending
         }
     else:
         # Sender returned failure (e.g. auth failure, network error, recipient rejected)
@@ -422,6 +659,61 @@ def get_credentials(user: Optional[str] = None) -> Tuple[Optional[str], Optional
             speak("Could not get credentials. Email operations are unavailable.")
             return None, None
     return email, password
+
+
+def _send_or_draft_topic_email(
+    user: str,
+    recipient_email: str,
+    recipient_name: str,
+    topic: str,
+    tone: str = "professional",
+    send_versus_draft: str = "send",
+    attachments: Optional[List[str]] = None,
+    email_id: Optional[str] = None,
+    email_pass: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Generates a professional email subject and body from the provided topic
+    and directly sends it (or saves as draft if explicitly requested).
+    Preserves recipient facts without hallucinations.
+    """
+    if not email_id or not email_pass:
+        email_id, email_pass = get_credentials(user)
+
+    action_label = "draft" if send_versus_draft == "draft" else "email"
+    speak(f"Preparing {action_label} for {recipient_name}...")
+    subject, body = rewrite_professional(topic, recipient_name, tone=tone, user_id=user)
+
+    draft = {
+        "recipient": recipient_email,
+        "recipient_name": recipient_name,
+        "subject": subject,
+        "body": body,
+        "attachments": attachments or []
+    }
+
+    set_established_recipient(user, recipient_email, recipient_name)
+
+    if send_versus_draft == "draft":
+        draft_id = save_draft(user, draft)
+        _pending_email_sessions.pop(user, None)
+        msg = f"Email draft saved for {recipient_name} with subject '{subject}'."
+        speak(f"Draft saved with subject '{subject}'.")
+        return {
+            "success": True,
+            "status": "draft_saved",
+            "draft_id": draft_id,
+            "recipient": recipient_email,
+            "recipient_name": recipient_name,
+            "subject": subject,
+            "body": body,
+            "message": msg,
+            "draft": draft
+        }
+
+    # Direct send path
+    return _dispatch_pending_email(user, email_id, email_pass, override_draft=draft)
+
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -592,8 +884,45 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
             "search_query": None,
             "recipient_raw": None,
             "body_raw": None,
+            "topic": None,
+            "send_versus_draft": "send",
+            "is_dictation": False,
             "tone": "professional",
             "attachment_term": None,
+            "original_command": cmd
+        }
+
+    # Check if user is directly providing an email address
+    ext = extract_provided_email_and_recipient(cmd)
+    if ext.get("has_address"):
+        recipient_email = ext["email"]
+        recipient_name = ext["recipient_name"]
+        return {
+            "action": "compose",
+            "search_query": None,
+            "recipient_raw": recipient_name or recipient_email,
+            "recipient_email": recipient_email,
+            "body_raw": None,
+            "topic": None,
+            "send_versus_draft": "send",
+            "is_dictation": False,
+            "tone": "professional",
+            "attachment_term": None,
+            "target": "current",
+            "scope": "unread",
+            "count_sender": None,
+            "count_date": None,
+            "read_target": "latest",
+            "read_sender": None,
+            "read_subject": None,
+            "read_summarize": False,
+            "read_unread": False,
+            "sender_inquiry": None,
+            "latest_only": False,
+            "list_limit": 5,
+            "attachments_only": False,
+            "important_only": False,
+            "send_now": ext.get("send_now", False),
             "original_command": cmd
         }
 
@@ -610,17 +939,26 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
         if m_msg.group(2):
             body_raw = m_msg.group(2).strip().rstrip('.?!')
 
-    # Pattern B: prefix: (send an email|send a mail|mail|email|compose a mail|compose an email|prepare an email|prepare a mail|write an email|write a mail|write) (to|for|addressed to) <recip>
+    # Pattern B: prefix: (send an email|send a mail|mail|email|compose a mail|compose an email|prepare an email|prepare a mail|write an email|write a mail|write|dictate) (to|for|addressed to) <recip>
     if not recipient_raw:
-        prefix_re = r'^(?:(?:send|compose|prepare|draft|write)\s+(?:an?\s+)?(?:email|mail)\s+(?:addressed\s+to|to|for)|mail\s+(?:to\s+)?|email\s+(?:to\s+)?|write\s+to\s+)'
+        prefix_re = r'^(?:(?:send|compose|prepare|draft|write|dictate)\s+(?:an?\s+|another\s+)?(?:short\s+|quick\s+|brief\s+|urgent\s+|formal\s+|casual\s+)?(?:email|mail)\s+(?:addressed\s+to|to|for)|mail\s+(?:to\s+)?|email\s+(?:to\s+)?|write\s+to\s+|dictate\s+to\s+)'
         m_prefix = re.search(prefix_re, c, re.I)
         if m_prefix:
             action = "compose"
             remainder = c[m_prefix.end():].strip()
-            m_pur = re.search(r'\s+(that|saying|about|to\s+request|with\s+message)\s+', remainder, re.I)
+            m_pur = re.search(
+                r'\s+(that|saying|about|regarding|asking(?:\s+for)?|telling(?:\s+(?:him|her|them))?|'
+                r'warn(?:ing)?(?:\s+(?:him|her|them))?|thank(?:ing)?(?:\s+(?:him|her|them))?|'
+                r'inform(?:ing)?(?:\s+(?:him|her|them))?|remind(?:ing)?(?:\s+(?:him|her|them))?|'
+                r'requesting|complaining(?:\s+about)?|apologizing(?:\s+for)?|wishing|explaining|'
+                r'to\s+request|to\s+ask|to\s+warn|to\s+thank|to\s+inform|to\s+remind|to\s+complain|'
+                r'to\s+tell|to\s+wish|to\s+explain|to\s+say|to|with\s+message)\s+',
+                remainder, re.I
+            )
             if m_pur:
                 recipient_raw = remainder[:m_pur.start()].strip().rstrip('.?!')
-                if m_pur.group(1).lower().startswith('to'):
+                delim_str = m_pur.group(1).lower()
+                if delim_str.startswith('to') or any(delim_str.startswith(p) for p in ('ask', 'thank', 'warn', 'tell', 'inform', 'remind', 'complain', 'apologiz', 'wish', 'explain')):
                     body_raw = remainder[m_pur.start():].strip().rstrip('.?!')
                 else:
                     body_raw = remainder[m_pur.end():].strip().rstrip('.?!')
@@ -628,35 +966,194 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
                 recipient_raw = remainder.strip().rstrip('.?!')
                 body_raw = None
 
-    # Pattern C: 'send <recip> an email' / 'send <recip> a mail'
+    # Pattern C: 'send <recip> an email' / 'send <recip> a mail' / 'send <recip> another email'
     if not recipient_raw:
-        m_to_email = re.search(r'\bsend\s+(?!(?:an?|the|this|that|my|your|our)\s+(?:email|mail|message))(.+?)\s+(?:an?\s+)?(?:email|mail)(?:\s+(?:that|saying|about|to)\s+(.*))?$', c, re.I)
+        m_to_email = re.search(
+            r'\bsend\s+(?!(?:an?|the|this|that|my|your|our)\s+(?:(?:short|quick|brief|urgent|formal|casual)\s+)?(?:email|mail|message))(.+?)\s+(?:an?\s+|another\s+)?(?:short\s+|quick\s+|brief\s+|urgent\s+|formal\s+|casual\s+)?(?:email|mail)'
+            r'(?:\s+(?:that|saying|about|regarding|asking(?:\s+for)?|telling|warning|thanking|informing|reminding|requesting|complaining|apologizing|wishing|explaining|to|with\s+message)\s+(.*))?$',
+            c, re.I
+        )
         if m_to_email:
             cand = m_to_email.group(1).strip().rstrip('.?!')
-            if cand.lower() not in {"the", "a", "an", "this", "that", "it", "me", "my", "your", "our", "their", "send", "mail", "email", "draft", "message", "now", "please"}:
+            cand_low = cand.lower().strip()
+            INVALID_RECIPIENT_NAMES = {
+                "the", "a", "an", "this", "that", "it", "me", "my", "your", "our", "their",
+                "send", "mail", "email", "draft", "message", "now", "please",
+                "him the", "her the", "them the", "the mail", "the email",
+                "send him", "send her", "send them", "send it", "to him", "to her",
+                "short", "quick", "brief", "urgent", "formal", "casual"
+            }
+            if cand_low not in INVALID_RECIPIENT_NAMES and not any(cand_low.startswith(p) for p in ("send ",)):
                 action = "compose"
                 recipient_raw = cand
                 if m_to_email.group(2):
                     body_raw = m_to_email.group(2).strip().rstrip('.?!')
+
+    # Pattern D: 'send (an? )?(email|mail|message) about <topic> to <recip>'
+    if not recipient_raw:
+        m_about_to = re.search(r'^(?:(?:send|compose|prepare|draft|write)\s+(?:an?\s+)?(?:email|mail|message))\s+about\s+(.+?)\s+to\s+(.+)$', c, re.I)
+        if m_about_to:
+            action = "compose"
+            body_raw = m_about_to.group(1).strip().rstrip('.?!')
+            recipient_raw = m_about_to.group(2).strip().rstrip('.?!')
+
+    # Pattern E: 'send (an? )?(email|mail|message) about <topic>' (no recipient specified)
+    if not recipient_raw and not body_raw:
+        m_about_only = re.search(r'^(?:(?:send|compose|prepare|draft|write)\s+(?:an?\s+)?(?:email|mail|message))\s+about\s+(.+)$', c, re.I)
+        if m_about_only:
+            action = "compose"
+            body_raw = m_about_only.group(1).strip().rstrip('.?!')
+
+    # Pattern F: 'complain to <recip> about <topic>' / 'send a complaint to <recip> about <topic>'
+    if not recipient_raw:
+        m_comp = re.search(r'^(?:send\s+(?:a\s+)?complaint\s+to|complain\s+to)\s+(.+?)(?:\s+about\s+(.*))?$', c, re.I)
+        if m_comp:
+            action = "compose"
+            recipient_raw = m_comp.group(1).strip().rstrip('.?!')
+            if m_comp.group(2):
+                body_raw = m_comp.group(2).strip().rstrip('.?!')
+
+    # Pattern G: 'inform/notify/tell <recip> (that|about) <topic>'
+    if not recipient_raw:
+        m_inf = re.search(r'^(?:inform|notify|tell)\s+(.+?)\s+(that|about|saying)\s+(.*)$', c, re.I)
+        if m_inf:
+            action = "compose"
+            recipient_raw = m_inf.group(1).strip().rstrip('.?!')
+            body_raw = m_inf.group(3).strip().rstrip('.?!')
+
+    cmd_clean = re.sub(r'[\r\n\x00?!.]', '', cmd_low).strip()
+
+    target = "current"
+    scope = "unread"
+    count_sender = None
+    count_date = None
+    read_target = "latest"
+    read_sender = None
+    read_subject = None
+    read_summarize = False
+    read_unread = False
+    sender_inquiry = None
+    latest_only = False
+    list_limit = 5
+    attachments_only = False
+    important_only = False
 
     # Inbox & general mailbox requests
     _RE_INBOX_QUERY = re.compile(
         r'\b(?:'
         r'check\s+(?:my\s+)?(?:inbox|email|emails|mail|mails)|'
         r'show\s+(?:me\s+)?(?:my\s+)?(?:latest|recent)?\s*(?:emails?|mails?|messages?|inbox)|'
-        r'what\s+emails?\s+(?:have\s+i|did\s+i)\s+(?:received|got)|'
-        r'read\s+(?:my\s+)?(?:recent|latest)?\s*(?:emails?|mails?|messages?)|'
+        r'what\s+emails?\s+(?:have\s+i|did\s+i)\s+(?:received?|got)|'
+        r'^(?:read|show|check|list|get)\s+(?:my\s+)?(?:recent|latest)?\s*(?:emails?|mails?|messages?)|'
         r'list\s+(?:my\s+)?(?:emails?|mails?|messages?)|'
         r'get\s+(?:my\s+)?(?:emails?|mails?|inbox)'
         r')\b',
         re.I
     )
-    if action == "default" and _RE_INBOX_QUERY.search(cmd_low):
+    if action == "default" and not re.search(r'\b(?:how\s+many|count|number\s+of)\b', cmd_clean) and _RE_INBOX_QUERY.search(cmd_low):
         action = "check"
 
     # Determine primary action with specific intent precedence if not already composed
     if action == "default":
-        if _RE_MY_EMAIL.search(cmd_low):
+        # 1. Mark read / unread
+        if re.search(r'\b(?:mark\b.+\bas\s+read|mark\s+as\s+read|mark\s+read)\b', cmd_clean):
+            action = "mark_read"
+            target = "all" if any(w in cmd_clean for w in ["all", "these"]) else "current"
+            m_s = re.search(r'\b(?:from|by)\s+([a-zA-Z0-9_\-\s@.]+?)$', cmd_clean)
+            if m_s:
+                count_sender = m_s.group(1).strip()
+        elif re.search(r'\b(?:mark\b.+\bas\s+unread|mark\s+as\s+unread|mark\s+unread)\b', cmd_clean):
+            action = "mark_unread"
+            target = "all" if any(w in cmd_clean for w in ["all", "these"]) else "current"
+            m_s = re.search(r'\b(?:from|by)\s+([a-zA-Z0-9_\-\s@.]+?)$', cmd_clean)
+            if m_s:
+                count_sender = m_s.group(1).strip()
+
+        # 2. Count read / unread / total emails (Requirement 1)
+        elif (
+            re.search(r'\b(?:how\s+many|count|number\s+of)\b.{0,40}\b(?:emails?|mails?|unread|read|inbox|messages?|total)\b', cmd_clean)
+            or re.search(r'\bhow\s+many\s+(?:are\s+)?(?:read|unread)\b', cmd_clean)
+            or re.search(r'\bhow\s+many\s+(?:are\s+there\s+)?(?:in\s+total|in\s+(?:my\s+)?inbox|total)\b', cmd_clean)
+        ):
+            action = "count_emails"
+            if "unread" in cmd_clean:
+                scope = "unread"
+            elif "read" in cmd_clean and "unread" not in cmd_clean:
+                scope = "read"
+            elif any(w in cmd_clean for w in ["total", "inbox", "in my inbox", "all", "emails", "mails"]):
+                scope = "total"
+            else:
+                scope = "unread"
+
+            m_s = re.search(r'\b(?:from|by)\s+([a-zA-Z0-9_\-\s@.]+?)(?:\s+(?:today|yesterday)|$)', cmd_clean)
+            if m_s:
+                cand = m_s.group(1).strip().rstrip('.?!')
+                cand = re.sub(r'^(?:my|the)\s+', '', cand)
+                if cand:
+                    count_sender = cand
+            count_date = "TODAY" if "today" in cmd_clean else ("YESTERDAY" if "yesterday" in cmd_clean else None)
+
+        # 3. Read specific email
+        elif (
+            (re.search(r'\b(?:read|open)\b', cmd_clean) and any(w in cmd_clean for w in ["email", "mail", "this", "say", "subject"]) and not any(w in cmd_clean for w in ["choose which to read", "show unread"]))
+            or "what does this email say" in cmd_clean or "what does the email say" in cmd_clean
+        ):
+            action = "read_email"
+            read_target = "current" if any(w in cmd_clean for w in ["this email", "what does this email say", "what does the email say"]) else "latest"
+            m_s = re.search(r'\b(?:from|by)\s+([a-zA-Z0-9_\-\s@.]+?)(?:\s+(?:about|regarding)|$)', cmd_clean)
+            if m_s:
+                cand = m_s.group(1).strip().rstrip('.?!')
+                cand = re.sub(r'^(?:my|the)\s+', '', cand)
+                if cand:
+                    read_sender = cand
+
+            m_sub = re.search(r'\b(?:subject|about|regarding)\s+[\'"]?([^\'"]+?)[\'"]?(?:\s+(?:and|then)|$)', cmd, re.I)
+            if m_sub:
+                read_subject = m_sub.group(1).strip().rstrip('.?!')
+
+            read_summarize = bool("summarize" in cmd_clean or "summary" in cmd_clean)
+            read_unread = bool("unread" in cmd_clean or "new" in cmd_clean)
+
+        # 4. Search by sender inquiries ("Did I receive email from X?", etc.)
+        elif (
+            re.search(r'\b(?:what\s+was\s+the\s+last\s+email|last\s+email)\s+([a-zA-Z0-9_\-\s]+?)\s+sent\s+me\b', cmd_clean)
+            or re.search(r'\bdid\s+([a-zA-Z0-9_\-\s]+?)\s+email\s+me\b', cmd_clean)
+            or re.search(r'\b(?:did\s+i\s+receive\s+(?:any\s+)?emails?\s+from|check\s+whether\s+i\s+got\s+an?\s+email\s+from|find\s+(?:all\s+)?emails?\s+from|show\s+unread\s+emails?\s+from)\s+([a-zA-Z0-9_\-\s@.]+?)(?:\s+(?:about|today|yesterday)|$)', cmd_clean)
+            or re.search(r'\bfind\s+emails?\s+from\b', cmd_clean)
+        ):
+            action = "search_sender"
+            m_last_sent = re.search(r'\b(?:what\s+was\s+the\s+last\s+email|last\s+email)\s+([a-zA-Z0-9_\-\s]+?)\s+sent\s+me\b', cmd_clean)
+            m_did_x = re.search(r'\bdid\s+([a-zA-Z0-9_\-\s]+?)\s+email\s+me\b', cmd_clean)
+            m_did_from = re.search(r'\b(?:did\s+i\s+receive\s+(?:any\s+)?emails?\s+from|check\s+whether\s+i\s+got\s+an?\s+email\s+from|find\s+(?:all\s+)?emails?\s+from|show\s+unread\s+emails?\s+from)\s+([a-zA-Z0-9_\-\s@.]+?)(?:\s+(?:about|today|yesterday)|$)', cmd_clean)
+
+            if m_last_sent:
+                sender_inquiry = m_last_sent.group(1).strip()
+                latest_only = True
+            elif m_did_x:
+                sender_inquiry = m_did_x.group(1).strip()
+            elif m_did_from:
+                sender_inquiry = m_did_from.group(1).strip().rstrip('.?!')
+            else:
+                m_s = re.search(r'\b(?:from|by)\s+([a-zA-Z0-9_\-\s@.]+?)(?:\s+(?:about|today|yesterday)|$)', cmd_clean)
+                if m_s:
+                    sender_inquiry = m_s.group(1).strip().rstrip('.?!')
+            if sender_inquiry:
+                sender_inquiry = re.sub(r'^(?:my|the)\s+', '', sender_inquiry).strip()
+
+            m_q = re.search(r'\babout\s+(.+?)(?:\s+(?:today|yesterday)|$)', cmd_clean)
+            if m_q:
+                search_query = m_q.group(1).strip().rstrip('.?!')
+            count_date = "TODAY" if "today" in cmd_clean else ("YESTERDAY" if "yesterday" in cmd_clean else None)
+            unread_only = bool("unread" in cmd_clean)
+
+        # 5. List / Retrieve Filters
+        elif "attachment" in cmd_clean:
+            action = "list_attachments"
+            attachments_only = True
+        elif "important" in cmd_clean:
+            action = "list_important"
+            important_only = True
+        elif _RE_MY_EMAIL.search(cmd_low):
             action = "my_email"
         elif _RE_DRAFT_LIST.search(cmd_low):
             action = "draft_list"
@@ -674,8 +1171,6 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
             action = "folder_check"
         elif _RE_ADD_CONTACT.search(cmd_low):
             action = "add_contact"
-        elif _RE_COUNT.search(cmd_low):
-            action = "count_unread" if _RE_UNREAD.search(cmd_low) else "count_inbox"
         elif _RE_FORWARD.search(cmd_low):
             action = "forward"
         elif _RE_REPLY.search(cmd_low):
@@ -685,10 +1180,6 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
                 action = "reply"
         elif _RE_SUMMARIZE.search(cmd_low):
             action = "summarize"
-        elif _RE_MARK_UNREAD.search(cmd_low):
-            action = "mark_unread"
-        elif _RE_MARK_READ.search(cmd_low):
-            action = "mark_read"
         elif _RE_ARCHIVE.search(cmd_low):
             action = "archive"
         elif _RE_TRASH.search(cmd_low) and not any(k in cmd_low for k in ["folder", "mailbox", "draft"]):
@@ -703,7 +1194,7 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
             action = "explain"
         elif _RE_SEARCH.search(cmd_low):
             action = "search"
-            m = re.search(r'\b(?:find|search|look for|emails?\s+from|emails?\s+about|emails?\s+with)\s+(.+?)(?:\s+(?:in|from|to|and|then).*)?$', cmd_low)
+            m = re.search(r'\b(?:find|search\s+for|look for|emails?\s+from|emails?\s+about|emails?\s+with)\s+(.+?)(?:\s+(?:in|from|to|and|then).*)?$', cmd_low)
             if m:
                 search_query = m.group(1).strip()
         elif _RE_DATE_RANGE.search(cmd_low):
@@ -722,12 +1213,13 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
             action = "check_today"
         elif _RE_SEND.search(cmd_low):
             action = "compose"
-        elif _RE_READ.search(cmd_low):
-            action = "read"
-        elif _RE_CHECK.search(cmd_low):
-            action = "check"
         elif _RE_UNREAD.search(cmd_low):
             action = "check_unread"
+        elif _RE_READ.search(cmd_low) or _RE_CHECK.search(cmd_low):
+            m_lim = re.search(r'\b(?:last|latest)\s+(\d+)\s+emails?\b', cmd_clean)
+            if m_lim:
+                list_limit = int(m_lim.group(1))
+            action = "check"
 
     # Clean up recipient if extracted
     if recipient_raw:
@@ -739,8 +1231,8 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
             recipient_raw = recipient_raw[:60].strip()
 
     # Fallback recipient extraction: "send/email/mail/reply to <name_or_email> [and say <body>]"
-    if action in ("compose", "reply", "reply_all", "forward") and not recipient_raw:
-        m_to = re.search(r'\b(?:(?:send|compose|write|draft)\s+(?:an?\s+)?(?:email|mail)\s+(?:to|for)|to|for)\s+([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-.]+|[A-Za-z0-9_\s]+?)(?:\s+(?:about|and|saying|with|regarding|re:)|$)', cmd, re.I)
+    if action in ("compose", "reply", "reply_all", "forward", "default") and not recipient_raw:
+        m_to = re.search(r'\b(?:(?:send|compose|write|draft|dictate)\s+(?:an?\s+)?(?:email|mail)\s+(?:to|for)|to|for)\s+([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-.]+|[A-Za-z0-9_\s]+?)(?:\s+(?:about|and|saying|with|regarding|re:)|$)', cmd, re.I)
         if m_to:
             candidate = m_to.group(1).strip().rstrip('.,?!')
             candidate = re.sub(r'^(?:to|for)\s+', '', candidate, flags=re.I).strip()
@@ -749,11 +1241,15 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
                 candidate = ""
             if candidate and len(candidate) <= 60:
                 recipient_raw = candidate
+                if action == "default":
+                    action = "compose"
 
         if not body_raw:
             m_body = re.search(r'\b(?:about|saying|and say|tell him|tell her|ask (?:him|her|them)|with message)\s+(.+)', cmd, re.I)
             if m_body:
                 body_raw = m_body.group(1).strip()
+                if action == "default":
+                    action = "compose"
 
     # Attachment term
     m_att = re.search(r'\b([a-zA-Z0-9_\-.]+\.(?:pdf|docx|xlsx|pptx|txt|csv|png|jpg|zip))\b', cmd, re.I)
@@ -765,13 +1261,68 @@ def _parse_email_intent(command: str) -> Dict[str, Any]:
                 attachment_term = kw
                 break
 
+    # Explicit dictation check:
+    _RE_EXPLICIT_DICTATION = re.compile(
+        r'\b(?:'
+        r'dictat(?:e|ion)|take\s+dictation|record\s+(?:my\s+)?(?:message|voice|email)|'
+        r'let\s+me\s+dictate|i\s+want\s+to\s+dictate|i(?:\'ll|ll|\s+will)\s+dictate|'
+        r'start\s+dictat(?:e|ion)'
+        r')\b',
+        re.I
+    )
+    is_dictation = bool(_RE_EXPLICIT_DICTATION.search(cmd_low))
+    if is_dictation and action == "default":
+        action = "compose"
+
+    # Explicit draft check:
+    _RE_EXPLICIT_DRAFT = re.compile(
+        r'\b(?:'
+        r'save\s+(?:a\s+)?draft|create\s+(?:a\s+)?draft|prepare\s+(?:a\s+)?draft|'
+        r'keep\s+(?:as\s+)?(?:a\s+)?draft|without\s+sending|make\s+(?:a\s+)?draft|'
+        r'just\s+draft|only\s+draft'
+        r')\b',
+        re.I
+    )
+    send_versus_draft = "draft" if _RE_EXPLICIT_DRAFT.search(cmd_low) else "send"
+    if action == "compose" and re.search(r'^\s*(?:draft|prepare\s+a\s+draft|write\s+a\s+draft)\b', c, re.I) and not re.search(r'\b(?:and\s+send|send\s+it)\b', cmd_low):
+        send_versus_draft = "draft"
+
+    topic = body_raw
+    if topic:
+        topic = re.sub(r'^(?:about|regarding|that|saying|tell\s+(?:him|her|them)\s+(?:that)?)\s+', '', topic, flags=re.I).strip()
+        topic = topic.rstrip('.?!').strip()
+
+    if any(k in cmd_low for k in ["short email", "short mail", "short message", "brief email", "brief note", "quick note", "one line", "one-line"]):
+        tone = "short"
+    elif any(k in cmd_low for k in ["urgent", "asap", "immediately"]):
+        tone = "urgent"
+    elif any(k in cmd_low for k in ["friendly", "casual"]):
+        tone = "friendly"
+
     return {
         "action": action,
         "search_query": search_query,
         "recipient_raw": recipient_raw,
         "body_raw": body_raw,
+        "topic": topic,
+        "send_versus_draft": send_versus_draft,
+        "is_dictation": is_dictation,
         "tone": tone,
         "attachment_term": attachment_term,
+        "target": target,
+        "scope": scope,
+        "count_sender": count_sender,
+        "count_date": count_date,
+        "read_target": read_target,
+        "read_sender": read_sender,
+        "read_subject": read_subject,
+        "read_summarize": read_summarize,
+        "read_unread": read_unread,
+        "sender_inquiry": sender_inquiry,
+        "latest_only": latest_only,
+        "list_limit": list_limit,
+        "attachments_only": attachments_only,
+        "important_only": important_only,
         "original_command": cmd
     }
 
@@ -839,7 +1390,7 @@ def _handle_email_dictation_turn(
         tone = pending.get("tone", "professional")
 
         speak(f"Preparing email for {recipient_name}...")
-        subject, body = rewrite_professional(full_dictated, recipient_name, tone=tone)
+        subject, body = rewrite_professional(full_dictated, recipient_name, tone=tone, user_id=user)
 
         # Show review editor
         edited = show_email_editor(
@@ -946,6 +1497,54 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
         return {"success": True, "status": "no_pending", "message": msg}
 
     if pending:
+        if pending.get("status") == STATE_PENDING_BULK_MARK:
+            if any(w in cmd_lower for w in ["cancel", "no", "nope", "stop", "don't", "dont", "abort", "never mind", "nevermind"]):
+                _pending_email_sessions.pop(current_u, None)
+                msg = "Bulk operation cancelled. No emails were modified."
+                speak(msg)
+                return {"success": True, "status": "cancelled", "message": msg}
+
+            clean_c = re.sub(r'[^\w\s]', '', cmd_lower).strip()
+            if (
+                clean_c in ("yes", "yeah", "yep", "sure", "ok", "okay", "confirm", "proceed", "do it", "go ahead", "mark them", "mark all", "yes please", "yes mark them")
+                or any(w in cmd_lower for w in ["confirm", "proceed", "mark all", "mark them", "yes mark"])
+            ):
+                desired_op = pending.get("action", "read")
+                scope_count = pending.get("scope_count", 0)
+                target_sender = pending.get("target_sender")
+                _pending_email_sessions.pop(current_u, None)
+                from .email_reader import bulk_mark_all_inbox_emails
+                modified_count, meta = bulk_mark_all_inbox_emails(
+                    action=desired_op,
+                    email_id=email_id,
+                    email_pass=email_pass,
+                    sender=target_sender
+                )
+                invalidate_cache(email_id)
+                if not meta.get("success") and modified_count == 0:
+                    msg = f"Failed to mark emails as {desired_op}: {meta.get('error', 'Unknown error')}."
+                    speak(msg)
+                    return {"success": False, "status": "error", "message": msg}
+
+                if meta.get("partial"):
+                    msg = f"Marked {modified_count} of {scope_count} emails as {desired_op}. {meta.get('reason', '')}"
+                else:
+                    msg = f"Successfully marked all {modified_count} emails as {desired_op}."
+                speak(msg)
+                return {
+                    "success": True,
+                    "status": "success",
+                    "action": desired_op,
+                    "count": modified_count,
+                    "scope_count": scope_count,
+                    "partial": meta.get("partial", False),
+                    "message": msg
+                }
+
+            msg = f"Please confirm: do you want to mark all {pending.get('scope_count', 0)} emails as {pending.get('action', 'read')}? Say yes to proceed or no to cancel."
+            speak(msg)
+            return {"success": False, "status": "clarification", "needs_clarification": True, "message": msg}
+
         if pending.get("status") == STATE_SENDING_EMAIL:
             return {"success": False, "status": "in_progress", "message": "The email is currently being sent. Please wait for the result before editing or cancelling it."}
 
@@ -999,6 +1598,126 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
                 pass
             return {"success": False, "status": "ambiguous_outcome", "message": msg, "draft": pending, "retry_safe": False}
 
+        # Case WAITING_FOR_RECIPIENT_ADDRESS: Missing recipient email address follow-up turns
+        if pending.get("status") in (STATE_WAITING_FOR_RECIPIENT_ADDRESS, "waiting_for_recipient_address"):
+            # 1. Cancellation (strict word boundary to avoid substring false positives like "not" -> "no")
+            if re.search(r'\b(?:cancel|discard|abort|don\'?t\s+send|stop|never\s*mind|nevermind|no|nope)\b', cmd_lower):
+                _pending_email_sessions.pop(current_u, None)
+                try:
+                    from extensions.dialogue_state_manager import get_dialogue_manager
+                    dm = get_dialogue_manager(current_u)
+                    dm.current_state.active_task = None
+                    dm.current_state.session_context.pop("pending_email_task", None)
+                except Exception:
+                    pass
+                msg = "Pending email cancelled."
+                speak(msg)
+                return {"success": True, "status": "cancelled", "message": msg}
+
+            # 2. Where can I enter his email address?
+            if any(p in cmd_lower for p in [
+                "where can i enter", "where do i enter", "where do i type",
+                "where should i enter", "where to enter", "how can i enter",
+                "how do i enter", "where can i provide", "where to type", "where can i type"
+            ]):
+                msg = "You can type or dictate his email address directly here in the chat."
+                speak(msg)
+                return {
+                    "success": True,
+                    "status": "clarification",
+                    "needs_clarification": True,
+                    "message": msg,
+                    "task": pending
+                }
+
+            # 3. User says "Yes, I have it" / "I have it"
+            c_clean_turn = re.sub(r'[^\w\s]', '', cmd_lower).strip()
+            if c_clean_turn in ("yes i have it", "i have it", "yes", "yeah", "yep", "sure", "i have his email", "i have their email", "i know it", "i got it"):
+                msg = "Please provide or tell me their email address."
+                speak(msg)
+                return {
+                    "success": True,
+                    "status": "clarification",
+                    "needs_clarification": True,
+                    "message": msg,
+                    "task": pending
+                }
+
+            # 4. Check if an email address was provided or attempted
+            ext = extract_provided_email_and_recipient(command)
+            provided_email = ext.get("email") or parsed.get("recipient_email")
+            if not provided_email:
+                m_direct = re.search(r'\b([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\b', command)
+                if m_direct:
+                    provided_email = m_direct.group(1).rstrip('.?!,;:')
+
+            # Check if user attempted to provide an address that failed regex
+            if not provided_email:
+                m_attempt = re.search(r'(?:email(?:\s+address)?|address)\s+(?:is|=)\s+([^\s,]+)', command, re.I)
+                if m_attempt:
+                    cand_addr = m_attempt.group(1).rstrip('.?!,;:')
+                    msg = f"'{cand_addr}' is not a valid email address format. Please provide or type a valid email address."
+                    speak(msg)
+                    return {
+                        "success": False,
+                        "status": "clarification",
+                        "needs_clarification": True,
+                        "message": msg,
+                        "task": pending
+                    }
+
+            if provided_email:
+                if not is_valid_email(provided_email) or is_placeholder_email(provided_email):
+                    msg = f"'{provided_email}' is not a valid email address format. Please provide a valid email address."
+                    speak(msg)
+                    return {
+                        "success": False,
+                        "status": "clarification",
+                        "needs_clarification": True,
+                        "message": msg,
+                        "task": pending
+                    }
+
+                intended_recipient_name = ext.get("recipient_name") or pending.get("recipient_name") or pending.get("recipient_raw") or "recipient"
+                save_contact(intended_recipient_name, provided_email)
+
+                topic = pending.get("topic") or pending.get("body_raw")
+                tone = pending.get("tone", "professional")
+                send_versus_draft = pending.get("send_versus_draft", "send")
+                attachments = pending.get("attachments", [])
+
+                pending["recipient"] = provided_email
+                pending["recipient_email"] = provided_email
+                pending["recipient_name"] = intended_recipient_name
+                pending["workflow_stage"] = "sending"
+                _pending_email_sessions[current_u] = pending
+
+                return _send_or_draft_topic_email(
+                    user=current_u,
+                    recipient_email=provided_email,
+                    recipient_name=intended_recipient_name,
+                    topic=topic,
+                    tone=tone,
+                    send_versus_draft=send_versus_draft,
+                    attachments=attachments,
+                    email_id=email_id,
+                    email_pass=email_pass
+                )
+
+            # If user asks what the email is about or preview
+            if any(k in cmd_lower for k in ["what was the email", "what is the email", "show draft", "what are you going to send", "preview"]):
+                recipient_name = pending.get("recipient_name") or pending.get("recipient_raw") or "recipient"
+                topic = pending.get("topic") or pending.get("body_raw")
+                msg = f"The pending email to {recipient_name} is about: '{topic}'. Please provide their email address so I can send it."
+                speak(msg)
+                return {"success": True, "status": "clarification", "needs_clarification": True, "message": msg, "task": pending}
+
+            # Fallback for unrecognizable input in this state
+            recipient_name = pending.get("recipient_name") or pending.get("recipient_raw") or "recipient"
+            msg = f"I couldn't find an email address for {recipient_name}. Please enter or tell me their email address."
+            speak(msg)
+            return {"success": True, "status": "clarification", "needs_clarification": True, "message": msg, "task": pending}
+
         # Case 0: Recipient clarification / disambiguation
         if pending.get("status") in (STATE_EMAIL_RECIPIENT_RESOLUTION, STATE_UNVERIFIED_RECIPIENT):
             if any(w in cmd_lower for w in ["cancel", "discard", "abort", "don't send", "dont send", "stop", "never mind", "nevermind", "no"]):
@@ -1013,22 +1732,51 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
                 recipient_name = pending.get("recipient_name") or pending.get("recipient_raw") or "recipient"
                 save_contact(recipient_name, verified_addr)
                 session_id = pending.get("session_id", str(uuid.uuid4()))
-                pending["status"] = STATE_RECORDING_EMAIL_MESSAGE
-                pending["recipient"] = verified_addr
-                pending["recipient_name"] = recipient_name
-                pending["message_buffer"] = []
-                pending["last_transcript"] = ""
-                _pending_email_sessions[current_u] = pending
-                msg = f"Got it, saved {verified_addr} for {recipient_name}. Sure, I'm listening. Say your message, then say 'stop message' when you're finished."
-                speak(msg)
-                return {
-                    "success": True,
-                    "status": "recording_email_message",
-                    "session_id": session_id,
-                    "recipient": verified_addr,
-                    "recipient_name": recipient_name,
-                    "message": msg
-                }
+                topic = pending.get("topic") or pending.get("body_raw")
+                if topic and not pending.get("is_dictation"):
+                    return _send_or_draft_topic_email(
+                        user=current_u,
+                        recipient_email=verified_addr,
+                        recipient_name=recipient_name,
+                        topic=topic,
+                        tone=pending.get("tone", "professional"),
+                        send_versus_draft=pending.get("send_versus_draft", "send"),
+                        attachments=pending.get("attachments", []),
+                        email_id=email_id,
+                        email_pass=email_pass
+                    )
+                elif pending.get("is_dictation"):
+                    pending["status"] = STATE_RECORDING_EMAIL_MESSAGE
+                    pending["recipient"] = verified_addr
+                    pending["recipient_name"] = recipient_name
+                    pending["message_buffer"] = []
+                    pending["last_transcript"] = ""
+                    _pending_email_sessions[current_u] = pending
+                    msg = f"Got it, saved {verified_addr} for {recipient_name}. Sure, I'm listening. Say your message, then say 'stop message' when you're finished."
+                    speak(msg)
+                    return {
+                        "success": True,
+                        "status": "recording_email_message",
+                        "session_id": session_id,
+                        "recipient": verified_addr,
+                        "recipient_name": recipient_name,
+                        "message": msg
+                    }
+                else:
+                    pending["status"] = "NEED_PURPOSE"
+                    pending["recipient"] = verified_addr
+                    pending["recipient_name"] = recipient_name
+                    _pending_email_sessions[current_u] = pending
+                    msg = f"Got it, saved {verified_addr} for {recipient_name}. What would you like the email to be about?"
+                    speak(msg)
+                    return {
+                        "success": False,
+                        "status": "clarification",
+                        "needs_clarification": True,
+                        "recipient": verified_addr,
+                        "recipient_name": recipient_name,
+                        "message": msg
+                    }
 
             candidates = pending.get("candidates", [])
             chosen = None
@@ -1059,22 +1807,51 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
                     }
 
                 session_id = pending.get("session_id", str(uuid.uuid4()))
-                pending["status"] = STATE_RECORDING_EMAIL_MESSAGE
-                pending["recipient"] = to_email
-                pending["recipient_name"] = recipient_name
-                pending["message_buffer"] = []
-                pending["last_transcript"] = ""
-                _pending_email_sessions[current_u] = pending
-                msg = f"Got it, sending to {recipient_name}. Sure, I'm listening. Say your message, then say 'stop message' when you're finished."
-                speak(msg)
-                return {
-                    "success": True,
-                    "status": "recording_email_message",
-                    "session_id": session_id,
-                    "recipient": to_email,
-                    "recipient_name": recipient_name,
-                    "message": msg
-                }
+                topic = pending.get("topic") or pending.get("body_raw")
+                if topic and not pending.get("is_dictation"):
+                    return _send_or_draft_topic_email(
+                        user=current_u,
+                        recipient_email=to_email,
+                        recipient_name=recipient_name,
+                        topic=topic,
+                        tone=pending.get("tone", "professional"),
+                        send_versus_draft=pending.get("send_versus_draft", "send"),
+                        attachments=pending.get("attachments", []),
+                        email_id=email_id,
+                        email_pass=email_pass
+                    )
+                elif pending.get("is_dictation"):
+                    pending["status"] = STATE_RECORDING_EMAIL_MESSAGE
+                    pending["recipient"] = to_email
+                    pending["recipient_name"] = recipient_name
+                    pending["message_buffer"] = []
+                    pending["last_transcript"] = ""
+                    _pending_email_sessions[current_u] = pending
+                    msg = f"Got it, sending to {recipient_name}. Sure, I'm listening. Say your message, then say 'stop message' when you're finished."
+                    speak(msg)
+                    return {
+                        "success": True,
+                        "status": "recording_email_message",
+                        "session_id": session_id,
+                        "recipient": to_email,
+                        "recipient_name": recipient_name,
+                        "message": msg
+                    }
+                else:
+                    pending["status"] = "NEED_PURPOSE"
+                    pending["recipient"] = to_email
+                    pending["recipient_name"] = recipient_name
+                    _pending_email_sessions[current_u] = pending
+                    msg = f"Got it, sending to {recipient_name}. What would you like the email to be about?"
+                    speak(msg)
+                    return {
+                        "success": False,
+                        "status": "clarification",
+                        "needs_clarification": True,
+                        "recipient": to_email,
+                        "recipient_name": recipient_name,
+                        "message": msg
+                    }
             else:
                 names = ", ".join(f"{c['name']} ({c['email']})" for c in candidates[:4])
                 msg = f"'{pending.get('recipient_raw')}' matches multiple contacts: {names}. Which one did you mean?"
@@ -1090,7 +1867,77 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
         if pending.get("status") == STATE_RECORDING_EMAIL_MESSAGE:
             return _handle_email_dictation_turn(command, current_u, pending, email_id, email_pass)
 
-        # Case 2: User is in NEED_PURPOSE state (gathering purpose before creating draft)
+        # Case 1b: User is in NEED_RECIPIENT state (gathering recipient when topic was provided first)
+        if pending.get("status") == "NEED_RECIPIENT":
+            if any(w in cmd_lower for w in ["cancel", "discard", "abort", "don't send", "dont send", "stop", "never mind", "nevermind", "no"]):
+                _pending_email_sessions.pop(current_u, None)
+                speak("Pending email cancelled.")
+                return {"success": True, "status": "cancelled", "message": "Pending email cancelled."}
+
+            cand_rec = re.sub(r'^(?:to|for|send\s+to|send\s+it\s+to|addressed\s+to)\s+', '', command.strip(), flags=re.I).strip().rstrip('.?!')
+            rec_result = resolve_recipient_detailed(cand_rec)
+            if rec_result["status"] == "ambiguous":
+                candidates = rec_result.get("candidates", [])
+                names = ", ".join(f"{c['name']} ({c['email']})" for c in candidates[:4])
+                pending["status"] = STATE_EMAIL_RECIPIENT_RESOLUTION
+                pending["recipient_raw"] = cand_rec
+                pending["candidates"] = candidates
+                _pending_email_sessions[current_u] = pending
+                msg = f"'{cand_rec}' matches multiple contacts: {names}. Which one did you mean?"
+                speak(msg)
+                return {"success": False, "status": "clarification", "needs_clarification": True, "recipient_candidates": candidates, "message": msg}
+            elif rec_result["status"] in ("unverified", "missing_email"):
+                pending["status"] = STATE_UNVERIFIED_RECIPIENT
+                pending["recipient_raw"] = cand_rec
+                pending["recipient_name"] = rec_result.get("name") or cand_rec
+                _pending_email_sessions[current_u] = pending
+                msg = f"The contact '{cand_rec}' has an unverified placeholder email address. Please specify a valid email address."
+                speak(msg)
+                return {"success": False, "status": "clarification", "needs_clarification": True, "message": msg}
+            elif rec_result["status"] == "invalid_email":
+                msg = f"'{cand_rec}' is not a valid email address format. Please specify a valid recipient."
+                speak(msg)
+                return {"success": False, "status": "clarification", "needs_clarification": True, "message": msg}
+            elif rec_result["status"] == "not_found":
+                msg = f"I couldn't find a contact named '{cand_rec}'. Please provide their full email address."
+                speak(msg)
+                return {"success": False, "status": "clarification", "needs_clarification": True, "message": msg}
+            else:
+                to_email = rec_result["email"]
+                recipient_name = rec_result.get("name") or cand_rec
+                topic = pending.get("topic") or pending.get("body_raw")
+                if topic and not pending.get("is_dictation"):
+                    return _send_or_draft_topic_email(
+                        user=current_u,
+                        recipient_email=to_email,
+                        recipient_name=recipient_name,
+                        topic=topic,
+                        tone=pending.get("tone", "professional"),
+                        send_versus_draft=pending.get("send_versus_draft", "send"),
+                        attachments=pending.get("attachments", []),
+                        email_id=email_id,
+                        email_pass=email_pass
+                    )
+                elif pending.get("is_dictation"):
+                    pending["status"] = STATE_RECORDING_EMAIL_MESSAGE
+                    pending["recipient"] = to_email
+                    pending["recipient_name"] = recipient_name
+                    pending["message_buffer"] = []
+                    pending["last_transcript"] = ""
+                    _pending_email_sessions[current_u] = pending
+                    msg = f"Got it, sending to {recipient_name}. Sure, I'm listening. Say your message, then say 'stop message' when you're finished."
+                    speak(msg)
+                    return {"success": True, "status": "recording_email_message", "recipient": to_email, "recipient_name": recipient_name, "message": msg}
+                else:
+                    pending["status"] = "NEED_PURPOSE"
+                    pending["recipient"] = to_email
+                    pending["recipient_name"] = recipient_name
+                    _pending_email_sessions[current_u] = pending
+                    msg = f"What would you like the email to {recipient_name} to be about?"
+                    speak(msg)
+                    return {"success": False, "status": "clarification", "needs_clarification": True, "recipient": to_email, "recipient_name": recipient_name, "message": msg}
+
+        # Case 2: User is in NEED_PURPOSE state (gathering purpose/topic before creating email)
         if pending.get("status") == "NEED_PURPOSE":
             if any(w in cmd_lower for w in ["cancel", "discard", "abort", "don't send", "dont send", "stop", "never mind", "nevermind", "no"]):
                 _pending_email_sessions.pop(current_u, None)
@@ -1103,49 +1950,20 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
             to_email = pending.get("recipient")
             attachments = pending.get("attachments", [])
             tone = pending.get("tone", "professional")
+            send_versus_draft = pending.get("send_versus_draft", "send")
 
-            speak(f"Preparing draft for {recipient_name}...")
-            subject, body = rewrite_professional(purpose, recipient_name, tone=tone)
-
-            # Show review editor
-            edited = show_email_editor(
-                subject=subject,
-                body=body,
+            return _send_or_draft_topic_email(
+                user=current_u,
                 recipient_email=to_email,
-                sender_email=email_id,
-                sender_pass=email_pass,
-                attachments=attachments
+                recipient_name=recipient_name,
+                topic=purpose,
+                tone=tone,
+                send_versus_draft=send_versus_draft,
+                attachments=attachments,
+                email_id=email_id,
+                email_pass=email_pass
             )
-            if edited.get("action") == "cancel":
-                _pending_email_sessions.pop(current_u, None)
-                speak("Draft cancelled.")
-                return {"success": True, "status": "cancelled", "message": "Draft cancelled."}
-            if edited.get("sent") or edited.get("action") == "send":
-                _pending_email_sessions.pop(current_u, None)
-                return _dispatch_pending_email(current_u, email_id, email_pass, override_draft=edited)
 
-            final_subject = edited.get("subject", subject)
-            final_body = edited.get("body", body)
-            pending["subject"] = final_subject
-            pending["body"] = final_body
-            pending["status"] = "PENDING_CONFIRMATION"
-            pending["version"] = 1
-            pending["timestamp"] = datetime.datetime.now().isoformat()
-            _pending_email_sessions[current_u] = pending
-
-            # Exactly ONE final confirmation question
-            confirm_msg = f"Would you like me to send this email to {recipient_name} with the subject '{final_subject}'?"
-            speak(confirm_msg)
-            return {
-                "success": True,
-                "status": "pending_confirmation",
-                "recipient": to_email,
-                "recipient_name": recipient_name,
-                "subject": final_subject,
-                "body": final_body,
-                "message": confirm_msg,
-                "draft": pending
-            }
 
         # Case B: Draft is prepared and pending single send confirmation
         if pending.get("recipient"):
@@ -1314,11 +2132,12 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
     if action == "date_last_7_days" or _RE_LAST_7_DAYS.search(cmd_lower):
         return _handle_date_query(email_id, email_pass, current_u, criterion="LAST_7_DAYS", label="the last 7 days")
 
-    if action == "date_yesterday" or _RE_YESTERDAY.search(cmd_lower):
-        return _handle_date_query(email_id, email_pass, current_u, criterion="YESTERDAY", label="yesterday")
+    if action not in ("count_emails", "search_sender", "read_email", "mark_read", "mark_unread"):
+        if action == "date_yesterday" or _RE_YESTERDAY.search(cmd_lower):
+            return _handle_date_query(email_id, email_pass, current_u, criterion="YESTERDAY", label="yesterday")
 
-    if _RE_TODAY.search(cmd_lower) and any(e in cmd_lower for e in ["email", "mail"]):
-        return _handle_today_emails(email_id, email_pass, current_u)
+        if _RE_TODAY.search(cmd_lower) and any(e in cmd_lower for e in ["email", "mail"]):
+            return _handle_today_emails(email_id, email_pass, current_u)
 
     # ── 3. First email / latest email sender (legacy query paths, preserved) ─
     if any(k in cmd_lower for k in ["first mail", "first email", "first message"]) and \
@@ -1329,15 +2148,74 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
                                      "sender of my latest", "sender of my last"]):
         return _handle_latest_sender(email_id, email_pass, current_u)
 
+    # ── 3b. Read specific email (Requirement C) ──────────────────────────────
+    if action == "read_email":
+        return _handle_read_email(
+            email_id=email_id,
+            email_pass=email_pass,
+            user=current_u,
+            target=parsed.get("read_target", "latest"),
+            sender=parsed.get("read_sender"),
+            subject=parsed.get("read_subject"),
+            summarize=parsed.get("read_summarize", False),
+            unread_only=parsed.get("read_unread", False),
+            command=command
+        )
+
+    # ── 3c. Count read / unread / total emails (Requirement B) ───────────────
+    if action == "count_emails":
+        return _handle_count_emails(
+            email_id=email_id,
+            email_pass=email_pass,
+            user=current_u,
+            scope=parsed.get("scope", "unread"),
+            sender=parsed.get("count_sender"),
+            date_scope=parsed.get("count_date")
+        )
+
+    # ── 3d. Search by sender inquiries (Requirement D) ───────────────────────
+    if action == "search_sender":
+        return _handle_search_sender(
+            email_id=email_id,
+            email_pass=email_pass,
+            user=current_u,
+            sender=parsed.get("sender_inquiry") or parsed.get("recipient_raw") or "",
+            query=parsed.get("search_query"),
+            date_scope=parsed.get("date_scope") or parsed.get("count_date"),
+            unread_only=parsed.get("unread_only", False),
+            latest_only=parsed.get("latest_only", False)
+        )
+
+    # ── 3e. Attachments list (Requirement A) ─────────────────────────────────
+    if action == "list_attachments":
+        return _handle_search(email_id, email_pass, current_u, query="attachment")
+
+    # ── 3f. Important emails list (Requirement A) ────────────────────────────
+    if action == "list_important":
+        return _handle_important_emails(email_id, email_pass, current_u)
+
+    # ── 3g. Unread emails list (Requirement A / B) ───────────────────────────
+    if action == "list_unread":
+        return _handle_unread(email_id, email_pass, current_u)
+
+    # ── 3h. Today emails list (Requirement A) ────────────────────────────────
+    if action == "list_today":
+        return _handle_today_emails(email_id, email_pass, current_u)
+
+    # ── 3i. Yesterday emails list (Requirement A) ────────────────────────────
+    if action == "list_yesterday":
+        return _handle_date_query(email_id, email_pass, current_u, criterion="YESTERDAY", label="yesterday")
+
     # ── 4. Inbox / unread check ──────────────────────────────────────────────
     is_inbox_query = (
-        any(k in cmd_lower for k in [
+        action in ("check", "list_emails")
+        or any(k in cmd_lower for k in [
             "inbox", "check my email", "check my mail", "check my mails",
             "check email", "check mail", "check mails", "do i have any",
             "new emails", "new email", "show email", "show emails",
             "list email", "list emails", "show unread", "list unread"
         ])
-        or (any(w in cmd_lower for w in ["check", "show", "list", "get"])
+        or (any(w in cmd_lower for w in ["check", "show", "list", "get", "what"])
             and any(e in cmd_lower for e in ["email", "emails", "mail", "mails", "inbox"]))
     )
     is_send = any(k in cmd_lower for k in ["send", "compose", "forward", "write to", "reply", "draft"])
@@ -1345,9 +2223,9 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
     if is_inbox_query and not is_send:
         if _RE_UNREAD.search(cmd_lower):
             return _handle_unread(email_id, email_pass, current_u)
-        return get_emails_overview(limit=5, user=current_u)
+        return get_emails_overview(limit=parsed.get("list_limit", 5), user=current_u)
 
-    # ── 5. Count unread ──────────────────────────────────────────────────────
+    # ── 5. Count unread (legacy fallback) ───────────────────────────────────
     if action == "count_unread" or (
         _RE_COUNT.search(cmd_lower) and _RE_UNREAD.search(cmd_lower)
     ):
@@ -1379,7 +2257,17 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
         return _handle_forward(command, parsed, email_id, email_pass, current_u)
 
     # ── 12. Message organization (mark read/unread, star, archive, trash) ───
-    if action in ("mark_read", "mark_unread", "star", "unstar", "archive", "trash"):
+    if action in ("mark_read", "mark_unread"):
+        return _handle_mark_read_unread(
+            email_id=email_id,
+            email_pass=email_pass,
+            user=current_u,
+            action=action,
+            target=parsed.get("target", "current"),
+            target_sender=parsed.get("count_sender"),
+            command=command
+        )
+    if action in ("star", "unstar", "archive", "trash"):
         return _handle_organize(email_id, email_pass, current_u, action, command)
 
     # ── 13. Compose / Send with mandatory review-confirm workflow ────────────
@@ -1414,8 +2302,7 @@ def handle_email_command(command: str, user_id: Optional[Any] = None) -> Dict[st
     elif "add" in cmd_lower and "contact" in cmd_lower:
         return _handle_add_contact()
     else:
-        msg = ("I'm not sure what you want to do with email. "
-               "You can say send email, check inbox, summarize mail, reply, or search emails.")
+        msg = "I'm not sure what you'd like to do with email. Could you please clarify your request?"
         speak(msg)
         return {"success": False, "status": "unknown", "message": msg}
 
@@ -1431,6 +2318,461 @@ def _no_creds_error(user: str) -> Dict[str, Any]:
         "message": (f"Email credentials not configured for '{user}'. "
                     "Please set them up in Settings → Email.")
     }
+
+
+def _handle_count_emails(
+    email_id: Optional[str],
+    email_pass: Optional[str],
+    user: str,
+    scope: str = "unread",
+    sender: Optional[str] = None,
+    date_scope: Optional[str] = None
+) -> Dict[str, Any]:
+    """Accurately count total, read, or unread emails using IMAP query operations."""
+    if not email_id or not email_pass:
+        return _no_creds_error(user)
+
+    # Requirement 1: Inherit email-count context across turns when appropriate
+    u = _resolve_user(user)
+    prev_ctx = _last_email_count_context.get(u)
+    if prev_ctx and (time.time() - prev_ctx.get("timestamp", 0) < 300):
+        if not sender and prev_ctx.get("sender"):
+            sender = prev_ctx["sender"]
+        if not date_scope and prev_ctx.get("date"):
+            date_scope = prev_ctx["date"]
+
+    _last_email_count_context[u] = {
+        "scope": scope,
+        "sender": sender,
+        "date": date_scope,
+        "timestamp": time.time()
+    }
+
+    sender_clean = sender.strip() if sender else None
+    if sender_clean:
+        rec_res = resolve_recipient_detailed(sender_clean)
+        if rec_res.get("status") == "resolved" and rec_res.get("email"):
+            sender_query = rec_res["email"]
+        else:
+            sender_query = sender_clean
+    else:
+        sender_query = None
+
+    count, meta = count_inbox_emails(
+        email_id=email_id,
+        email_pass=email_pass,
+        scope=scope,
+        sender=sender_query,
+        date_criterion=date_scope
+    )
+
+    if not meta.get("success"):
+        return {
+            "success": False,
+            "status": "error",
+            "message": f"Could not count emails: {meta.get('error', 'Unknown error')}."
+        }
+
+    scope_str = (scope or "unread").lower()
+    sender_note = f" from {sender_clean}" if sender_clean else ""
+    date_note = f" received {date_scope.lower()}" if date_scope else ""
+
+    if scope_str == "total":
+        msg = f"You have {count:,} total email{'s' if count != 1 else ''} in your inbox{date_note}{sender_note}."
+    elif scope_str == "read":
+        msg = f"You have {count:,} read email{'s' if count != 1 else ''} in your inbox{date_note}{sender_note}."
+    else:
+        if count == 0:
+            msg = f"You have no unread emails{date_note}{sender_note}."
+        else:
+            msg = f"You have {count:,} unread email{'s' if count != 1 else ''}{date_note}{sender_note}."
+
+    speak(msg)
+    return {
+        "success": True,
+        "status": "success",
+        "count": count,
+        "scope": scope,
+        "sender": sender_clean,
+        "date_criterion": date_scope,
+        "message": msg
+    }
+
+
+def _handle_read_email(
+    email_id: Optional[str],
+    email_pass: Optional[str],
+    user: str,
+    target: str = "latest",
+    sender: Optional[str] = None,
+    subject: Optional[str] = None,
+    summarize: bool = False,
+    unread_only: bool = False,
+    command: str = ""
+) -> Dict[str, Any]:
+    """Retrieve and read or summarize a specific email without marking as read unless requested."""
+    if not email_id or not email_pass:
+        return _no_creds_error(user)
+
+    cmd_low = command.lower()
+    target_low = (target or "").lower()
+
+    selected_email: Optional[Dict[str, Any]] = None
+
+    # Check contextual references like "this email", "what does this email say"
+    if target_low in ("this", "current") or "this email" in cmd_low or "what does this email say" in cmd_low:
+        if _last_active_email.get(user):
+            selected_email = _last_active_email[user]
+        elif _last_retrieved_emails.get(user):
+            selected_email = _last_retrieved_emails[user][0]
+
+    # If no contextual target or explicit search params given, fetch from IMAP
+    if not selected_email:
+        criterion = "UNSEEN" if unread_only else "ALL"
+        search_q = None
+        if sender:
+            rec_res = resolve_recipient_detailed(sender)
+            if rec_res.get("status") == "resolved" and rec_res.get("email"):
+                search_q = rec_res["email"]
+            else:
+                search_q = sender
+        elif subject:
+            search_q = subject
+
+        emails, meta = fetch_latest_emails_with_status(
+            limit=10,
+            email_id=email_id,
+            email_pass=email_pass,
+            criterion=criterion,
+            search_query=search_q
+        )
+
+        if not meta.get("success"):
+            return {
+                "success": False,
+                "status": "error",
+                "message": f"Could not retrieve email: {meta.get('error', 'Unknown error')}."
+            }
+
+        if not emails:
+            filter_desc = []
+            if sender: filter_desc.append(f"from '{sender}'")
+            if subject: filter_desc.append(f"with subject '{subject}'")
+            if unread_only: filter_desc.append("unread")
+            desc = " ".join(filter_desc) if filter_desc else "in your inbox"
+            msg = f"No matching emails found {desc}."
+            speak(msg)
+            return {"success": True, "status": "not_found", "emails": [], "message": msg}
+
+        if subject:
+            sub_matches = [e for e in emails if subject.lower() in (e.get("subject") or "").lower()]
+            if sub_matches:
+                if len(sub_matches) > 1 and not (target_low in ("latest", "first") or "latest" in cmd_low):
+                    _last_retrieved_emails[user] = sub_matches
+                    titles = [f"'{e.get('subject')}' from {e.get('sender')}" for e in sub_matches[:3]]
+                    msg = f"Found {len(sub_matches)} emails matching '{subject}': " + "; ".join(titles) + ". Which one would you like to read?"
+                    speak(msg)
+                    return {
+                        "success": True,
+                        "status": "clarification",
+                        "needs_clarification": True,
+                        "emails": sub_matches,
+                        "message": msg
+                    }
+                selected_email = sub_matches[0]
+            else:
+                selected_email = emails[0]
+        elif sender:
+            s_matches = [e for e in emails if sender.lower() in (e.get("sender") or "").lower() or (search_q and search_q.lower() in (e.get("sender") or "").lower())]
+            if s_matches:
+                selected_email = s_matches[0]
+            else:
+                selected_email = emails[0]
+        else:
+            selected_email = emails[0]
+
+    _last_active_email[user] = selected_email
+
+    # Check if user explicitly asked to mark it as read
+    if "mark as read" in cmd_low or "mark it as read" in cmd_low:
+        if selected_email.get("id"):
+            organize_email_message(selected_email["id"], "read", email_id, email_pass)
+            selected_email["is_unread"] = False
+
+    e_subj = selected_email.get("subject", "No subject")
+    e_sender = selected_email.get("sender", "Unknown sender")
+    e_date = selected_email.get("date", "recent")
+    e_body = selected_email.get("body", "")
+
+    if summarize or "summarize" in cmd_low or "summary" in cmd_low:
+        summary_text = generate_summary([selected_email])
+        speak(f"Here is a summary of the email from {e_sender} regarding '{e_subj}': {summary_text}")
+        return {
+            "success": True,
+            "status": "success",
+            "email": selected_email,
+            "summary": summary_text,
+            "message": f"Summary: {summary_text}"
+        }
+
+    body_clean = re.sub(r'\s+', ' ', e_body).strip()
+    if len(body_clean) > 300:
+        body_speech = body_clean[:297] + "..."
+    else:
+        body_speech = body_clean or "The email body is empty."
+
+    speech_out = f"Email from {e_sender} on {e_date}, subject '{e_subj}'. It says: {body_speech}"
+    speak(speech_out)
+
+    return {
+        "success": True,
+        "status": "success",
+        "email": selected_email,
+        "message": speech_out
+    }
+
+
+def _handle_search_sender(
+    email_id: Optional[str],
+    email_pass: Optional[str],
+    user: str,
+    sender: str,
+    query: Optional[str] = None,
+    date_scope: Optional[str] = None,
+    unread_only: bool = False,
+    latest_only: bool = False
+) -> Dict[str, Any]:
+    """Search for emails from a specific sender with optional date, query, or unread filters."""
+    if not email_id or not email_pass:
+        return _no_creds_error(user)
+
+    if not sender.strip():
+        return {
+            "success": False,
+            "status": "error",
+            "message": "Please specify a sender to search for."
+        }
+
+    sender_clean = sender.strip()
+    rec_res = resolve_recipient_detailed(sender_clean)
+    if rec_res.get("status") == "resolved" and rec_res.get("email"):
+        search_term = rec_res["email"]
+        sender_display = rec_res.get("name") or sender_clean
+    else:
+        search_term = sender_clean
+        sender_display = sender_clean
+
+    combined_query = f"{search_term} {query}".strip() if query else search_term
+
+    criterion = "UNSEEN" if unread_only else "ALL"
+    if date_scope and date_scope.upper() in ("TODAY", "YESTERDAY"):
+        criterion = date_scope.upper()
+
+    emails, meta = fetch_latest_emails_with_status(
+        limit=10 if not latest_only else 1,
+        email_id=email_id,
+        email_pass=email_pass,
+        criterion=criterion,
+        search_query=combined_query
+    )
+
+    if not meta.get("success"):
+        return {
+            "success": False,
+            "status": "error",
+            "message": f"Search failed: {meta.get('error', 'Unknown error')}."
+        }
+
+    if not emails:
+        scope_note = " unread" if unread_only else ""
+        date_note = f" {date_scope.lower()}" if date_scope else ""
+        about_note = f" about '{query}'" if query else ""
+        msg = f"I could not find any{scope_note} emails from {sender_display}{about_note}{date_note} in your inbox."
+        speak(msg)
+        return {
+            "success": True,
+            "status": "not_found",
+            "count": 0,
+            "emails": [],
+            "message": msg
+        }
+
+    _last_retrieved_emails[user] = emails
+    _last_active_email[user] = emails[0]
+
+    if latest_only or len(emails) == 1:
+        e = emails[0]
+        read_status = "unread" if e.get("is_unread") else "read"
+        msg = f"The last email from {sender_display} was received on {e.get('date', 'recent')}, subject '{e.get('subject', 'No subject')}' ({read_status})."
+    else:
+        summaries = [f"'{e.get('subject')}' on {e.get('date')}" for e in emails[:3]]
+        msg = f"Found {len(emails)} email(s) from {sender_display}: " + "; ".join(summaries) + "."
+
+    speak(msg)
+    return {
+        "success": True,
+        "status": "success",
+        "count": len(emails),
+        "emails": emails,
+        "message": msg
+    }
+
+
+def _handle_important_emails(
+    email_id: Optional[str],
+    email_pass: Optional[str],
+    user: str
+) -> Dict[str, Any]:
+    """Retrieve emails flagged as important."""
+    if not email_id or not email_pass:
+        return _no_creds_error(user)
+
+    emails, meta = fetch_latest_emails_with_status(
+        limit=10,
+        email_id=email_id,
+        email_pass=email_pass,
+        criterion="FLAGGED"
+    )
+
+    if not meta.get("success"):
+        return {
+            "success": False,
+            "status": "error",
+            "message": f"Could not check important emails: {meta.get('error', 'Unknown error')}."
+        }
+
+    if not emails:
+        msg = "You have no flagged or important emails in your inbox."
+        speak(msg)
+        return {"success": True, "status": "success", "emails": [], "count": 0, "message": msg}
+
+    _last_retrieved_emails[user] = emails
+    _last_active_email[user] = emails[0]
+
+    summaries = [f"From {e.get('sender')}: '{e.get('subject')}'" for e in emails[:5]]
+    msg = f"You have {len(emails)} important email(s): " + "; ".join(summaries) + "."
+    speak(msg)
+    return {
+        "success": True,
+        "status": "success",
+        "emails": emails,
+        "count": len(emails),
+        "message": msg
+    }
+
+
+def _handle_mark_read_unread(
+    email_id: Optional[str],
+    email_pass: Optional[str],
+    user: str,
+    action: str,
+    target: str = "current",
+    target_sender: Optional[str] = None,
+    command: str = ""
+) -> Dict[str, Any]:
+    """Mark single or bulk emails as read or unread on the IMAP server."""
+    if not email_id or not email_pass:
+        return _no_creds_error(user)
+
+    cmd_low = command.lower()
+    target_low = (target or "").lower()
+    desired_op = "read" if action == "mark_read" else "unread"
+
+    uids_to_mark: List[str] = []
+    target_emails: List[Dict[str, Any]] = []
+
+    if target_low in ("all", "these", "all these") or any(k in cmd_low for k in ["all these", "mark all", "all of these", "all emails", "all my emails", "everything as read", "everything as unread"]):
+        # Requirement 2: Bulk read/unread operations must confirm the intended scope before executing!
+        scope_for_count = "unread" if desired_op == "read" else "read"
+        count, meta = count_inbox_emails(
+            email_id=email_id,
+            email_pass=email_pass,
+            scope=scope_for_count,
+            sender=target_sender
+        )
+        if not meta.get("success") and count == 0:
+            msg = f"Could not check emails to mark as {desired_op}: {meta.get('error', 'Unknown error')}."
+            speak(msg)
+            return {"success": False, "status": "error", "message": msg}
+
+        if count == 0:
+            msg = f"You have no {scope_for_count} emails in your inbox to mark as {desired_op}."
+            speak(msg)
+            return {"success": True, "status": "no_emails", "count": 0, "message": msg}
+
+        _pending_email_sessions[user] = {
+            "status": STATE_PENDING_BULK_MARK,
+            "action": desired_op,
+            "scope_count": count,
+            "target_sender": target_sender,
+            "creation_time": datetime.datetime.now().isoformat()
+        }
+        msg = f"You have {count:,} {scope_for_count} email{'s' if count != 1 else ''} in your inbox. Are you sure you want to mark all {count:,} emails as {desired_op}?"
+        speak(msg)
+        return {
+            "success": True,
+            "status": "pending_bulk_confirmation",
+            "needs_confirmation": True,
+            "action": desired_op,
+            "scope_count": count,
+            "message": msg
+        }
+    else:
+        e = None
+        if target_sender:
+            emails, meta = fetch_latest_emails_with_status(limit=1, email_id=email_id, email_pass=email_pass, search_query=target_sender)
+            if emails:
+                e = emails[0]
+        if not e and _last_active_email.get(user):
+            e = _last_active_email[user]
+        if not e:
+            emails, meta = fetch_latest_emails_with_status(limit=1, email_id=email_id, email_pass=email_pass)
+            if emails:
+                e = emails[0]
+
+        if not e or not e.get("id"):
+            msg = f"No email found to mark as {desired_op}."
+            speak(msg)
+            return {"success": False, "status": "error", "message": msg}
+
+        target_emails = [e]
+        uids_to_mark = [e["id"]]
+
+    result = organize_email_message(
+        email_uid=uids_to_mark if len(uids_to_mark) > 1 else uids_to_mark[0],
+        action=desired_op,
+        email_id=email_id,
+        email_pass=email_pass
+    )
+
+    if result.get("success"):
+        new_is_unread = (desired_op == "unread")
+        for em in target_emails:
+            em["is_unread"] = new_is_unread
+        invalidate_cache(email_id)
+
+        n = len(uids_to_mark)
+        if n > 1:
+            msg = f"Successfully marked {n} emails as {desired_op}."
+        else:
+            e = target_emails[0]
+            msg = f"Marked email '{e.get('subject', 'No subject')}' as {desired_op}."
+        speak(msg)
+        return {
+            "success": True,
+            "status": "success",
+            "action": desired_op,
+            "count": n,
+            "message": msg
+        }
+    else:
+        err_msg = result.get("message", f"Failed to mark as {desired_op}.")
+        speak(err_msg)
+        return {
+            "success": False,
+            "status": "error",
+            "message": err_msg
+        }
 
 
 def _handle_first_email(email_id, email_pass, user) -> Dict[str, Any]:
@@ -1470,6 +2812,8 @@ def _handle_today_emails(email_id, email_pass, user) -> Dict[str, Any]:
     if not meta.get("success"):
         return {"success": False, "status": "error", "message": f"Email access failed: {meta.get('error')}."}
     if emails:
+        _last_retrieved_emails[user] = list(emails)
+        _last_active_email[user] = emails[0]
         summaries = [f"From {e.get('sender')}: '{e.get('subject')}'" for e in emails[:5]]
         msg = f"You received {len(emails)} email(s) today. " + "; ".join(summaries) + "."
         return {"success": True, "status": "success", "emails": emails, "message": msg}
@@ -1485,6 +2829,8 @@ def _handle_unread(email_id, email_pass, user) -> Dict[str, Any]:
     if not meta.get("success"):
         return {"success": False, "status": "error", "message": f"Email access failed: {meta.get('error')}."}
     if emails:
+        _last_retrieved_emails[user] = list(emails)
+        _last_active_email[user] = emails[0]
         summaries = [f"From {e.get('sender')}: '{e.get('subject')}'" for e in emails[:5]]
         msg = f"You have {len(emails)} unread email(s). " + "; ".join(summaries) + "."
         return {"success": True, "status": "success", "emails": emails, "count": len(emails), "message": msg}
@@ -1533,6 +2879,8 @@ def _handle_search(email_id, email_pass, user, query: str) -> Dict[str, Any]:
         if meta.get("scan_truncated"):
             scan_note += "; older messages were not scanned"
         if filtered:
+            _last_retrieved_emails[user] = list(filtered)
+            _last_active_email[user] = filtered[0]
             summaries = [f"From {e.get('sender')}: '{e.get('subject')}' ({len(e.get('attachments', []))} attachment(s))" for e in filtered[:5]]
             msg = f"Found {len(filtered)} email(s) with attachments{scan_note}. " + "; ".join(summaries) + "."
             return {"success": True, "status": "success", "emails": filtered, "query": query, "message": msg,
@@ -1548,6 +2896,8 @@ def _handle_search(email_id, email_pass, user, query: str) -> Dict[str, Any]:
     if not meta.get("success"):
         return {"success": False, "status": "error", "message": f"Search failed: {meta.get('error')}."}
     if emails:
+        _last_retrieved_emails[user] = list(emails)
+        _last_active_email[user] = emails[0]
         summaries = [f"From {e.get('sender')}: '{e.get('subject')}'" for e in emails[:5]]
         msg = f"Found {len(emails)} email(s) matching '{clean_q}'. " + "; ".join(summaries) + "."
         return {"success": True, "status": "success", "emails": emails, "query": clean_q, "message": msg}
@@ -1716,13 +3066,86 @@ def _handle_compose_with_review(
                 recipient_raw = candidate
 
     if not recipient_raw:
+        topic = parsed.get("topic") or parsed.get("body_raw")
+        _pending_email_sessions[user] = {
+            "status": "NEED_RECIPIENT",
+            "session_id": str(uuid.uuid4()),
+            "user_id": user,
+            "topic": topic,
+            "body_raw": topic,
+            "send_versus_draft": parsed.get("send_versus_draft", "send"),
+            "is_dictation": parsed.get("is_dictation", False),
+            "attachments": [resolved_attachment] if resolved_attachment else [],
+            "tone": parsed.get("tone", "professional"),
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        msg = "Who should I send this email to? Please specify the recipient."
+        speak(msg)
         return {
             "success": False, "status": "clarification",
             "needs_clarification": True,
-            "message": "Who should I send this email to? Please specify the recipient."
+            "message": msg
         }
 
-    rec_result = resolve_recipient_detailed(recipient_raw)
+    # Requirement 3: Recipient continuity — resolve pronouns from recent conversation context
+    if recipient_raw and recipient_raw.lower().strip() in ("him", "her", "them", "he", "she", "they"):
+        pronoun = recipient_raw.lower().strip()
+        cands = find_recent_recipient_candidates(user, pronoun=pronoun)
+        if len(cands) == 1:
+            # Unambiguous: resolve to established recipient
+            cand = cands[0]
+            recipient_raw = cand["name"]
+            rec_result = {"status": "resolved", "email": cand["email"], "name": cand["name"]}
+        elif len(cands) > 1:
+            # Ambiguous: ask one concise clarification question. Never guess a recipient.
+            names = " or ".join(f"{c['name']} ({c['email']})" for c in cands[:2])
+            tone = parsed.get("tone", "professional")
+            _pending_email_sessions[user] = {
+                "status": STATE_EMAIL_RECIPIENT_RESOLUTION,
+                "session_id": str(uuid.uuid4()),
+                "user_id": user,
+                "recipient_raw": recipient_raw,
+                "candidates": cands,
+                "topic": parsed.get("topic") or parsed.get("body_raw"),
+                "body_raw": parsed.get("body_raw"),
+                "send_versus_draft": parsed.get("send_versus_draft", "send"),
+                "is_dictation": parsed.get("is_dictation", False),
+                "attachments": [resolved_attachment] if resolved_attachment else [],
+                "tone": tone,
+                "timestamp": datetime.datetime.now().isoformat()
+            }
+            msg = f"Did you mean {names}?"
+            speak(msg)
+            return {
+                "success": False, "status": "clarification",
+                "needs_clarification": True,
+                "recipient_candidates": cands,
+                "message": msg
+            }
+        else:
+            # No candidate in recent context: ask one concise clarification question. Never guess.
+            tone = parsed.get("tone", "professional")
+            _pending_email_sessions[user] = {
+                "status": "NEED_RECIPIENT",
+                "session_id": str(uuid.uuid4()),
+                "user_id": user,
+                "topic": parsed.get("topic") or parsed.get("body_raw"),
+                "body_raw": parsed.get("body_raw"),
+                "send_versus_draft": parsed.get("send_versus_draft", "send"),
+                "is_dictation": parsed.get("is_dictation", False),
+                "attachments": [resolved_attachment] if resolved_attachment else [],
+                "tone": tone,
+                "timestamp": datetime.datetime.now().isoformat()
+            }
+            msg = "Who should I send this email to? Please specify the recipient."
+            speak(msg)
+            return {
+                "success": False, "status": "clarification",
+                "needs_clarification": True,
+                "message": msg
+            }
+    else:
+        rec_result = resolve_recipient_detailed(recipient_raw)
 
     if rec_result["status"] == "ambiguous":
         candidates = rec_result.get("candidates", [])
@@ -1734,6 +3157,10 @@ def _handle_compose_with_review(
             "user_id": user,
             "recipient_raw": recipient_raw,
             "candidates": candidates,
+            "topic": parsed.get("topic") or parsed.get("body_raw"),
+            "body_raw": parsed.get("body_raw"),
+            "send_versus_draft": parsed.get("send_versus_draft", "send"),
+            "is_dictation": parsed.get("is_dictation", False),
             "attachments": [resolved_attachment] if resolved_attachment else [],
             "tone": tone,
             "timestamp": datetime.datetime.now().isoformat()
@@ -1747,25 +3174,55 @@ def _handle_compose_with_review(
             "message": msg
         }
 
-    if rec_result["status"] in ("unverified", "missing_email"):
-        cand_email = rec_result.get("email") or ""
+    if rec_result["status"] in ("not_found", "missing_email", "unverified"):
+        recipient_display = rec_result.get("name") or recipient_raw
+        session_id = str(uuid.uuid4())
         tone = parsed.get("tone", "professional")
-        _pending_email_sessions[user] = {
-            "status": STATE_UNVERIFIED_RECIPIENT,
-            "session_id": str(uuid.uuid4()),
-            "user_id": user,
+        topic = parsed.get("topic") or parsed.get("body_raw")
+        body_raw = parsed.get("body_raw") or topic
+
+        pending_task = {
+            "action": "send_email",
+            "status": STATE_WAITING_FOR_RECIPIENT_ADDRESS,
+            "workflow_stage": "waiting_for_recipient_address",
+            "session_id": session_id,
+            "user_id": str(user),
+            "recipient_name": recipient_display,
+            "recipient_email": None,
             "recipient_raw": recipient_raw,
-            "recipient_name": rec_result.get("name") or recipient_raw,
+            "topic": topic,
+            "body_raw": body_raw,
+            "original_intent": "send_email",
+            "subject": None,
+            "body": None,
+            "send_versus_draft": parsed.get("send_versus_draft", "send"),
+            "is_dictation": parsed.get("is_dictation", False),
             "attachments": [resolved_attachment] if resolved_attachment else [],
             "tone": tone,
+            "email_sent": False,
+            "creation_time": datetime.datetime.now().isoformat(),
             "timestamp": datetime.datetime.now().isoformat()
         }
-        msg = f"The contact '{recipient_raw}' has an unverified placeholder email address ({cand_email}). Please specify a valid email address."
+        _pending_email_sessions[user] = pending_task
+
+        try:
+            from extensions.dialogue_state_manager import get_dialogue_manager
+            dm = get_dialogue_manager(user)
+            dm.current_state.active_task = pending_task
+            dm.current_state.session_context["pending_email_task"] = pending_task
+            dm.current_state.entities["pending_email_recipient"] = recipient_display
+        except Exception:
+            pass
+
+        msg = f"I couldn't find an email address for {recipient_display}. Please enter or tell me their email address."
         speak(msg)
         return {
-            "success": False, "status": "clarification",
+            "success": True,
+            "status": "clarification",
             "needs_clarification": True,
-            "message": msg
+            "message": msg,
+            "recipient_name": recipient_display,
+            "task": pending_task
         }
 
     if rec_result["status"] == "invalid_email":
@@ -1777,29 +3234,18 @@ def _handle_compose_with_review(
             "message": msg
         }
 
-    if rec_result["status"] == "not_found":
-        return {
-            "success": False, "status": "error",
-            "message": (f"I couldn't find a contact named '{recipient_raw}'. "
-                        "Please add them to your contacts first or use their email address directly.")
-        }
-
     to_email = rec_result["email"]
     recipient_name = rec_result.get("name") or recipient_raw
+    set_established_recipient(user, to_email, recipient_name)
 
-    # ── Voice Dictation Workflow: Enter RECORDING_EMAIL_MESSAGE ──────────────
-    # Friday asks: "Sure, I'm listening. Say your message, then say 'stop message' when you're finished."
     tone = parsed.get("tone", "professional")
     body_raw = parsed.get("body_raw")
+    topic = parsed.get("topic") or body_raw
+    send_versus_draft = parsed.get("send_versus_draft", "send")
+    is_dictation = parsed.get("is_dictation", False)
 
-    has_stop = False
-    if body_raw:
-        has_stop = bool(re.search(
-            r'\b(?:stop\s+message|stop\s+dictation|end\s+message|finish\s+message|finished\s+message|done\s+message)\b',
-            body_raw, re.I
-        ))
-
-    if not body_raw or not has_stop:
+    # 1. Voice Dictation Workflow: Enter RECORDING_EMAIL_MESSAGE ONLY if explicitly requested
+    if is_dictation:
         initial_buffer = [body_raw.strip()] if (body_raw and body_raw.strip()) else []
         session_id = str(uuid.uuid4())
         _pending_email_sessions[user] = {
@@ -1812,6 +3258,7 @@ def _handle_compose_with_review(
             "last_transcript": initial_buffer[0] if initial_buffer else "",
             "attachments": [resolved_attachment] if resolved_attachment else [],
             "tone": tone,
+            "send_versus_draft": send_versus_draft,
             "timestamp": datetime.datetime.now().isoformat()
         }
         prompt_msg = "Sure, I'm listening. Say your message, then say 'stop message' when you're finished."
@@ -1825,19 +3272,57 @@ def _handle_compose_with_review(
             "message": prompt_msg
         }
 
-    # If body_raw already has 'stop message' in the initial command:
-    # Strip the stop message phrase and continue to restructure immediately!
+    # 2. Incomplete request: recipient provided, but topic is missing
+    if not topic or not topic.strip():
+        session_id = str(uuid.uuid4())
+        _pending_email_sessions[user] = {
+            "status": "NEED_PURPOSE",
+            "session_id": session_id,
+            "user_id": user,
+            "recipient": to_email,
+            "recipient_name": recipient_name,
+            "attachments": [resolved_attachment] if resolved_attachment else [],
+            "tone": tone,
+            "send_versus_draft": send_versus_draft,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        action_word = "draft" if send_versus_draft == "draft" else "email"
+        prompt_msg = f"What would you like the {action_word} to {recipient_name} to be about?"
+        speak(prompt_msg)
+        return {
+            "success": False,
+            "status": "clarification",
+            "needs_clarification": True,
+            "session_id": session_id,
+            "recipient": to_email,
+            "recipient_name": recipient_name,
+            "message": prompt_msg
+        }
+
+    # 3. Topic and recipient provided: generate and send (or draft) automatically!
     dictated_clean = re.sub(
         r'\b(?:stop\s+message|stop\s+dictation|end\s+message|finish\s+message|finished\s+message|done\s+message)\b',
-        '', body_raw, flags=re.I
+        '', topic, flags=re.I
     ).strip()
-    dictated_clean = re.sub(r'^[.,\s]+|[.,\s]+$', '', dictated_clean).strip()
-    body_raw = dictated_clean or body_raw
+    topic = dictated_clean or topic
+
+    return _send_or_draft_topic_email(
+        user=user,
+        recipient_email=to_email,
+        recipient_name=recipient_name,
+        topic=topic,
+        tone=tone,
+        send_versus_draft=send_versus_draft,
+        attachments=[resolved_attachment] if resolved_attachment else [],
+        email_id=email_id,
+        email_pass=email_pass
+    )
+
 
     # ── AI draft generation ──────────────────────────────────────────────────
     tone = parsed.get("tone", "professional")
     speak(f"Preparing a professional email for {recipient_name}...")
-    subject, body = rewrite_professional(body_raw, recipient_name, tone=tone)
+    subject, body = rewrite_professional(body_raw, recipient_name, tone=tone, user_id=user)
     attachments = [resolved_attachment] if resolved_attachment else []
 
     # ── Mandatory review/edit popup ──────────────────────────────────────────
@@ -2440,6 +3925,8 @@ def _handle_date_query(
         return {"success": False, "status": "error", "message": f"Email date search failed: {meta.get('error')}."}
 
     if emails:
+        _last_retrieved_emails[user] = list(emails)
+        _last_active_email[user] = emails[0]
         summaries = [f"From {e.get('sender')}: '{e.get('subject')}' ({e.get('date', '')})" for e in emails[:5]]
         msg = f"Found {len(emails)} email(s) from {label}. " + "; ".join(summaries) + "."
         return {"success": True, "status": "success", "emails": emails, "count": len(emails), "message": msg}
@@ -2728,6 +4215,9 @@ def get_emails_overview(limit: int = 5, user: Optional[str] = None) -> Dict[str,
                 "count": 0,
                 "message": "No new emails found in inbox."
             }
+
+        _last_retrieved_emails[current_u] = list(emails)
+        _last_active_email[current_u] = emails[0]
 
         summaries = [f"From {e.get('sender')}: '{e.get('subject')}'" for e in emails[:3]]
         source_note = " (cached)" if meta.get("source") == "cached_fallback" else ""

@@ -88,20 +88,34 @@ class AssistantCore:
             print(f"[CORE] Environment observer start error: {e}")
 
 
+        # Rehydrate and apply full user configuration across all modules
+        try:
+            from core.configuration_service import get_configuration_service
+            if user_id and user_id != 0:
+                get_configuration_service().apply_user_configuration(int(user_id))
+            else:
+                try:
+                    from core.credential_manager import get_credential_manager
+                    get_credential_manager().clear_cache()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[CORE] Configuration service user context update error: {e}")
+
     def get_user_context(self) -> Dict[str, Any]:
         """Return active user context ensuring isolation."""
         with self._state_lock:
             if self._user_id is None:
                 try:
                     from instance.config import settings
-                    uid = getattr(settings, "CURRENT_USER_ID", None) or settings.get_last_user()
-                    if uid:
+                    uid = getattr(settings, "CURRENT_USER_ID", None)
+                    if uid and int(uid) > 0:
                         from legacy.memory_manager import get_username_by_id, get_assistant_name_db
                         uname = get_username_by_id(uid)
                         if uname:
-                            self._user_id = uid
+                            self._user_id = int(uid)
                             self._username = uname
-                            self._assistant_name = get_assistant_name_db(uid) or "Trevon"
+                            self._assistant_name = getattr(settings, "CURRENT_ASSISTANT_NAME", None) or get_assistant_name_db(uid) or "Trevon"
                 except Exception:
                     pass
             return {
@@ -116,6 +130,14 @@ class AssistantCore:
         if not name:
             return
         with self._state_lock:
+            if self._assistant_name == name:
+                return
+            if self._user_id is None:
+                try:
+                    from instance.config import settings
+                    self._user_id = getattr(settings, "CURRENT_USER_ID", None) or settings.get_last_user()
+                except Exception:
+                    pass
             self._assistant_name = name
             uid = self._user_id
         if uid:
@@ -124,6 +146,11 @@ class AssistantCore:
                 set_assistant_name_db(uid, name)
             except Exception as e:
                 print(f"[CORE] Error saving assistant name: {e}")
+            try:
+                from core.configuration_service import get_configuration_service
+                get_configuration_service().set_preference(uid, "assistant_name", name)
+            except Exception:
+                pass
 
     # ── Real-Time State Management ───────────────────────────────────────────
     def get_state(self) -> str:

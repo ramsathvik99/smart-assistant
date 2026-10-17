@@ -55,7 +55,8 @@ if not CORS_ALLOWED_ORIGINS:
 
 PUBLIC_PATHS = {
     "/api/health", "/health", "/api/admin/metrics", "/api/status", "/api/telemetry", "/api/state",
-    "/api/auth/signup", "/api/auth/login", "/", "/index.html"
+    "/api/auth/signup", "/api/auth/login", "/api/auth/check-username", "/api/credentials/validate",
+    "/", "/index.html"
 }
 
 
@@ -233,6 +234,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/api/user" or path == "/api/users/me":
             uctx = assistant_core.get_user_context()
             self._send_json({"success": True, "user": uctx, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        # ── PER-USER API CREDENTIALS ──────────────────────────────────────────
+        elif path == "/api/credentials":
+            from core.credential_manager import get_credential_manager
+            statuses = get_credential_manager().get_providers_status(uid)
+            self._send_json({"success": True, "credentials": statuses, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
+            return
+
+        elif path == "/api/credentials/setup-status":
+            from core.credential_manager import get_credential_manager
+            done = get_credential_manager().has_completed_api_setup(uid)
+            self._send_json({"success": True, "completed": done, "user_id": uid})
             get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
@@ -554,6 +570,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, status_code)
             return
 
+        elif path == "/api/auth/check-username":
+            username = payload.get("username", "").strip()
+            from core.auth_service import is_username_available
+            avail = is_username_available(username)
+            self._send_json({"available": avail, "username": username}, 200)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200)
+            return
+
+        elif path == "/api/credentials/validate":
+            provider = payload.get("provider", "").strip().lower()
+            candidate_key = payload.get("api_key")
+            from core.credential_manager import get_credential_manager
+            res = get_credential_manager().test_provider_connection(None, provider, candidate_key)
+            status_code = 200 if res.get("success") else 400
+            self._send_json(res, status=status_code)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, status_code)
+            return
+
         elif path == "/api/auth/logout":
             token = payload.get("token")
             auth_header = self.headers.get("Authorization")
@@ -573,6 +607,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
             status_code = 200 if res.get("success") else 400
             self._send_json(res, status=status_code)
             get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, status_code, uid)
+            return
+
+        # ── PER-USER API CREDENTIALS ──────────────────────────────────────────
+        elif path == "/api/credentials":
+            provider = payload.get("provider", "").strip().lower()
+            key_val = payload.get("api_key", "").strip()
+            if not provider:
+                self._send_json({"success": False, "error": "Missing provider name"}, 400)
+                return
+            from core.credential_manager import get_credential_manager
+            ok = get_credential_manager().save_credential(uid, provider, key_val)
+            self._send_json({"success": ok, "provider": provider, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200 if ok else 500, uid)
+            return
+
+        elif path == "/api/credentials/test":
+            provider = payload.get("provider", "").strip().lower()
+            candidate_key = payload.get("api_key")
+            from core.credential_manager import get_credential_manager
+            res = get_credential_manager().test_provider_connection(uid, provider, candidate_key)
+            self._send_json(res, status=200 if res.get("success") else 400)
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200 if res.get("success") else 400, uid)
+            return
+
+        elif path == "/api/credentials/setup-status":
+            completed = bool(payload.get("completed", True))
+            from core.credential_manager import get_credential_manager
+            ok = get_credential_manager().set_completed_api_setup(uid, completed)
+            self._send_json({"success": ok, "completed": completed, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── CHATGPT MEMORY ENDPOINTS ──────────────────────────────────────────
@@ -872,6 +936,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             status_code = 200 if res.get("success") else 400
             self._send_json(res, status=status_code)
             get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, status_code, uid)
+            return
+
+        # ── PER-USER API CREDENTIAL DELETION ──────────────────────────────────
+        elif path == "/api/credentials":
+            prov = q.get("provider", [""])[0].strip().lower()
+            if not prov:
+                self._send_json({"success": False, "error": "Missing provider name parameter"}, 400)
+                return
+            from core.credential_manager import get_credential_manager
+            ok = get_credential_manager().delete_credential(uid, prov)
+            self._send_json({"success": ok, "provider": prov, "user_id": uid})
+            get_admin_metrics().record_request(path, (time.time() - t0) * 1000.0, 200, uid)
             return
 
         # ── CHATGPT MEMORY FACT DELETION ──────────────────────────────────────

@@ -17,6 +17,17 @@ FORBIDDEN_SECRET_PATTERNS = [
     r"ADMIN_SECRET",
     r"ENCRYPTION_KEY",
     r"LLM_API_KEY",
+    r"GROQ_API_KEY\s*=\s*[\"']?[a-zA-Z0-9_\-]+",
+    r"OPENAI_API_KEY\s*=\s*[\"']?[a-zA-Z0-9_\-]+",
+    r"GEMINI_API_KEY\s*=\s*[\"']?[a-zA-Z0-9_\-]+",
+    r"ANTHROPIC_API_KEY\s*=\s*[\"']?[a-zA-Z0-9_\-]+",
+    r"DEEPSEEK_API_KEY\s*=\s*[\"']?[a-zA-Z0-9_\-]+",
+    r"TAVILY_API_KEY\s*=\s*[\"']?[a-zA-Z0-9_\-]+",
+    r"SERPAPI_API_KEY\s*=\s*[\"']?[a-zA-Z0-9_\-]+",
+    r"sk-[a-zA-Z0-9_\-]{16,}",
+    r"gsk_[a-zA-Z0-9_\-]{16,}",
+    r"AIza[a-zA-Z0-9_\-]{16,}",
+    r"tvly-[a-zA-Z0-9_\-]{16,}",
 ]
 
 ALLOWED_CLIENT_ENV_KEYS = {
@@ -38,10 +49,11 @@ def inspect_client_distribution(build_dir: str = "dist") -> bool:
     print("[SECURITY AUDIT] Inspecting client distribution package...")
     violations = []
 
-    # Check that .env files with secrets are never in dist
+    # Check that config, script, and env files with secrets are never in dist
     for root, _, files in os.walk(build_dir):
         for f in files:
-            if f == ".env" or f.startswith(".env"):
+            ext = os.path.splitext(f)[1].lower()
+            if f.startswith(".env") or ext in (".env", ".json", ".py", ".txt", ".ini", ".cfg", ".yaml", ".yml"):
                 fp = os.path.join(root, f)
                 with open(fp, "r", encoding="utf-8", errors="ignore") as file:
                     content = file.read()
@@ -78,6 +90,7 @@ a = Analysis(
     ],
     hiddenimports=[
         'core.api_client',
+        'core.credential_manager',
         'instance.config',
         'modules.ui.pyqt_app',
         'modules.ui.login_window',

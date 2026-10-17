@@ -66,8 +66,8 @@ class AudioController:
 
         # Test whether device can open and transport audio
         from .audio_devices import _usable, _transport_works
-        can_open = _usable(resolved_idx, "output") if resolved_idx is not None else True
-        transport_ok = _transport_works(resolved_idx, "output", ("diag", "output")) if resolved_idx is not None else True
+        can_open = _usable(resolved_idx, "output") if resolved_idx is not None else False
+        transport_ok = _transport_works(resolved_idx, "output", ("diag", "output")) if resolved_idx is not None else False
 
         vol_level = 50
         is_muted = False
@@ -126,14 +126,22 @@ class AudioController:
             "success": True,
             "verified": True,
             "device": active_device,
+            "device_index": resolved_idx,
             "volume": vol_level,
             "muted": False,
             "status": "HEALTHY",
-            "message": f"Audio output diagnosis: Audio playback device '{active_device}' is verified and operational at {vol_level}% volume. If you still cannot hear me, please check your external speaker power, headset switch, or physical volume knob."
+            "message": f"Audio output diagnosis: Audio stream to '{active_device}' (index {resolved_idx}) verified and consuming audio buffers at {vol_level}% volume. If sound is still physically inaudible, please check external speaker power, headset switch, or physical volume knob."
         }
 
     def handle_command(self, user_input: str) -> dict[str, Any]:
         text_low = user_input.lower().strip()
+
+        # End-to-end TTS diagnostic testing
+        if any(k in text_low for k in [
+            "test speech", "test voice", "diagnose speech", "test tts", "diagnose tts", "check speech", "test audio"
+        ]):
+            from extensions.system.tts_backend import run_tts_diagnostic
+            return run_tts_diagnostic()
 
         # Audio Diagnostics / "I can't hear you"
         if any(k in text_low for k in [

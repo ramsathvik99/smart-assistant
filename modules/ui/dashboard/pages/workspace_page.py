@@ -362,31 +362,37 @@ class WorkspacePage(QWidget):
         QMessageBox.critical(self, "Generation failed", err)
 
     def _rebuild_gen_list(self):
-        from ..ds import clear_layout
-        clear_layout(self._gen_list)
-        if not self._generated:
-            self._gen_list.addWidget(self._gen_empty)
-            return
-        for p in self._generated[:15]:
-            w = QFrame(); w.setProperty("class", "CardInner")
-            l = QHBoxLayout(w); l.setContentsMargins(Spacing.MD, 8, Spacing.MD, 8)
-            l.setSpacing(Spacing.MD)
-            ext = os.path.splitext(p)[1].lower().lstrip(".")
-            ic = QLabel(); ic.setPixmap(icon_pixmap(EXT_ICON.get(ext, ICONS.FILE),
-                                                   self._ext_color(ext), 16))
-            l.addWidget(ic)
-            col = QVBoxLayout(); col.setSpacing(0)
-            nm = QLabel(os.path.basename(p)); nm.setStyleSheet("font-weight: 500;")
-            loc = QLabel(os.path.dirname(p)); loc.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px;")
-            col.addWidget(nm); col.addWidget(loc)
-            l.addLayout(col, 1)
-            opn = QPushButton(); opn.setObjectName("IconBtn")
-            opn.setIcon(icon(ICONS.EYE, C.TEXT_MED, 13))
-            opn.setFixedSize(30, 30); opn.setToolTip("Open")
-            opn.clicked.connect(lambda _=False, x=p: self._open_path(x))
-            l.addWidget(opn)
-            self._gen_list.addWidget(w)
-        self._gen_list.addStretch(1)
+        try:
+            from ..ds import clear_layout
+            clear_layout(self._gen_list)
+            if not self._generated:
+                empty = EmptyState(ICONS.FILE_PDF, "No generated documents yet",
+                                   "Use the form on the left to generate PDFs, DOCX, XLSX or PPTX files.",
+                                   accent=C.SEC_WORKSPACE, compact=True)
+                self._gen_list.addWidget(empty)
+                return
+            for p in self._generated[:15]:
+                w = QFrame(); w.setProperty("class", "CardInner")
+                l = QHBoxLayout(w); l.setContentsMargins(Spacing.MD, 8, Spacing.MD, 8)
+                l.setSpacing(Spacing.MD)
+                ext = os.path.splitext(p)[1].lower().lstrip(".")
+                ic = QLabel(); ic.setPixmap(icon_pixmap(EXT_ICON.get(ext, ICONS.FILE),
+                                                       self._ext_color(ext), 16))
+                l.addWidget(ic)
+                col = QVBoxLayout(); col.setSpacing(0)
+                nm = QLabel(os.path.basename(p)); nm.setStyleSheet("font-weight: 500;")
+                loc = QLabel(os.path.dirname(p)); loc.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px;")
+                col.addWidget(nm); col.addWidget(loc)
+                l.addLayout(col, 1)
+                opn = QPushButton(); opn.setObjectName("IconBtn")
+                opn.setIcon(icon(ICONS.EYE, C.TEXT_MED, 13))
+                opn.setFixedSize(30, 30); opn.setToolTip("Open")
+                opn.clicked.connect(lambda _=False, x=p: self._open_path(x))
+                l.addWidget(opn)
+                self._gen_list.addWidget(w)
+            self._gen_list.addStretch(1)
+        except Exception as e:
+            print(f"[WORKSPACE_PAGE] Error rebuilding gen list: {e}")
 
     def on_visible(self):
         self._reload_files()

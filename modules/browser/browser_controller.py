@@ -280,6 +280,21 @@ def search_web(query: str, search_engine: str = "google", open_browser: bool = T
     a structured search result set.
     """
     try:
+        from core.configuration_service import get_configuration_service
+        web_access = get_configuration_service().get_preference(None, "web_access", True)
+        if str(web_access).lower() in ("false", "0", "disabled", "no"):
+            return {
+                "success": False,
+                "status": "disabled",
+                "action": "SEARCH",
+                "entity_type": "SEARCH_QUERY",
+                "query": query,
+                "message": "Web search is disabled in your assistant settings."
+            }
+    except Exception:
+        pass
+
+    try:
         encoded = urllib.parse.quote(query)
         engine = search_engine.lower().strip()
         if "bing" in engine:

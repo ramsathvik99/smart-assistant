@@ -50,6 +50,13 @@ from PyQt6.QtWidgets import (
 
 from modules.ui.design_system import C, F, Radius
 from modules.ui.dashboard.ds import icon as ds_icon, ICONS
+from core.credential_manager import (
+    get_credential_manager,
+    validate_assistant_name,
+    mask_credential,
+    sanitize_log_message,
+)
+from legacy.tts import enumerate_voices, stop_speaking, apply_voice_profile
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1313,14 +1320,71 @@ class SignInView(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VIEW: SIGN UP / REGISTRATION (MATCHING REFERENCE AESTHETIC)
+# IN-MEMORY TEMPORARY SIGNUP SESSION (STAGING BEFORE COMMITTING ACCOUNT)
+# ─────────────────────────────────────────────────────────────────────────────
+class TemporarySignupSession:
+    """
+    In-memory temporary staged signup session.
+    Keeps username, email, password, staged validated credentials, assistant name, and voice profile.
+    NEVER creates any DB account records or active credentials until Step 9 (final commit).
+    Guarantees clean state if setup is closed or abandoned without leaving orphaned records.
+    """
+    def __init__(self):
+        self.username: str = ""
+        self.email: str = ""
+        self.password: str = ""
+        self.staged_credentials: dict[str, str] = {}  # provider_id -> raw key string
+        self.primary_provider: str = ""
+        self.assistant_name: str = "Friday"
+        self.voice_profile: dict = {
+            "voice_id": "",
+            "voice_name": "System Default Voice",
+            "voice_gender": "female",
+            "voice_tone": "professional",
+            "voice_rate": 135,
+            "voice_volume": 1.0,
+            "language": "English (United States)",
+            "provider": "sapi5",
+        }
+
+    def has_valid_ai_credential(self) -> bool:
+        ai_providers = {"groq", "openai", "gemini", "ollama", "deepseek", "anthropic", "huggingface"}
+        return any(p in ai_providers and bool(self.staged_credentials.get(p)) for p in self.staged_credentials)
+
+    def get_configured_ai_providers(self) -> list[str]:
+        ai_providers = ["groq", "openai", "gemini", "ollama", "deepseek", "anthropic", "huggingface"]
+        return [p for p in ai_providers if p in self.staged_credentials]
+
+    def clear(self):
+        self.username = ""
+        self.email = ""
+        self.password = ""
+        self.staged_credentials.clear()
+        self.primary_provider = ""
+        self.assistant_name = "Friday"
+        self.voice_profile = {
+            "voice_id": "",
+            "voice_name": "System Default Voice",
+            "voice_gender": "female",
+            "voice_tone": "professional",
+            "voice_rate": 135,
+            "voice_volume": 1.0,
+            "language": "English (United States)",
+            "provider": "sapi5",
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VIEW: SIGN UP / REGISTRATION (STEP 2: ACCOUNT CREDENTIALS SETUP)
 # ─────────────────────────────────────────────────────────────────────────────
 class SignUpView(QWidget):
-    submit_requested = pyqtSignal(str, str, str)  # (username, password, confirm)
+    account_info_submitted = pyqtSignal(str, str, str)  # (username, email, password)
     switch_to_login = pyqtSignal()
+    _username_check_done = pyqtSignal(bool, str, str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._username_check_done.connect(self._on_username_check_completed)
         self._build_ui()
 
     def _build_ui(self):
@@ -1341,7 +1405,7 @@ class SignUpView(QWidget):
         lay.addWidget(sub)
 
         # Username / Display Name Input
-        self._username = IconInputField("Display Name or Username", ICONS.USER, is_password=False)
+        self._username = IconInputField("Username", ICONS.USER, is_password=False)
         lay.addWidget(self._username)
 
         # Email Input
@@ -1399,8 +1463,8 @@ class SignUpView(QWidget):
         """)
         lay.addWidget(self._terms)
 
-        # Primary Button: Create Account → (Cyan-to-Purple Gradient Pill)
-        self._btn_submit = QPushButton("Create Account   →")
+        # Primary Button: Continue to Mandatory AI Key Setup →
+        self._btn_submit = QPushButton("Continue to AI Setup   →")
         self._btn_submit.setFixedHeight(46)
         self._btn_submit.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_submit.setStyleSheet("""
@@ -1460,6 +1524,7 @@ class SignUpView(QWidget):
 
     def _on_submit(self):
         u = self._username.text().strip()
+        em = self._email.text().strip()
         p = self._password.text().strip()
         cp = self._confirm.text().strip()
         if not u:
@@ -1471,8 +1536,8 @@ class SignUpView(QWidget):
         if not p:
             self.show_error("Please enter a password.")
             return
-        if len(p) < 3:
-            self.show_error("Password must be at least 3 characters.")
+        if len(p) < 4:
+            self.show_error("Password must be at least 4 characters.")
             return
         if p != cp:
             self.show_error("Passwords do not match. Please re-enter.")
@@ -1480,8 +1545,33 @@ class SignUpView(QWidget):
         if not self._terms.isChecked():
             self.show_error("Please accept the Terms of Service to continue.")
             return
+
         self.clear_error()
-        self.submit_requested.emit(u, p, cp)
+        self.set_loading(True)
+
+        def _check_async():
+            avail = True
+            try:
+                if getattr(sys, "frozen", False):
+                    from core.api_client import get_api_client
+                    res = get_api_client().check_username(u)
+                    avail = bool(res.get("available", True))
+                else:
+                    from core.auth_service import is_username_available
+                    avail = is_username_available(u)
+            except Exception:
+                avail = True
+
+            self._username_check_done.emit(avail, u, em, p)
+
+        threading.Thread(target=_check_async, daemon=True).start()
+
+    def _on_username_check_completed(self, avail: bool, u: str, em: str, p: str):
+        self.set_loading(False)
+        if not avail:
+            self.show_error("That username is already taken. Please choose another or Sign In.")
+        else:
+            self.account_info_submitted.emit(u, em, p)
 
     def show_error(self, msg: str):
         self._err.setText(msg)
@@ -1499,24 +1589,467 @@ class SignUpView(QWidget):
 
     def set_loading(self, loading: bool):
         self._btn_submit.setEnabled(not loading)
-        self._btn_submit.setText("Creating Account..." if loading else "Create Account   →")
+        self._btn_submit.setText("Verifying..." if loading else "Continue to AI Setup   →")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VIEW: ONBOARDING STEP 1 — NAME YOUR ASSISTANT
+# VIEW: ONBOARDING STEP 1 OF 4 — MANDATORY AI PROVIDER & MULTI-API KEYS
 # ─────────────────────────────────────────────────────────────────────────────
-class SetupNameView(QWidget):
-    name_submitted = pyqtSignal(str)
+class SetupAPIKeysView(QWidget):
+    keys_confirmed = pyqtSignal()
+    back_requested = pyqtSignal()
+    setup_finished = pyqtSignal()
+    _key_test_done = pyqtSignal(dict, str, str)
+    _creds_status_done = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._session: TemporarySignupSession | None = None
+        self._user_id: int | None = None
+        self._username: str | None = None
+        self._key_test_done.connect(self._on_key_test_completed)
+        self._creds_status_done.connect(self._on_creds_status_completed)
         self._build_ui()
+
+    def init_signup_session(self, session: TemporarySignupSession):
+        self._session = session
+        self._user_id = None
+        self._username = session.username
+        self._key_input.clear()
+        self._msg_lbl.setText("")
+        self._refresh_configured_badges()
+        self._update_primary_dropdown()
+
+    def set_user(self, user_id: int, username: str):
+        self._user_id = user_id
+        self._username = username
+        self._session = None
+        self._load_status_existing_user()
 
     def _build_ui(self):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(12)
-        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.setSpacing(8)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # Step Indicator
+        step_lbl = QLabel("MANDATORY SETUP // STEP 1 OF 4")
+        step_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        step_lbl.setStyleSheet("color: #00D4FF; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; background: transparent;")
+        lay.addWidget(step_lbl)
+
+        title = QLabel("AI Provider & Credentials")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color: #FFFFFF; font-size: 20px; font-weight: 700; font-family: 'Segoe UI'; background: transparent;")
+        lay.addWidget(title)
+
+        sub = QLabel("At least one valid AI provider is required before account creation.\nYour credentials are encrypted locally with Windows DPAPI.")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub.setStyleSheet("color: #8FA0B5; font-size: 11px; font-family: 'Segoe UI'; background: transparent; line-height: 1.3;")
+        lay.addWidget(sub)
+
+        # Provider Selector
+        self._prov_combo = QComboBox()
+        self._prov_combo.setFixedHeight(36)
+        self._prov_combo.setStyleSheet("""
+            QComboBox {
+                background: rgba(12, 20, 36, 0.85);
+                color: #ffffff;
+                border: 1px solid rgba(0, 212, 255, 0.35);
+                border-radius: 8px;
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background: #0B1626;
+                color: #FFFFFF;
+                selection-background-color: #00D4FF;
+                selection-color: #000000;
+            }
+        """)
+
+        self._providers = [
+            ("groq", "Groq Cloud (Fast LLM - Free tier)", "Ultra-fast conversational AI"),
+            ("openai", "OpenAI (GPT-4o, GPT-3.5)", "Advanced reasoning and chat completion"),
+            ("gemini", "Google Gemini (Flash, Pro)", "Multimodal & general intelligence"),
+            ("ollama", "Ollama (Local Offline LLM)", "Local inference daemon (no cloud key needed)"),
+            ("deepseek", "DeepSeek", "Specialized coding and chat models"),
+            ("anthropic", "Anthropic Claude", "Claude 3 models for reasoning"),
+            ("huggingface", "HuggingFace", "Inference API router"),
+            ("serpapi", "SerpAPI (Google Search)", "Real-time Google search results"),
+            ("tavily", "Tavily Search", "Web search tailored for AI agents"),
+            ("email", "Email Integration (App Password)", "Access and send personal emails"),
+            ("openweather", "OpenWeatherMap", "Live weather forecasts and temperatures"),
+            ("tmdb", "TMDB Movies & Series", "Movie recommendations and ratings"),
+            ("calendarific", "Calendarific Holidays", "Public holiday calendars"),
+        ]
+        for pid, name, desc in self._providers:
+            self._prov_combo.addItem(name, pid)
+        self._prov_combo.currentIndexChanged.connect(self._on_provider_changed)
+        lay.addWidget(self._prov_combo)
+
+        # Feature description
+        self._desc_lbl = QLabel(self._providers[0][2])
+        self._desc_lbl.setStyleSheet("color: #00D4FF; font-size: 11px; font-weight: 500; background: transparent;")
+        self._desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._desc_lbl)
+
+        # Key Input with eye reveal
+        input_row = QHBoxLayout()
+        input_row.setSpacing(6)
+
+        self._key_input = QLineEdit()
+        self._key_input.setFixedHeight(36)
+        self._key_input.setPlaceholderText("Enter API key or credential...")
+        self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._key_input.setStyleSheet("""
+            QLineEdit {
+                background: rgba(12, 20, 36, 0.85);
+                color: #ffffff;
+                border: 1px solid rgba(40, 72, 115, 0.65);
+                border-radius: 8px;
+                padding: 4px 10px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border-color: #00D4FF;
+            }
+        """)
+        input_row.addWidget(self._key_input, 1)
+
+        self._eye_btn = QPushButton("👁")
+        self._eye_btn.setFixedSize(36, 36)
+        self._eye_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._eye_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(12, 20, 36, 0.85);
+                color: #8FA0B5;
+                border: 1px solid rgba(40, 72, 115, 0.65);
+                border-radius: 8px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                color: #00D4FF;
+                border-color: #00D4FF;
+            }
+        """)
+        self._eye_btn.clicked.connect(self._toggle_echo)
+        input_row.addWidget(self._eye_btn)
+        lay.addLayout(input_row)
+
+        # Action: Validate & Add Provider Button
+        self._add_btn = QPushButton("Validate & Save Provider")
+        self._add_btn.setFixedHeight(34)
+        self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._add_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(0, 212, 255, 0.15);
+                color: #00D4FF;
+                border: 1px solid rgba(0, 212, 255, 0.50);
+                border-radius: 8px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: rgba(0, 212, 255, 0.28);
+            }
+            QPushButton:disabled {
+                background: rgba(40, 60, 90, 0.3);
+                color: #64748B;
+                border-color: #334155;
+            }
+        """)
+        self._add_btn.clicked.connect(self._on_validate_and_add)
+        lay.addWidget(self._add_btn)
+
+        # Feedback / Message Label
+        self._msg_lbl = QLabel("")
+        self._msg_lbl.setStyleSheet("color: #FFFFFF; font-size: 11px; background: transparent;")
+        self._msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._msg_lbl.setWordWrap(True)
+        lay.addWidget(self._msg_lbl)
+
+        # Configured Providers Badge Container
+        self._badges_box = QFrame()
+        self._badges_box.setStyleSheet("background: rgba(10, 18, 32, 0.6); border: 1px dashed rgba(40, 72, 115, 0.5); border-radius: 8px; padding: 4px;")
+        self._badges_lay = QVBoxLayout(self._badges_box)
+        self._badges_lay.setContentsMargins(6, 4, 6, 4)
+        self._badges_lay.setSpacing(4)
+        self._badges_title = QLabel("Configured Providers: (None yet - 1 required)")
+        self._badges_title.setStyleSheet("color: #FFA500; font-size: 11px; font-weight: 600; background: transparent;")
+        self._badges_lay.addWidget(self._badges_title)
+        lay.addWidget(self._badges_box)
+
+        # Primary Provider Selector (if multiple configured)
+        prim_row = QHBoxLayout()
+        prim_lbl = QLabel("Primary AI Provider:")
+        prim_lbl.setStyleSheet("color: #8FA0B5; font-size: 11px; font-weight: 600; background: transparent;")
+        prim_row.addWidget(prim_lbl)
+        self._primary_combo = QComboBox()
+        self._primary_combo.setFixedHeight(30)
+        self._primary_combo.setStyleSheet("""
+            QComboBox {
+                background: rgba(12, 20, 36, 0.85);
+                color: #00D4FF;
+                border: 1px solid rgba(0, 212, 255, 0.35);
+                border-radius: 6px;
+                padding: 2px 8px;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QComboBox QAbstractItemView {
+                background: #0B1626;
+                color: #FFFFFF;
+                selection-background-color: #00D4FF;
+                selection-color: #000000;
+            }
+        """)
+        self._primary_combo.currentIndexChanged.connect(self._on_primary_changed)
+        prim_row.addWidget(self._primary_combo, 1)
+        lay.addLayout(prim_row)
+
+        lay.addSpacing(4)
+
+        # Continue Button: Continue to Step 2
+        self._continue_btn = QPushButton("Continue to Assistant Personalization   →")
+        self._continue_btn.setFixedHeight(42)
+        self._continue_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._continue_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00D4FF, stop:1 #9B51E0);
+                color: #FFFFFF;
+                border: 1px solid rgba(255, 255, 255, 0.25);
+                border-radius: 21px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #1AE0FF, stop:1 #A855F7);
+            }
+        """)
+        self._continue_btn.clicked.connect(self._on_continue)
+        lay.addWidget(self._continue_btn)
+
+        # Back Button: Back to Account Credentials
+        self._back_btn = QPushButton("← Back to Account Credentials")
+        self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._back_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #8FA0B5;
+                border: none;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                color: #00D4FF;
+                text-decoration: underline;
+            }
+        """)
+        self._back_btn.clicked.connect(self.back_requested.emit)
+        lay.addWidget(self._back_btn)
+
+    def _toggle_echo(self):
+        if self._key_input.echoMode() == QLineEdit.EchoMode.Password:
+            self._key_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self._eye_btn.setText("🔒")
+        else:
+            self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self._eye_btn.setText("👁")
+
+    def _on_provider_changed(self, idx: int):
+        if 0 <= idx < len(self._providers):
+            pid, name, desc = self._providers[idx]
+            self._desc_lbl.setText(desc)
+            self._key_input.clear()
+            self._msg_lbl.setText("")
+            if pid == "ollama":
+                self._key_input.setPlaceholderText("http://localhost:11434 (or leave blank for default)")
+            else:
+                self._key_input.setPlaceholderText("Enter API key or credential...")
+
+    def _on_validate_and_add(self):
+        pid = self._prov_combo.currentData()
+        val = self._key_input.text().strip()
+
+        # Reject empty keys for non-ollama providers immediately
+        if not val and pid != "ollama":
+            self._msg_lbl.setText("✖ API key cannot be empty or whitespace.")
+            self._msg_lbl.setStyleSheet("color: #EF4444; font-size: 11px; font-weight: 600;")
+            return
+
+        self._add_btn.setEnabled(False)
+        self._msg_lbl.setText("Validating authentication probe...")
+        self._msg_lbl.setStyleSheet("color: #00D4FF; font-size: 11px;")
+
+        def _worker():
+            try:
+                from core.credential_manager import get_credential_manager
+                mgr = get_credential_manager()
+                res = mgr.test_provider_connection(self._user_id, pid, candidate_key=val or None)
+            except Exception as e:
+                res = {"success": False, "status": "error", "message": sanitize_log_message(str(e))}
+            self._key_test_done.emit(res, pid, val)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_key_test_completed(self, res: dict, pid: str, val: str):
+        self._add_btn.setEnabled(True)
+        if res.get("success"):
+            self._msg_lbl.setText(f"✔ {res.get('message', 'Credential verified!')}")
+            self._msg_lbl.setStyleSheet("color: #4ADE80; font-size: 11px; font-weight: 600;")
+
+            # Stage in session or save for existing user
+            if self._session is not None:
+                self._session.staged_credentials[pid] = val or "http://localhost:11434"
+                if not self._session.primary_provider and pid in ("groq", "openai", "gemini", "ollama", "deepseek", "anthropic", "huggingface"):
+                    self._session.primary_provider = pid
+                self._refresh_configured_badges()
+                self._update_primary_dropdown()
+            elif self._user_id is not None:
+                try:
+                    from core.credential_manager import get_credential_manager
+                    get_credential_manager().save_credential(self._user_id, pid, val or "http://localhost:11434")
+                    self._load_status_existing_user()
+                except Exception:
+                    pass
+            self._key_input.clear()
+        else:
+            self._msg_lbl.setText(f"✖ {res.get('message', 'Validation failed.')}")
+            self._msg_lbl.setStyleSheet("color: #EF4444; font-size: 11px; font-weight: 600;")
+
+    def _refresh_configured_badges(self):
+        if not self._session:
+            return
+        staged = self._session.staged_credentials
+        ai_staged = self._session.get_configured_ai_providers()
+
+        # Clear existing dynamic items except title
+        while self._badges_lay.count() > 1:
+            item = self._badges_lay.takeAt(1)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if ai_staged:
+            self._badges_title.setText(f"Configured Providers: ({len(staged)} active, {len(ai_staged)} AI engine)")
+            self._badges_title.setStyleSheet("color: #4ADE80; font-size: 11px; font-weight: 600; background: transparent;")
+        else:
+            self._badges_title.setText("Configured Providers: (None yet - At least 1 AI provider required)")
+            self._badges_title.setStyleSheet("color: #FFA500; font-size: 11px; font-weight: 600; background: transparent;")
+
+        for p, key_val in staged.items():
+            row = QHBoxLayout()
+            masked = "local daemon" if p == "ollama" else mask_credential(key_val)
+            lbl = QLabel(f"✔ <b>{p.upper()}</b> <span style='color:#8FA0B5;'>({masked})</span>")
+            lbl.setStyleSheet("color: #FFFFFF; font-size: 11px;")
+            row.addWidget(lbl, 1)
+
+            del_btn = QPushButton("✕")
+            del_btn.setFixedSize(20, 20)
+            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            del_btn.setStyleSheet("color: #EF4444; background: transparent; border: none; font-size: 12px; font-weight: 700;")
+            del_btn.clicked.connect(lambda _, prov=p: self._remove_staged_provider(prov))
+            row.addWidget(del_btn)
+            self._badges_lay.addLayout(row)
+
+    def _remove_staged_provider(self, prov: str):
+        if self._session and prov in self._session.staged_credentials:
+            del self._session.staged_credentials[prov]
+            if self._session.primary_provider == prov:
+                configured_ai = self._session.get_configured_ai_providers()
+                self._session.primary_provider = configured_ai[0] if configured_ai else ""
+            self._refresh_configured_badges()
+            self._update_primary_dropdown()
+
+    def _update_primary_dropdown(self):
+        self._primary_combo.blockSignals(True)
+        self._primary_combo.clear()
+        if self._session:
+            configured_ai = self._session.get_configured_ai_providers()
+            for p in configured_ai:
+                self._primary_combo.addItem(p.upper(), p)
+            if self._session.primary_provider:
+                idx = self._primary_combo.findData(self._session.primary_provider)
+                if idx >= 0:
+                    self._primary_combo.setCurrentIndex(idx)
+        self._primary_combo.blockSignals(False)
+
+    def _on_primary_changed(self, idx: int):
+        val = self._primary_combo.itemData(idx)
+        if val and self._session:
+            self._session.primary_provider = val
+
+    def _on_continue(self):
+        if self._session:
+            if not self._session.has_valid_ai_credential():
+                self._msg_lbl.setText("✖ At least one valid AI provider (e.g. Groq, OpenAI, Gemini, Ollama) must be verified before continuing.")
+                self._msg_lbl.setStyleSheet("color: #EF4444; font-size: 11px; font-weight: 600;")
+                return
+            self.keys_confirmed.emit()
+        else:
+            self.setup_finished.emit()
+
+    def _load_status_existing_user(self):
+        def _worker():
+            try:
+                from modules.ui.dashboard.service_adapters import load_api_credentials_status
+                res = load_api_credentials_status(self._user_id)
+            except Exception:
+                res = []
+            self._creds_status_done.emit(res or [])
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_creds_status_completed(self, res: list):
+        while self._badges_lay.count() > 1:
+            item = self._badges_lay.takeAt(1)
+            if item.widget():
+                item.widget().deleteLater()
+        configured = [c for c in (res or []) if c.get("configured")]
+        if configured:
+            self._badges_title.setText(f"Configured Credentials ({len(configured)} active):")
+            self._badges_title.setStyleSheet("color: #4ADE80; font-size: 11px; font-weight: 600;")
+            for c in configured:
+                lbl = QLabel(f"✔ <b>{c.get('provider', '').upper()}</b>: {c.get('masked_hint', '')}")
+                lbl.setStyleSheet("color: #FFFFFF; font-size: 11px;")
+                self._badges_lay.addWidget(lbl)
+        else:
+            self._badges_title.setText("Configured Providers: (None)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VIEW: ONBOARDING STEP 2 OF 4 — NAME YOUR ASSISTANT
+# ─────────────────────────────────────────────────────────────────────────────
+class SetupNameView(QWidget):
+    name_submitted = pyqtSignal(str)
+    back_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._session: TemporarySignupSession | None = None
+        self._build_ui()
+
+    def init_session(self, session: TemporarySignupSession):
+        self._session = session
+        cur_name = session.assistant_name or "Friday"
+        self._input.setText(cur_name)
+        self._update_preview(cur_name)
+        self._err.hide()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # Step indicator
+        step_lbl = QLabel("PERSONALIZATION // STEP 2 OF 4")
+        step_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        step_lbl.setStyleSheet("color: #00D4FF; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; background: transparent;")
+        lay.addWidget(step_lbl)
 
         title = QLabel("Name Your Assistant")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1528,14 +2061,49 @@ class SetupNameView(QWidget):
         sub.setStyleSheet("color: #8FA0B5; font-size: 12px; font-family: 'Segoe UI'; background: transparent;")
         lay.addWidget(sub)
 
-        lay.addSpacing(6)
+        lay.addSpacing(4)
 
         self._input = IconInputField("Assistant name (e.g. Friday, Jarvis, Trevon)", ICONS.ASSISTANT, is_password=False)
         self._input.setText("Friday")
+        self._input.textChanged.connect(self._update_preview)
         self._input.returnPressed.connect(self._on_submit)
         lay.addWidget(self._input)
 
-        btn = QPushButton("Continue   →")
+        # Live UI Preview Card
+        self._preview_card = QFrame()
+        self._preview_card.setStyleSheet("""
+            QFrame {
+                background: rgba(10, 18, 32, 0.75);
+                border: 1px solid rgba(0, 212, 255, 0.35);
+                border-radius: 12px;
+                padding: 10px;
+            }
+        """)
+        prev_lay = QVBoxLayout(self._preview_card)
+        prev_lay.setContentsMargins(10, 10, 10, 10)
+        prev_lay.setSpacing(6)
+
+        prev_header = QLabel("AI COMPANION // LIVE PREVIEW")
+        prev_header.setStyleSheet("color: #00D4FF; font-size: 10px; font-weight: 700; letter-spacing: 1.2px;")
+        prev_lay.addWidget(prev_header)
+
+        self._prev_msg = QLabel("“Hello! I am Friday. Your system is online and ready.”")
+        self._prev_msg.setWordWrap(True)
+        self._prev_msg.setStyleSheet("color: #E2E8F0; font-size: 12px; font-style: italic; font-family: 'Segoe UI';")
+        prev_lay.addWidget(self._prev_msg)
+
+        lay.addWidget(self._preview_card)
+
+        # Error label
+        self._err = QLabel("")
+        self._err.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._err.setStyleSheet("color: #EF4444; font-size: 11px; background: rgba(239, 68, 68, 0.1); border-radius: 6px; padding: 4px;")
+        self._err.hide()
+        lay.addWidget(self._err)
+
+        lay.addSpacing(6)
+
+        btn = QPushButton("Continue to Voice Setup   →")
         btn.setFixedHeight(46)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet("""
@@ -1545,7 +2113,7 @@ class SetupNameView(QWidget):
                 color: #FFFFFF;
                 border: 1px solid rgba(255, 255, 255, 0.25);
                 border-radius: 23px;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: 700;
             }
             QPushButton:hover {
@@ -1556,42 +2124,75 @@ class SetupNameView(QWidget):
         btn.clicked.connect(self._on_submit)
         lay.addWidget(btn)
 
+        back_btn = QPushButton("← Back to AI Provider Setup")
+        back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        back_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #8FA0B5;
+                border: none;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                color: #00D4FF;
+                text-decoration: underline;
+            }
+        """)
+        back_btn.clicked.connect(self.back_requested.emit)
+        lay.addWidget(back_btn)
+
+    def _update_preview(self, text: str):
+        display_name = text.strip() or "Friday"
+        self._prev_msg.setText(f"“Hello! I am {display_name}. Your system is online and ready.”")
+
     def _on_submit(self):
-        name = self._input.text().strip() or "Friday"
-        self.name_submitted.emit(name)
+        raw_name = self._input.text().strip()
+        if raw_name and len(raw_name) < 2:
+            self._err.setText("✖ Assistant name must be at least 2 characters.")
+            self._err.show()
+            return
+        validated_name = validate_assistant_name(raw_name or "Friday")
+        self._err.hide()
+        if self._session:
+            self._session.assistant_name = validated_name
+        self.name_submitted.emit(validated_name)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VIEW: ONBOARDING STEP 2 — VOICE PERSONALIZATION
+# VIEW: ONBOARDING STEP 3 OF 4 — VOICE PERSONALIZATION & AUDITION
 # ─────────────────────────────────────────────────────────────────────────────
-_TONE_PROFILES = [
-    ("Professional", {"rate": 155, "volume": 1.0}),
-    ("Casual",       {"rate": 165, "volume": 1.0}),
-    ("Direct",       {"rate": 175, "volume": 1.0}),
-    ("Calm",         {"rate": 140, "volume": 0.9}),
-]
-
-
 class SetupVoiceView(QWidget):
     voice_submitted = pyqtSignal(dict)
+    back_requested = pyqtSignal()
+    _voices_loaded_signal = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._assistant_name = "Assistant"
-        self._selected_gender = "female"
+        self._session: TemporarySignupSession | None = None
+        self._assistant_name = "Friday"
+        self._current_filter = "female"
         self._all_voices = []
+        self._voices_loaded_signal.connect(self._on_voices_loaded)
         self._build_ui()
         self._load_voices_async()
 
-    def update_name(self, name: str):
-        self._assistant_name = name
-        self._sub.setText(f"Select the voice and speaking tone for {name}.")
+    def init_session(self, session: TemporarySignupSession):
+        self._session = session
+        self._assistant_name = session.assistant_name or "Friday"
+        self._sub.setText(f"Audition and select the speaking voice for {self._assistant_name}.")
+        self._filter_and_populate_voices()
 
     def _build_ui(self):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
-        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.setSpacing(8)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        step_lbl = QLabel("PERSONALIZATION // STEP 3 OF 4")
+        step_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        step_lbl.setStyleSheet("color: #00D4FF; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; background: transparent;")
+        lay.addWidget(step_lbl)
 
         title = QLabel("Select Voice Profile")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1600,12 +2201,51 @@ class SetupVoiceView(QWidget):
 
         self._sub = QLabel("Select the voice and speaking tone for your assistant.")
         self._sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sub.setStyleSheet("color: #8FA0B5; font-size: 12px; font-family: 'Segoe UI'; background: transparent;")
+        self._sub.setStyleSheet("color: #8FA0B5; font-size: 11px; font-family: 'Segoe UI'; background: transparent;")
         lay.addWidget(self._sub)
+
+        # Category Filter Buttons: Female / Male / All
+        cat_box = QHBoxLayout()
+        cat_box.setSpacing(6)
+        cat_lbl = QLabel("Voice Category:")
+        cat_lbl.setStyleSheet("color: #8FA0B5; font-size: 11px; font-weight: 600; background: transparent;")
+        cat_box.addWidget(cat_lbl)
+
+        self._btn_fem = QPushButton("👩 Female")
+        self._btn_fem.setCheckable(True)
+        self._btn_fem.setChecked(True)
+        self._btn_fem.setFixedHeight(28)
+        self._btn_fem.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._btn_male = QPushButton("👨 Male")
+        self._btn_male.setCheckable(True)
+        self._btn_male.setFixedHeight(28)
+        self._btn_male.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._btn_all = QPushButton("🌐 All")
+        self._btn_all.setCheckable(True)
+        self._btn_all.setFixedHeight(28)
+        self._btn_all.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._cat_style_active = "background: #00D4FF; color: #000000; font-weight: 700; border-radius: 6px; padding: 2px 8px; font-size: 11px;"
+        self._cat_style_inactive = "background: rgba(12, 20, 36, 0.8); color: #8FA0B5; border: 1px solid rgba(40, 72, 115, 0.65); border-radius: 6px; padding: 2px 8px; font-size: 11px;"
+
+        self._btn_fem.setStyleSheet(self._cat_style_active)
+        self._btn_male.setStyleSheet(self._cat_style_inactive)
+        self._btn_all.setStyleSheet(self._cat_style_inactive)
+
+        self._btn_fem.clicked.connect(lambda: self._set_category_filter("female"))
+        self._btn_male.clicked.connect(lambda: self._set_category_filter("male"))
+        self._btn_all.clicked.connect(lambda: self._set_category_filter("all"))
+
+        cat_box.addWidget(self._btn_fem)
+        cat_box.addWidget(self._btn_male)
+        cat_box.addWidget(self._btn_all)
+        lay.addLayout(cat_box)
 
         # Voice selection combo
         self._voice_combo = QComboBox()
-        self._voice_combo.setFixedHeight(40)
+        self._voice_combo.setFixedHeight(38)
         self._voice_combo.setStyleSheet("""
             QComboBox {
                 background: rgba(12, 20, 36, 0.85);
@@ -1613,7 +2253,7 @@ class SetupVoiceView(QWidget):
                 border: 1px solid rgba(40, 72, 115, 0.65);
                 border-radius: 8px;
                 padding: 4px 10px;
-                font-size: 13px;
+                font-size: 12px;
             }
             QComboBox::drop-down { border: none; }
             QComboBox QAbstractItemView {
@@ -1625,9 +2265,9 @@ class SetupVoiceView(QWidget):
         """)
         lay.addWidget(self._voice_combo)
 
-        # Preview Button
-        self._preview_btn = QPushButton("▶  Preview Voice")
-        self._preview_btn.setFixedHeight(38)
+        # Preview Audition Button
+        self._preview_btn = QPushButton("▶  Audition Voice Sample")
+        self._preview_btn.setFixedHeight(36)
         self._preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._preview_btn.setStyleSheet("""
             QPushButton {
@@ -1635,8 +2275,8 @@ class SetupVoiceView(QWidget):
                 color: #00D4FF;
                 border: 1px solid rgba(0, 212, 255, 0.40);
                 border-radius: 8px;
-                font-size: 13px;
-                font-weight: 600;
+                font-size: 12px;
+                font-weight: 700;
             }
             QPushButton:hover {
                 background: rgba(0, 212, 255, 0.22);
@@ -1646,9 +2286,40 @@ class SetupVoiceView(QWidget):
         self._preview_btn.clicked.connect(self._preview_voice)
         lay.addWidget(self._preview_btn)
 
-        # Finish button
-        finish_btn = QPushButton("Finish & Launch   →")
-        finish_btn.setFixedHeight(46)
+        # Speaking Tone Combo
+        tone_box = QHBoxLayout()
+        tone_lbl = QLabel("Speaking Tone:")
+        tone_lbl.setStyleSheet("color: #8FA0B5; font-size: 11px; font-weight: 600; background: transparent;")
+        tone_box.addWidget(tone_lbl)
+
+        self._tone_combo = QComboBox()
+        self._tone_combo.setFixedHeight(32)
+        self._tone_combo.setStyleSheet("""
+            QComboBox {
+                background: rgba(12, 20, 36, 0.85);
+                color: #ffffff;
+                border: 1px solid rgba(40, 72, 115, 0.65);
+                border-radius: 6px;
+                padding: 2px 8px;
+                font-size: 11px;
+            }
+            QComboBox QAbstractItemView {
+                background: #0B1626;
+                color: #FFFFFF;
+                selection-background-color: #00D4FF;
+                selection-color: #000000;
+            }
+        """)
+        for tname in ["Professional", "Casual", "Direct", "Calm"]:
+            self._tone_combo.addItem(tname)
+        tone_box.addWidget(self._tone_combo, 1)
+        lay.addLayout(tone_box)
+
+        lay.addSpacing(4)
+
+        # Finish / Continue button
+        finish_btn = QPushButton("Continue to Review Summary   →")
+        finish_btn.setFixedHeight(44)
         finish_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         finish_btn.setStyleSheet("""
             QPushButton {
@@ -1656,8 +2327,8 @@ class SetupVoiceView(QWidget):
                     stop:0 #00D4FF, stop:1 #9B51E0);
                 color: #FFFFFF;
                 border: 1px solid rgba(255, 255, 255, 0.25);
-                border-radius: 23px;
-                font-size: 15px;
+                border-radius: 22px;
+                font-size: 14px;
                 font-weight: 700;
             }
             QPushButton:hover {
@@ -1668,67 +2339,275 @@ class SetupVoiceView(QWidget):
         finish_btn.clicked.connect(self._on_continue)
         lay.addWidget(finish_btn)
 
+        back_btn = QPushButton("← Back to Assistant Name")
+        back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        back_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #8FA0B5;
+                border: none;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                color: #00D4FF;
+                text-decoration: underline;
+            }
+        """)
+        back_btn.clicked.connect(self.back_requested.emit)
+        lay.addWidget(back_btn)
+
+    def _set_category_filter(self, cat: str):
+        self._current_filter = cat
+        self._btn_fem.setChecked(cat == "female")
+        self._btn_male.setChecked(cat == "male")
+        self._btn_all.setChecked(cat == "all")
+
+        self._btn_fem.setStyleSheet(self._cat_style_active if cat == "female" else self._cat_style_inactive)
+        self._btn_male.setStyleSheet(self._cat_style_active if cat == "male" else self._cat_style_inactive)
+        self._btn_all.setStyleSheet(self._cat_style_active if cat == "all" else self._cat_style_inactive)
+        self._filter_and_populate_voices()
+
     def _load_voices_async(self):
         def _worker():
-            voices = []
             try:
-                import pyttsx3
-                engine = pyttsx3.init()
-                raw = engine.getProperty("voices")
-                voices = [
-                    {"id": v.id, "name": v.name, "gender": getattr(v, "gender", "unknown")}
-                    for v in (raw or [])
-                ]
+                voices = enumerate_voices()
             except Exception:
                 voices = []
-            QTimer.singleShot(0, lambda: self._on_voices_loaded(voices))
+            self._voices_loaded_signal.emit(voices)
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_voices_loaded(self, voices: list):
-        self._all_voices = voices
+        self._all_voices = voices or []
+        self._filter_and_populate_voices()
+
+    def _filter_and_populate_voices(self):
         self._voice_combo.clear()
-        if not voices:
+        matching = []
+        if self._current_filter == "all":
+            matching = list(self._all_voices)
+        else:
+            matching = [v for v in self._all_voices if v.get("gender") == self._current_filter]
+
+        if not matching:
+            # Fallback to all if category has no system voices
+            matching = list(self._all_voices)
+
+        if not matching:
             self._voice_combo.addItem("System Default Voice", None)
             return
-        for v in voices:
-            self._voice_combo.addItem(f"{v['name']}", v["id"])
+
+        for v in matching:
+            name = v.get("name", "Voice")
+            g = v.get("gender", "unknown").capitalize()
+            lang = v.get("language", "English")
+            prov = v.get("provider", "sapi5")
+            label = f"{name} — {g} ({lang}, {prov})"
+            self._voice_combo.addItem(label, v)
         self._voice_combo.setCurrentIndex(0)
 
     def _preview_voice(self):
-        idx = self._voice_combo.currentIndex()
-        vid = self._voice_combo.itemData(idx) if idx >= 0 else None
-        preview_text = f"Hello. I'm {self._assistant_name}. Your system is online and ready."
+        v_data = self._voice_combo.currentData()
+        vid = v_data.get("id") if isinstance(v_data, dict) else None
+        preview_text = f"Hello, I am {self._assistant_name}. Your system is online and ready."
 
         def _speak():
             try:
-                import pyttsx3
-                engine = pyttsx3.init()
-                if vid:
-                    engine.setProperty("voice", vid)
-                engine.setProperty("rate", 155)
-                engine.setProperty("volume", 1.0)
-                engine.say(preview_text)
-                engine.runAndWait()
+                # Stop any previous speech
+                stop_speaking(interrupted=True)
+                from legacy.tts import preview_voice
+                preview_voice(vid, preview_text)
             except Exception as e:
                 print(f"[VOICE SETUP] Preview error: {e}")
 
         threading.Thread(target=_speak, daemon=True).start()
 
     def _on_continue(self):
-        idx = self._voice_combo.currentIndex()
-        vid = self._voice_combo.itemData(idx) if idx >= 0 else None
+        v_data = self._voice_combo.currentData()
+        vid = v_data.get("id") if isinstance(v_data, dict) else ""
+        vname = v_data.get("name") if isinstance(v_data, dict) else "System Default Voice"
+        vgender = v_data.get("gender") if isinstance(v_data, dict) else self._current_filter
+        vlang = v_data.get("language") if isinstance(v_data, dict) else "English (United States)"
+        vprov = v_data.get("provider") if isinstance(v_data, dict) else "sapi5"
+
+        rate_map = {"Professional": 155, "Casual": 165, "Direct": 175, "Calm": 140}
+        tone = self._tone_combo.currentText()
+        rate = rate_map.get(tone, 155)
+
         profile = {
             "voice_id": vid,
-            "voice_gender": self._selected_gender,
-            "voice_tone": "professional",
-            "voice_rate": 155,
+            "voice_name": vname,
+            "voice_gender": vgender,
+            "voice_tone": tone.lower(),
+            "voice_rate": rate,
             "voice_volume": 1.0,
+            "language": vlang,
+            "provider": vprov,
         }
+        if self._session:
+            self._session.voice_profile = profile
         self.voice_submitted.emit(profile)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAIN AUTHENTICATION WINDOW (LOGIN & SIGNUP)
+# VIEW: ONBOARDING STEP 4 OF 4 — SUMMARY & ATOMIC ACCOUNT ACTIVATION
+# ─────────────────────────────────────────────────────────────────────────────
+class SignupSummaryView(QWidget):
+    commit_requested = pyqtSignal()
+    back_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        step_lbl = QLabel("SUMMARY & ACTIVATION // STEP 4 OF 4")
+        step_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        step_lbl.setStyleSheet("color: #00D4FF; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; background: transparent;")
+        lay.addWidget(step_lbl)
+
+        title = QLabel("Review & Initialize")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color: #FFFFFF; font-size: 22px; font-weight: 700; font-family: 'Segoe UI'; background: transparent;")
+        lay.addWidget(title)
+
+        sub = QLabel("Confirm your configuration before your account is created.")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub.setStyleSheet("color: #8FA0B5; font-size: 11px; font-family: 'Segoe UI'; background: transparent;")
+        lay.addWidget(sub)
+
+        # Summary Card
+        self._card = QFrame()
+        self._card.setStyleSheet("""
+            QFrame {
+                background: rgba(10, 18, 32, 0.85);
+                border: 1px solid rgba(0, 212, 255, 0.35);
+                border-radius: 12px;
+                padding: 12px;
+            }
+        """)
+        c_lay = QVBoxLayout(self._card)
+        c_lay.setContentsMargins(12, 10, 12, 10)
+        c_lay.setSpacing(6)
+
+        self._lbl_user = QLabel("• Account: —")
+        self._lbl_user.setStyleSheet("color: #FFFFFF; font-size: 12px;")
+        c_lay.addWidget(self._lbl_user)
+
+        self._lbl_name = QLabel("• Assistant Name: —")
+        self._lbl_name.setStyleSheet("color: #00D4FF; font-size: 12px; font-weight: 700;")
+        c_lay.addWidget(self._lbl_name)
+
+        self._lbl_primary = QLabel("• Primary AI Provider: —")
+        self._lbl_primary.setStyleSheet("color: #4ADE80; font-size: 12px; font-weight: 700;")
+        c_lay.addWidget(self._lbl_primary)
+
+        self._lbl_provs = QLabel("• Configured Providers: —")
+        self._lbl_provs.setStyleSheet("color: #E2E8F0; font-size: 12px;")
+        c_lay.addWidget(self._lbl_provs)
+
+        self._lbl_voice = QLabel("• Voice Profile: —")
+        self._lbl_voice.setStyleSheet("color: #E2E8F0; font-size: 12px;")
+        c_lay.addWidget(self._lbl_voice)
+
+        lay.addWidget(self._card)
+
+        # Security Assurance Note
+        sec_note = QLabel("🔒 Privacy Guarantee: Credentials are encrypted per-user with DPAPI. Zero developer keys are embedded.")
+        sec_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sec_note.setWordWrap(True)
+        sec_note.setStyleSheet("color: #728CA6; font-size: 10px; font-family: 'Segoe UI';")
+        lay.addWidget(sec_note)
+
+        # Error banner
+        self._err = QLabel("")
+        self._err.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._err.setStyleSheet("color: #EF4444; font-size: 11px; background: rgba(239, 68, 68, 0.1); border-radius: 6px; padding: 4px;")
+        self._err.hide()
+        lay.addWidget(self._err)
+
+        lay.addSpacing(4)
+
+        # Commit & Launch Button
+        self._btn_commit = QPushButton("Create Account & Activate Assistant   →")
+        self._btn_commit.setFixedHeight(46)
+        self._btn_commit.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_commit.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #00D4FF, stop:1 #9B51E0);
+                color: #FFFFFF;
+                border: 1px solid rgba(255, 255, 255, 0.25);
+                border-radius: 23px;
+                font-size: 14px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #1AE0FF, stop:1 #A855F7);
+            }
+            QPushButton:disabled {
+                background: #1E293B;
+                color: #64748B;
+                border-color: #334155;
+            }
+        """)
+        self._btn_commit.clicked.connect(self.commit_requested.emit)
+        lay.addWidget(self._btn_commit)
+
+        back_btn = QPushButton("← Back to Voice Selection")
+        back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        back_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #8FA0B5;
+                border: none;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                color: #00D4FF;
+                text-decoration: underline;
+            }
+        """)
+        back_btn.clicked.connect(self.back_requested.emit)
+        lay.addWidget(back_btn)
+
+    def update_summary(self, session: TemporarySignupSession):
+        self._lbl_user.setText(f"• Account: <b>{session.username}</b> ({session.email or 'Local Profile'})")
+        self._lbl_name.setText(f"• Assistant Name: <b>{session.assistant_name}</b>")
+        self._lbl_primary.setText(f"• Primary AI Provider: <b>{session.primary_provider.upper() or 'NONE'}</b>")
+        configured_list = list(session.staged_credentials.keys())
+        self._lbl_provs.setText(f"• Configured Providers: <b>{', '.join(configured_list).upper() if configured_list else 'None'}</b>")
+
+        vp = session.voice_profile
+        vname = vp.get("voice_name", "Default System Voice")
+        vg = vp.get("voice_gender", "").capitalize()
+        vlang = vp.get("language", "")
+        self._lbl_voice.setText(f"• Voice: <b>{vname}</b> ({vg}, {vlang})")
+        self.clear_error()
+
+    def show_error(self, msg: str):
+        self._err.setText(msg)
+        self._err.show()
+
+    def clear_error(self):
+        self._err.hide()
+        self._err.setText("")
+
+    def set_loading(self, loading: bool):
+        self._btn_commit.setEnabled(not loading)
+        self._btn_commit.setText("Creating Account & Encrypting Keys..." if loading else "Create Account & Activate Assistant   →")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN AUTHENTICATION WINDOW (LOGIN, ONBOARDING & SIGNUP)
 # ─────────────────────────────────────────────────────────────────────────────
 class LoginWindow(QWidget):
     login_complete = pyqtSignal(object, str, str)  # (user_id, username, session_mode)
@@ -1746,6 +2625,7 @@ class LoginWindow(QWidget):
         self._user_id = None
         self._username = None
         self._auth_thread: AuthThread | None = None
+        self._signup_session = TemporarySignupSession()
 
         # 1. Full-screen 3D Cinematic Canvas
         self._bg = Futuristic3DCanvas(self)
@@ -1762,20 +2642,19 @@ class LoginWindow(QWidget):
         main_lay.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
 
         # 3. Dedicated Glassmorphism Card (AuthCard)
-        # Sits centered vertically, beneath the central AI Core
         self._card = QFrame(self._flow_container)
         self._card.setObjectName("AuthCard")
-        self._card.setFixedWidth(430)
+        self._card.setFixedWidth(440)
         self._card.setStyleSheet("""
             QFrame#AuthCard {
-                background: rgba(8, 14, 26, 0.84);
+                background: rgba(8, 14, 26, 0.88);
                 border: 1px solid rgba(0, 212, 255, 0.35);
                 border-radius: 22px;
             }
         """)
 
         card_lay = QVBoxLayout(self._card)
-        card_lay.setContentsMargins(28, 28, 28, 24)
+        card_lay.setContentsMargins(28, 24, 28, 24)
         card_lay.setSpacing(0)
 
         # 4. View Switcher inside Card
@@ -1784,13 +2663,17 @@ class LoginWindow(QWidget):
 
         self.signin_view = SignInView(self._stack)
         self.signup_view = SignUpView(self._stack)
+        self.setup_api_keys_view = SetupAPIKeysView(self._stack)
         self.setup_name_view = SetupNameView(self._stack)
         self.setup_voice_view = SetupVoiceView(self._stack)
+        self.signup_summary_view = SignupSummaryView(self._stack)
 
-        self._stack.addWidget(self.signin_view)        # Index 0: Login
-        self._stack.addWidget(self.signup_view)        # Index 1: Signup
-        self._stack.addWidget(self.setup_name_view)    # Index 2: Name
-        self._stack.addWidget(self.setup_voice_view)   # Index 3: Voice
+        self._stack.addWidget(self.signin_view)           # Index 0: Login
+        self._stack.addWidget(self.signup_view)           # Index 1: Signup Account Info
+        self._stack.addWidget(self.setup_api_keys_view)    # Index 2: Mandatory API Key Wizard
+        self._stack.addWidget(self.setup_name_view)       # Index 3: Assistant Name Personalization
+        self._stack.addWidget(self.setup_voice_view)      # Index 4: Voice Personalization
+        self._stack.addWidget(self.signup_summary_view)   # Index 5: Summary & Final Activation
 
         card_lay.addWidget(self._stack)
 
@@ -1819,10 +2702,20 @@ class LoginWindow(QWidget):
         self.signin_view.submit_requested.connect(self._on_login_submit)
 
         self.signup_view.switch_to_login.connect(self._show_signin)
-        self.signup_view.submit_requested.connect(self._on_signup_submit)
+        self.signup_view.account_info_submitted.connect(self._on_signup_info_submitted)
 
+        self.setup_api_keys_view.back_requested.connect(lambda: self._stack.setCurrentIndex(1))
+        self.setup_api_keys_view.keys_confirmed.connect(self._on_keys_confirmed)
+        self.setup_api_keys_view.setup_finished.connect(lambda: self._proceed(self._user_id, self._username, "account"))
+
+        self.setup_name_view.back_requested.connect(lambda: self._stack.setCurrentIndex(2))
         self.setup_name_view.name_submitted.connect(self._on_name_submitted)
+
+        self.setup_voice_view.back_requested.connect(lambda: self._stack.setCurrentIndex(3))
         self.setup_voice_view.voice_submitted.connect(self._on_voice_submitted)
+
+        self.signup_summary_view.back_requested.connect(lambda: self._stack.setCurrentIndex(4))
+        self.signup_summary_view.commit_requested.connect(self._on_commit_signup)
 
         # Smooth fade-in
         self.setWindowOpacity(0.0)
@@ -1833,6 +2726,12 @@ class LoginWindow(QWidget):
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._fade.start()
 
+    def closeEvent(self, event):
+        # Clean up any staged registration session safely on close
+        if hasattr(self, "_signup_session") and self._signup_session:
+            self._signup_session.clear()
+        super().closeEvent(event)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         w, h = self.width(), self.height()
@@ -1841,7 +2740,6 @@ class LoginWindow(QWidget):
         if hasattr(self, "_flow_container") and self._flow_container:
             self._flow_container.setGeometry(0, 0, w, h)
         if hasattr(self, "_top_spacer") and self._top_spacer:
-            # Dynamically adapt top offset based on window height so card sits cleanly beneath tagline
             py = max(110.0, h * 0.17)
             scale = min(1.15, max(0.72, h / 1080.0))
             spacer_h = int(py + 120.0 * scale)
@@ -1868,6 +2766,7 @@ class LoginWindow(QWidget):
         self.signin_view._username.setFocus()
 
     def _show_signup(self):
+        self._signup_session.clear()
         self.signup_view.clear_fields()
         self.signup_view.clear_error()
         self._stack.setCurrentIndex(1)
@@ -1887,86 +2786,120 @@ class LoginWindow(QWidget):
         self.signin_view.set_loading(False)
         self._user_id = user_id
         self._username = username
-        self._proceed(user_id, username, "account")
+
+        has_setup = False
+        try:
+            from modules.ui.dashboard.service_adapters import get_api_setup_status
+            res = get_api_setup_status(user_id)
+            has_setup = bool(res.get("completed", False))
+        except Exception:
+            has_setup = True
+
+        if not has_setup:
+            self.setup_api_keys_view.set_user(user_id, username)
+            self._stack.setCurrentIndex(2)
+        else:
+            self._proceed(user_id, username, "account")
 
     def _on_login_failed(self, msg: str):
         self.signin_view.set_loading(False)
         self.signin_view.show_error(msg)
 
-    # ── Signup Registration ───────────────────────────────────────────────────
-    def _on_signup_submit(self, username: str, password: str, confirm_pass: str):
-        self.signup_view.clear_error()
-        self.signup_view.set_loading(True)
+    # ── Onboarding Step Transitions ───────────────────────────────────────────
+    def _on_signup_info_submitted(self, username: str, email: str, password: str):
+        self._signup_session.username = username
+        self._signup_session.email = email
+        self._signup_session.password = password
+        self.setup_api_keys_view.init_signup_session(self._signup_session)
+        self._stack.setCurrentIndex(2)  # Step 1: Mandatory AI Key
 
-        email = self.signup_view._email.text().strip()
-        self._auth_thread = AuthThread(username, password, mode="signup", email=email)
-        self._auth_thread.success.connect(self._on_signup_success)
-        self._auth_thread.failed.connect(self._on_signup_failed)
+    def _on_keys_confirmed(self):
+        self.setup_name_view.init_session(self._signup_session)
+        self._stack.setCurrentIndex(3)  # Step 2: Name Assistant
+
+    def _on_name_submitted(self, name: str):
+        self._signup_session.assistant_name = name
+        self.setup_voice_view.init_session(self._signup_session)
+        self._stack.setCurrentIndex(4)  # Step 3: Voice Selection
+
+    def _on_voice_submitted(self, profile: dict):
+        self._signup_session.voice_profile = profile
+        self.signup_summary_view.update_summary(self._signup_session)
+        self._stack.setCurrentIndex(5)  # Step 4: Summary & Commit
+
+    # ── Step 9: Final Atomic Account Creation & Credentials Activation ─────────
+    def _on_commit_signup(self):
+        if not self._signup_session.has_valid_ai_credential():
+            self.signup_summary_view.show_error("Validation error: At least one valid AI provider is mandatory before account creation.")
+            return
+
+        self.signup_summary_view.set_loading(True)
+        u = self._signup_session.username
+        p = self._signup_session.password
+        em = self._signup_session.email
+
+        self._auth_thread = AuthThread(u, p, mode="signup", email=em)
+        self._auth_thread.success.connect(self._on_commit_signup_success)
+        self._auth_thread.failed.connect(self._on_commit_signup_failed)
         self._auth_thread.start()
 
-    def _on_signup_success(self, user_id: int, username: str, result_type):
-        self.signup_view.set_loading(False)
+    def _on_commit_signup_success(self, user_id: int, username: str, result_type):
+        self.signup_summary_view.set_loading(False)
         self._user_id = user_id
         self._username = username
 
-        # Transition to Onboarding Step 1: Name Assistant
-        self._stack.setCurrentIndex(2)
-        self.setup_name_view._input.setFocus()
+        # 1. Save all validated credentials in the user vault
+        mgr = get_credential_manager()
+        for prov, key_val in self._signup_session.staged_credentials.items():
+            mgr.save_credential(user_id, prov, key_val)
 
-    def _on_signup_failed(self, msg: str):
-        self.signup_view.set_loading(False)
-        self.signup_view.show_error(msg)
+        # 2. Save primary provider preference
+        if self._signup_session.primary_provider:
+            mgr.set_primary_provider(user_id, self._signup_session.primary_provider)
 
-    # ── Onboarding Steps ──────────────────────────────────────────────────────
-    def _on_name_submitted(self, name: str):
+        # 3. Save assistant name
+        asst_name = self._signup_session.assistant_name or "Friday"
         try:
-            if getattr(sys, "frozen", False):
-                from core.api_client import get_api_client
-                get_api_client()._request(
-                    "/api/users/me/preferences",
-                    method="POST",
-                    payload={"assistant_name": name}
-                )
-            else:
-                from legacy.memory_manager import set_assistant_name_db
-                set_assistant_name_db(self._user_id, name)
-                from instance.config import settings
-                settings.CURRENT_ASSISTANT_NAME = name
+            from legacy.memory_manager import set_assistant_name_db
+            set_assistant_name_db(user_id, asst_name)
+            mgr.set_assistant_name(user_id, asst_name)
+            from instance.config import settings
+            settings.CURRENT_ASSISTANT_NAME = asst_name
         except Exception as e:
-            print(f"[LOGIN] Failed to save assistant name: {e}")
+            print(f"[SIGNUP COMMIT] Error saving assistant name: {e}")
 
-        self.setup_voice_view.update_name(name)
-        self._stack.setCurrentIndex(3)
-
-    def _on_voice_submitted(self, profile: dict):
+        # 4. Save voice profile
+        v_prof = self._signup_session.voice_profile
         try:
-            if getattr(sys, "frozen", False):
-                from core.api_client import get_api_client
-                get_api_client()._request(
-                    "/api/users/me/preferences",
-                    method="POST",
-                    payload={"voice_profile": profile}
-                )
-            else:
-                from legacy.memory_manager import set_voice_profile_db
-                set_voice_profile_db(
-                    self._user_id,
-                    voice_id=profile.get("voice_id") or "",
-                    voice_gender=profile.get("voice_gender", "female"),
-                    voice_tone=profile.get("voice_tone", "professional"),
-                    voice_rate=int(profile.get("voice_rate", 155)),
-                    voice_volume=float(profile.get("voice_volume", 1.0)),
-                )
-                from legacy.tts import apply_voice_profile
-                apply_voice_profile(
-                    profile.get("voice_id"),
-                    rate=int(profile.get("voice_rate", 155)),
-                    volume=float(profile.get("voice_volume", 1.0)),
-                )
+            from legacy.memory_manager import set_voice_profile_db
+            set_voice_profile_db(
+                user_id,
+                voice_id=v_prof.get("voice_id") or "",
+                voice_gender=v_prof.get("voice_gender", "female"),
+                voice_tone=v_prof.get("voice_tone", "professional"),
+                voice_rate=int(v_prof.get("voice_rate", 135)),
+                voice_volume=float(v_prof.get("voice_volume", 1.0)),
+            )
+            apply_voice_profile(
+                v_prof.get("voice_id"),
+                rate=int(v_prof.get("voice_rate", 135)),
+                volume=float(v_prof.get("voice_volume", 1.0)),
+            )
         except Exception as e:
-            print(f"[LOGIN] Failed to save voice profile: {e}")
+            print(f"[SIGNUP COMMIT] Error saving voice profile: {e}")
 
-        self._proceed(self._user_id, self._username, "account")
+        # 5. Mark setup completed
+        mgr.set_completed_api_setup(user_id, True)
+
+        # 6. Discard temporary signup session safely
+        self._signup_session.clear()
+
+        # 7. Proceed to launch assistant
+        self._proceed(user_id, username, "account")
+
+    def _on_commit_signup_failed(self, msg: str):
+        self.signup_summary_view.set_loading(False)
+        self.signup_summary_view.show_error(msg)
 
     # ── Transition to Dashboard ───────────────────────────────────────────────
     def _proceed(self, user_id: object, username: str, session_mode: str = "account"):

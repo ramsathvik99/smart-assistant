@@ -94,7 +94,7 @@ class MultiIntentAnalyzer:
         (r'\band\s+then\b', 0.9),     # "open Notepad and then type hello"
         (r'\bafter\s+that\b', 0.9),    # "create folder after that create file"
         (r'\bfollowed\s+by\b', 0.9),   # "search for AI followed by open first result"
-        (r'(?<!\bfor\s)(?<!\bby\s)\bnext\b(?!\s+(?:week|weekend|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday|day|time|morning|afternoon|evening|night|step|item))\b', 0.85),           # "open Notepad next write test"
+        (r'(?<!\bfor\s)(?<!\bby\s)(?<!\bmy\s)(?<!\bthe\s)(?<!\bour\s)\bnext\b(?!\s+(?:week|weekend|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday|day|time|morning|afternoon|evening|night|step|item|appointment|meeting|event|call|sync|session))\b', 0.85),           # "open Notepad next write test"
         (r'\bfinally\b', 0.85),        # "create folder, create file, finally open file"
         (r'\band\b', 0.8),             # "play music and set reminder"
         (r'\bthen\b', 0.85),           # "play music then set reminder"
@@ -103,7 +103,7 @@ class MultiIntentAnalyzer:
         (r'\bbefore\b', 0.9),          # "before playing music, set reminder"
         (r'\bwhile\b', 0.85),          # "while playing music, set reminder"
         (r'(?<!\d\s)\bplus\b(?!\s*\d)', 0.75),           # "play music plus set reminder"
-        (r'[,;]\s*(?!(?:not\s+(?:the\s+)?(?:other|one|that|this)|instead\s+of|rather\s+than)\b)(?=\w)', 0.6),       # "play music, set reminder" or "play music; set reminder"
+        (r'[,;]\s*(?!(?:not\s+(?:the\s+)?(?:other|one|that|this)|instead\s+of|rather\s+than)\b)(?!\d{4}\b)(?!at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b)(?=\w)', 0.6),       # "play music, set reminder" or "play music; set reminder"
     ]
     
     # Dependency patterns (intent_A depends on intent_B if pattern matches)
@@ -295,6 +295,14 @@ class MultiIntentAnalyzer:
         # Guard: Game discovery / download and play expressions (e.g. "what games can I download and play on this PC")
         if any(k in input_lower for k in ["download and play", "games can i", "what games", "recommend games", "compatible games", "games to play", "games for this pc"]):
             if not any(k in input_lower for k in ["then", "and email", "and send", "and reminder", "and set reminder"]):
+                return False
+
+        # Guard: Calendar operations (e.g. "Move Team Sync to October 22, 2026, at 11 AM.")
+        if re.search(r'\b(?:schedule|reschedule|move|rename|cancel)\s+.*(?:to|at|on|for|tomorrow|today|\d{4})\b', input_lower) or \
+           re.search(r'\b(?:show|get|list|view)\s+(?:my\s+)?events\b', input_lower) or \
+           re.search(r'\b(?:what(?:\'s|\s+is)\s+(?:my\s+)?next\s+(?:appointment|meeting|event))\b', input_lower) or \
+           re.search(r'\b(?:plan\s+my\s+week)\b', input_lower):
+            if not any(k in input_lower for k in ["then", "and then", "after that", "and open", "and play", "and send", "and create file"]):
                 return False
 
         for pattern, _ in self.INTENT_CONNECTORS:

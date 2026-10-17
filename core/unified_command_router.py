@@ -97,6 +97,7 @@ class Intent(Enum):
     CLOSE_APPLICATION = 30 # Dedicated close / quit / shut down application intent
     SYSTEM_COMPATIBILITY = 31 # Hardware compatibility & requirements checking
     GAME_DISCOVERY = 32 # Game recommendations and discovery
+    VOICE_CONFIGURATION = 33 # Speech rate and voice configuration
 
 EXTERNAL_RETRIEVAL_INTENTS = {"WEATHER_QUERY", "RAG_SEARCH"}
 
@@ -183,7 +184,7 @@ def is_conversational_general_query(text: str) -> bool:
         return True
     if re.search(r'\b(?:nice|good|great)\s+to\s+(?:see|meet|hear)\s+you\b', t):
         return True
-    if re.search(r'\b(?:who\s+are\s+you|what\s+is\s+your\s+name|what\'s\s+your\s+name|introduce\s+yourself|who\s+made\s+you|who\s+created\s+you|who\s+built\s+you)\b', t):
+    if re.search(r'\b(?:who\s+are\s+you|what\s+is\s+your\s+name|what\'s\s+your\s+name|whats\s+your\s+name|who\'re\s+you|tell\s+me\s+about\s+yourself|introduce\s+yourself|who\s+made\s+you|who\s+created\s+you|who\s+built\s+you|what\s+are\s+you|who\s+am\s+i\s+(?:speaking|talking)\s+(?:with|to)|what\s+is\s+your\s+identity|whats\s+your\s+identity|who\s+is\s+this|tell\s+me\s+who\s+you\s+are)\b', t):
         return True
     if re.search(r'\b(?:what\s+did\s+i\s+ask(?:\s+you)?\s+(?:earlier|before)|what\s+was\s+my\s+(?:last|previous)\s+question|continue\s+(?:your\s+)?(?:previous\s+)?answer)\b', t):
         return True
@@ -338,7 +339,7 @@ class UnifiedCommandRouter:
             # Exclude 'open ... volume' constructs so OPEN_APPLICATION wins.
             Intent.DEVICE_CONTROL: [
                 # Text typing / writing
-                re.compile(r'\b(?:type|write)\s+(?!(?:an?\s+)?(?:note|code|python|script|report|document|email|mail|record|reminder)\b)(.+)', re.IGNORECASE),
+                re.compile(r'\b(?:type|write)\s+(?!(?:to\b|(?:an?\s+)?(?:note|code|python|javascript|js|typescript|ts|java|c\+\+|cpp|c#|csharp|golang|go|rust|php|ruby|swift|kotlin|dart|r|matlab|sql|html|css|json|yaml|xml|markdown|bash|powershell|shell|script|function|algorithm|class|program|query|interface|struct|module|project|api|scraper|backend|frontend|webpage|website|app|application|report|document|email|mail|record|reminder|binary\s+search|bubble\s+sort|merge\s+sort|quick\s+sort|prime\s+check)(?!\w)))(.+)', re.IGNORECASE),
                 re.compile(r'\bput\s+(?!(?:an?\s+)?(?:file|folder|document)\b)(.+?)\s+(?:in|into|inside|there)(?:\s+it)?[.!?]?$', re.IGNORECASE),
                 re.compile(r'\b(mute|unmute)\b', re.IGNORECASE),
                 # volume only when NOT preceded by 'open'/'launch'/'start'
@@ -478,7 +479,7 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:search\s+(?:on\s+|in\s+)?youtube\s+for|search\s+youtube\s+for)\s+(.+)', re.IGNORECASE),
                 re.compile(r'\b(?:search\s+(?:on\s+|in\s+)?google\s+for|search\s+google\s+for)\s+(.+)', re.IGNORECASE),
                 re.compile(r'\b(open|show|display|launch)\s+((?:(?:the|my)\s+)?dashboard)\b', re.IGNORECASE),
-                re.compile(r'(?:^|\b(?:please|can\s+you|could\s+you|would\s+you|then|now|so|just|okay|ok)\s+)(open)\s+(?!(?:music|song|email|mail|video|.*?\b(?:folder|directory)\b|file\s+(?!explorer)|windows?\b|open\s+windows?\b|result\b|link\b|(?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+(?:result|link)))(.+)', re.IGNORECASE),
+                re.compile(r'(?:^|\b(?:please|can\s+you|could\s+you|would\s+you|then|now|so|just|okay|ok)\s+)(open)\s+(?!(?:music|song|(?:the\s+|this\s+|that\s+)?(?:email|emails|mail|mails)|video|.*?\b(?:folder|directory)\b|file\s+(?!explorer)|windows?\b|open\s+windows?\b|result\b|link\b|(?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+(?:result|link)))(.+)', re.IGNORECASE),
                 re.compile(r'\b(?:bring\s+up|bring|switch\s+to|switch\s+back\s+to)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:back|to\s+(?:the\s+)?front|on\s+the\s+first\s+page|on\s+(?:the\s+)?screen))?$', re.IGNORECASE),
                 re.compile(r'\b(launch|start|run)\s+(?!(?:in\s+this\s+(?:system|pc)|on\s+this\s+(?:system|pc)|games?\b))(.+)', re.IGNORECASE),
                 re.compile(r'\b(?:get|bring)\s+([a-zA-Z0-9_\-]+)\s+running\b', re.IGNORECASE),
@@ -502,7 +503,7 @@ class UnifiedCommandRouter:
                 # Duplicate files
                 re.compile(r'\b(?:duplicate\s+files?|find\s+duplicates?)\b', re.IGNORECASE),
                 # File search & filtering
-                re.compile(r'\b(?:find\s+all|search\s+(?:for\s+)?(?:[a-zA-Z0-9_\-*\.]+\s+)?(?:files?|documents?)|search\s+(?:for\s+)?(?:.+?\s+)?(?:files?|documents?)\s+(?:in|under)\s+.+|(?:files?|documents?)\s+larger\s+than|(?:files?|documents?)\s+modified)\b', re.IGNORECASE),
+                re.compile(r'\b(?:find\s+all\s+(?!(?:emails?|mails?)\b)|search\s+(?:for\s+)?(?:[a-zA-Z0-9_\-*\.]+\s+)?(?:files?|documents?)|search\s+(?:for\s+)?(?:.+?\s+)?(?:files?|documents?)\s+(?:in|under)\s+.+|(?:files?|documents?)\s+larger\s+than|(?:files?|documents?)\s+modified)\b', re.IGNORECASE),
                 # Directory statistics
                 re.compile(r'\b(?:statistics\s+for|stats\s+for|how\s+many\s+files\s+in|directory\s+stats)\b', re.IGNORECASE),
                 # Largest files
@@ -512,9 +513,11 @@ class UnifiedCommandRouter:
                 # Specific file delete
                 re.compile(r'\b(delete|remove)\s+(?:the\s+)?(?:file\s+)?([\w\-.]+\.\w+)\b', re.IGNORECASE),
                 # File move
-                re.compile(r'\bmove\s+(?:the\s+)?(?:file\s+|folder\s+|directory\s+)?(.+?)\s+to\s+(.+)', re.IGNORECASE),
+                re.compile(r'\bmove\s+(?:the\s+)?(?:file\s+|folder\s+|directory\s+)(.+?)\s+to\s+(.+)', re.IGNORECASE),
+                re.compile(r'\bmove\s+(?:the\s+)?(?!.*?(?:meeting|sync|standup|appointment|call|calendar|event)\b)(.+?)\s+to\s+(?!\s*(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|\d{4}-\d{2}-\d{2}|\d{1,2}(?:st|nd|rd|th)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)))(.+)', re.IGNORECASE),
                 # File rename
-                re.compile(r'\brename\s+(?:the\s+)?(?:file\s+|folder\s+|directory\s+)?(.+?)\s+to\s+(.+)', re.IGNORECASE),
+                re.compile(r'\brename\s+(?:the\s+)?(?:file\s+|folder\s+|directory\s+)(.+?)\s+to\s+(.+)', re.IGNORECASE),
+                re.compile(r'\brename\s+(?:the\s+)?(?!.*?(?:meeting|sync|standup|appointment|call|calendar|event)\b)(.+?)\s+to\s+(?!.*?(?:meeting|sync|standup|appointment|call|calendar|event)\b)(.+)', re.IGNORECASE),
                 re.compile(r'\b(create|make|new)\s+(?:a\s+)?(?:folder|directory)\s+(?:named\s+|called\s+)?(.+)', re.IGNORECASE),
                 re.compile(r'\b(create|make|new)\s+(?:a\s+)?(.+?)\s+(?:folder|directory)\b', re.IGNORECASE),
                 re.compile(r'\b(create|make|new)\s+(?:a\s+)?(?:file\s+)?([a-zA-Z0-9_\-\.]+\.(?:txt|csv|py|json|md|log|ini|cfg|html|xml|yaml|yml))\b', re.IGNORECASE),
@@ -546,16 +549,36 @@ class UnifiedCommandRouter:
             # ── Priority 6: EMAIL ─────────────────────────────────────────────
             Intent.EMAIL: [
                 # Natural Compose / Send variants
-                re.compile(r'\b(?:send|compose|write|prepare|draft)\s+(?:an?\s+)?(?:email|mail)(?:\s+(?:to|for|addressed\s+to)\b|\b)', re.IGNORECASE),
+                re.compile(r'\b(?:send|compose|write|prepare|draft)\s+(?:an?\s+|another\s+)?(?:email|mail)(?:\s+(?:to|for|addressed\s+to)\b|\b)', re.IGNORECASE),
                 re.compile(r'\b(?:mail|email|write\s+to)\s+(?:to\s+|for\s+)?(?:my\s+)?[a-zA-Z0-9_.+-]+', re.IGNORECASE),
-                re.compile(r'\b(?:send|write)\s+.+?\s+(?:an?\s+)?(?:email|mail)\b', re.IGNORECASE),
+                re.compile(r'\b(?:send|write)\s+.+?\s+(?:an?\s+|another\s+)?(?:email|mail)\b', re.IGNORECASE),
                 re.compile(r'\b(?:send|write)\s+(?:a\s+)?message\s+(?:to\s+.+?\s+)?(?:through|via|using|by)\s+(?:my\s+)?(?:email|mail)\b', re.IGNORECASE),
                 re.compile(r'\b(?:send\s+(?:email|mail)|send\s+.*\s+(?:to|email|mail))\b', re.IGNORECASE),
                 re.compile(r'\b(?:email|mail)\s+.+?\s+to\b', re.IGNORECASE),
                 re.compile(r'\b(?:send|email|mail)\s+(?:it|that\s+file|this\s+file|the\s+file|the\s+pdf|the\s+excel|the\s+report)\s+to\b', re.IGNORECASE),
-                re.compile(r'\b(?:i\s+need\s+to|i\s+want\s+to|can\s+you\s+(?:help\s+me\s+)?|please\s+)?(?:write|compose|prepare|send|mail|email)\s+(?:an?\s+)?(?:email|mail|message)\b', re.IGNORECASE),
+                re.compile(r'\b(?:i\s+need\s+to|i\s+want\s+to|can\s+you\s+(?:help\s+me\s+)?|please\s+)?(?:write|compose|prepare|send|mail|email)\s+(?:an?\s+|another\s+)?(?:email|mail|message)\b', re.IGNORECASE),
+                re.compile(r'\b(?:complain|send\s+(?:a\s+)?complaint)\s+(?:to\s+.+?\s+)?about\b', re.IGNORECASE),
+                re.compile(r'\b(?:inform|notify)\s+(?:my\s+)?[a-zA-Z0-9_\-\s]+?\s+(?:that|about)\b', re.IGNORECASE),
+                # Specific read / open / summarize operations
+                re.compile(r'\b(?:open|read|view|show|summarize|explain)\s+(?:the\s+|this\s+|that\s+)?email(?:\s+with\s+(?:the\s+)?subject|\s+from|\s+about|\s+saying|\b)', re.IGNORECASE),
+                re.compile(r'\b(?:what\s+does\s+(?:this|the|that)\s+email\s+say|read\s+this\s+email)\b', re.IGNORECASE),
+                # Email counting operations
+                re.compile(r'\bhow\s+many\s+(?:emails?|mails?|messages?)?\s*(?:are\s+)?(?:read|unread)\b', re.IGNORECASE),
+                re.compile(r'\bhow\s+many\s+(?:emails?|mails?|messages?)?\s*(?:are\s+there\s+)?(?:in\s+(?:my\s+)?inbox|in\s+total|total)\b', re.IGNORECASE),
+                re.compile(r'\bhow\s+many\s+(?:unread|read|total\s+inbox|total)?\s*(?:emails?|mails?|messages?)\b', re.IGNORECASE),
+                re.compile(r'\bhow\s+many\s+unread\s+emails?\s+(?:did\s+i|do\s+i)\s+(?:receive|have|get)\b', re.IGNORECASE),
+                # Search by sender & sender inquiries
+                re.compile(r'\b(?:did\s+i\s+receive|did\s+[a-zA-Z0-9_\-\s]+\s+email|check\s+whether\s+i\s+got|check\s+if\s+i\s+got)\b.*?\b(?:email|mail|emails)\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+was\s+the\s+(?:last|latest)\s+email\s+[a-zA-Z0-9_\-\s]+\s+sent\s+me\b', re.IGNORECASE),
+                re.compile(r'\bfind\s+(?:all\s+)?(?:the\s+)?emails?\s+(?:from|about|with|received)\b', re.IGNORECASE),
+                # Message organization (mark read / unread)
+                re.compile(r'\bmark\s+(?:all\s+)?(?:these\s+|this\s+|that\s+)?(?:the\s+|my\s+)?(?:emails?|mails?|messages?)?\s*(?:as\s+)?(?:read|unread)\b', re.IGNORECASE),
                 # Inbox and Mailbox checking variants
                 re.compile(r'\b(?:check|read|show|list|view|display|get)\s+(?:me\s+)?(?:my\s+)?(?:latest\s+|recent\s+)?(?:inbox|emails?|mails?|recent\s+messages?|messages?)\b', re.IGNORECASE),
+                re.compile(r'\bshow\s+(?:me\s+)?(?:all\s+)?(?:my\s+)?unread\s+emails?\b', re.IGNORECASE),
+                re.compile(r'\bshow\s+(?:me\s+)?(?:the\s+)?last\s+\d+\s+emails?\b', re.IGNORECASE),
+                re.compile(r'\bshow\s+(?:me\s+)?emails?\s+(?:with\s+attachments?|from\s+yesterday)\b', re.IGNORECASE),
+                re.compile(r'\bdid\s+i\s+receive\s+any\s+important\s+emails?\b', re.IGNORECASE),
                 re.compile(r'\b(?:unread\s+emails?|new\s+emails?|unread\s+mails?|new\s+mails?)\b', re.IGNORECASE),
                 re.compile(r'\bdo\s+i\s+have\s+(?:any\s+)?(?:new\s+|unread\s+)?(?:emails?|mails?|messages?)\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+(?:emails?|new\s+emails?|unread\s+emails?|messages?)\s+(?:do\s+i\s+have|have\s+i\s+received?|did\s+i\s+(?:get|receive))\b', re.IGNORECASE),
@@ -680,26 +703,36 @@ class UnifiedCommandRouter:
             Intent.CODE_GENERATION: [
                 re.compile(r'\b(?:diagnose|parse|explain|analyze|check)\s+(?:this\s+)?(?:error|traceback)\b', re.IGNORECASE),
                 re.compile(r'\btraceback\s+\(most\s+recent\s+call\s+last\)', re.IGNORECASE),
-                re.compile(r'\b(?:explain|analyze)\s+(?:this\s+)?code\b', re.IGNORECASE),
-                re.compile(r'\b(?:validate|check)\s+(?:this\s+)?(?:python\s+)?code(?:\s+for\s+syntax\s+errors)?\b', re.IGNORECASE),
+                re.compile(r'\b(?:explain|analyze)\s+(?:this\s+)?(?:supplied\s+)?code\b', re.IGNORECASE),
+                re.compile(r'\b(?:validate|check)\s+(?:the\s+)?(?:syntax\s+of\s+)?(?:this\s+)?(?:supplied\s+)?(?:python\s+|javascript\s+|c\+\+\s+|[a-zA-Z0-9_\-\+\#]+\s+)?code(?:\s+for\s+syntax\s+errors)?\b', re.IGNORECASE),
                 re.compile(r'\b(?:does\s+this\s+code\s+have\s+syntax\s+errors|explain\s+(?:the\s+)?structure\s+of\s+(?:this\s+)?(?:python\s+)?code)\b', re.IGNORECASE),
                 re.compile(r'\b(?:what\s+classes\s+and\s+functions\s+are\s+in\s+this\s+code)\b', re.IGNORECASE),
+                re.compile(r'\b(?:fix|debug|repair|solve|correct|refactor|optimize)\s+(?:this\s+)?(?:supplied\s+)?(?:code|program|script|function|bug|error|issue)\b', re.IGNORECASE),
                 re.compile(r'\b(?:(?:write|generate|create|build|run|sample|example|source)\s+code|code\s+(?:snippet|block|generation)|coding|program|script|function|algorithm)\b', re.IGNORECASE),
                 re.compile(
                     r'\b(write|create|build|make|generate|implement)\b.{0,40}'
-                    r'\b(in\s+(?:python|java|javascript|js|c\+\+|c#|ruby|go|rust|swift|kotlin|typescript|ts))\b',
+                    r'\b(in\s+(?:python|java|javascript|js|c\+\+|cpp|c#|csharp|ruby|go|rust|swift|kotlin|typescript|ts|php|bash|powershell|sql|html|css))(?!\w)',
+                    re.IGNORECASE
+                ),
+                re.compile(
+                    r'\b(write|create|build|make|generate|implement)\b.{0,40}'
+                    r'\b(?:python|java|javascript|js|typescript|ts|c\+\+|cpp|c#|csharp|go|golang|rust|php|ruby|swift|kotlin|dart|r|matlab|sql|bash|powershell|html|css)\b.{0,40}'
+                    r'\b(?:program|script|function|class|interface|query|code|app|project|example|controller|component|dashboard|service|api|model|algorithm|tool|worker|pool|implementation|scraper|server|page|webpage|template)\b',
                     re.IGNORECASE
                 ),
                 re.compile(
                     r'\b(bubble\s+sort|merge\s+sort|quick\s+sort|binary\s+search|linked\s+list|'
-                    r'stack|priority\s+queue|queue\s+data\s+structure|graph|tree|dynamic\s+programming|recursion)\b',
+                    r'stack|priority\s+queue|queue\s+data\s+structure|graph|tree|dynamic\s+programming|recursion|maximum\s+subarray|prime\s+check)\b',
                     re.IGNORECASE
                 ),
                 re.compile(
                     r'\b(write|create|build|generate|implement)\b.{0,40}'
-                    r'\b(calculator|to-?do|todo|snake\s+game|tic-?tac-?toe|chatbot|web\s+scraper|api|rest\s+api)\b',
+                    r'\b(calculator|to-?do|todo|snake\s+game|tic-?tac-?toe|chatbot|web\s+scraper|api|rest\s+api|flask\s+api|fastapi|webpage|website)\b',
                     re.IGNORECASE
                 ),
+                re.compile(r'\b(write|create|build|generate|implement)\s+(?:an?\s+)?(?:sql\s+query|database\s+query|query\s+to\b|powershell\s+script|bash\s+script|typescript\s+interface)\b', re.IGNORECASE),
+                re.compile(r'\b(generate|create|build)\s+(?:a\s+)?(?:webpage|website)\s+with\s+separate\b', re.IGNORECASE),
+                re.compile(r'\b(generate|create|build)\s+(?:a\s+)?(?:multi-module|multi-file|modular)\s+(?:python\s+)?project\b', re.IGNORECASE),
             ],
 
             # ── Priority 12: TRANSLATION ──────────────────────────────────────
@@ -724,8 +757,37 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:show|check|view|what)\s+(?:today\'?s?\s+|my\s+)?events\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+events\s+do\s+i\s+have\b', re.IGNORECASE),
                 re.compile(r'\b(?:calendar\s+for\s+today|events\s+for\s+today|today\'?s?\s+calendar|today\'?s?\s+events)\b', re.IGNORECASE),
-                # ── Calendar event creation (must be specific to win over CALCULATOR's 'add') ──
-                re.compile(r'\b(?:create|schedule|shedule|add)\s+(?:an?\s+)?(?:calendar\s+event|event|meeting|meet|appointment)\b', re.IGNORECASE),
+                # ── Next appointment / upcoming appointment ──
+                re.compile(r'\b(?:what(?:\'s|\s+is)\s+my\s+)?(?:next|upcoming)\s+(?:appointment|meeting|event|call|sync)\b', re.IGNORECASE),
+                # ── Weekly planning around meetings / holidays ──
+                re.compile(r'\b(?:plan\s+(?:my\s+)?week|weekly\s+plan(?:ning)?|plan\s+the\s+week)\b', re.IGNORECASE),
+                # ── Calendar event modification (reschedule, move, change time, rename) ──
+                re.compile(r'\b(?:change|update|reschedule|shift)\s+(?:the\s+)?time\s+of\s+(.+?)\s+to\s+(.+)', re.IGNORECASE),
+                re.compile(r'\b(?:move|reschedule|shift|postpone)\s+(.+?)\s+to\s+(?:(?:october|november|december|january|february|march|april|may|june|july|august|september|\d{4}-\d{2}-\d{2}|\d{1,2}(?:st|nd|rd|th)?|today|tomorrow)\b|\d{1,2}(?::\d{2})?\s*(?:am|pm))', re.IGNORECASE),
+                re.compile(r'\brename\s+(?:the\s+)?(?:meeting|event|appointment|call|sync|standup)?\s*(.+?)\s+to\s+(?:[a-zA-Z0-9_\s]*?(?:meeting|event|appointment|call|sync|standup)|.+)', re.IGNORECASE),
+                # ── Calendar event deletion / cancellation ──
+                re.compile(r'\b(?:cancel|delete|remove|drop)\s+(?:all\s+|the\s+|my\s+)?(?:meeting|meetings|event|events|appointment|appointments|call|calls|sync|syncs|standup|standups|huddle|huddles)(?:\s+(?:for|on|at|tomorrow|today|\d{4}-\d{2}-\d{2}))?\b', re.IGNORECASE),
+                re.compile(r'\b(?:cancel|delete|remove)\s+(?:all\s+occurrences\s+of\s+|this\s+occurrence\s+of\s+|the\s+|my\s+)?(.+?)\s+(?:on|for|at)\s+(?:\d{4}-\d{2}-\d{2}|\w+\s+\d{1,2}|today|tomorrow)\b', re.IGNORECASE),
+                # ── Date range queries (e.g. from X to Y) ──
+                re.compile(r'\b(?:show|get|list|view)\s+(?:my\s+)?events\s+from\s+.+?\s+to\s+.+', re.IGNORECASE),
+                # ── Holiday queries ──
+                re.compile(r'\b(?:how\s+many\s+)?(?:holidays|special\s+days|festivals)\b', re.IGNORECASE),
+                re.compile(r'\bwhen\s+is\s+(?:the\s+)?(?:holiday|festival|diwali|christmas|eid|thanksgiving|halloween|new\s+year)\b', re.IGNORECASE),
+                # ── Free Time / Busy Time / Open Slots ──
+                re.compile(r'\b(?:when\s+am\s+i\s+(?:free|busy)|am\s+i\s+(?:free|busy)|find\s+(?:a\s+)?free\s+slot|free\s+time|open\s+slots?|busy\s+(?:time|periods?)|suggest\s+(?:a\s+)?time)\b', re.IGNORECASE),
+                # ── Meeting Artifacts (Notes, Agendas, Checklists) ──
+                re.compile(r'\badd\s+(?:meeting\s+)?(?:notes?|agenda(?:\s+items?)?|checklists?)\s+(?:to|for)\b', re.IGNORECASE),
+                # ── Calendar Analytics & Schedule Utilization ──
+                re.compile(r'\b(?:calendar\s+analytics|schedule\s+utilization|meeting\s+statistics|calendar\s+stats)\b', re.IGNORECASE),
+                # ── Calendar Search ──
+                re.compile(r'\b(?:search|find)\s+(?:calendar|events|meetings)\b', re.IGNORECASE),
+                # ── ICS Export / Import & Calendar Synchronization ──
+                re.compile(r'\b(?:export\s+(?:my\s+)?calendar|import\s+(?:my\s+)?calendar|(?:export|import)\s+.+?\s+(?:to|from)\s+(?:an?\s+)?ics(?:\s+file)?|\.?ics\b|sync\s+(?:my\s+)?calendar)\b', re.IGNORECASE),
+                # ── Calendar Reminder Snooze ──
+                re.compile(r'\bsnooze\s+(?:calendar\s+|meeting\s+)?reminder\b', re.IGNORECASE),
+                # ── Event creation ──
+                re.compile(r'\b(?:schedule|shedule)\s+(?:an?\s+)?(.+?)\s+(?:on|for|at)\s+(?:\d{4}-\d{2}-\d{2}|\w+\s+\d{1,2}|\d{1,2}(?::\d{2})?\s*(?:am|pm)|today|tomorrow)\b', re.IGNORECASE),
+                re.compile(r'\b(?:create|schedule|shedule|add|book|set\s+up)\s+(?:an?\s+)?(?:calendar\s+event|event|meeting|meet|appointment)\b', re.IGNORECASE),
                 re.compile(r'\badd\s+(?:an?\s+)?(?:meeting|meet|event|appointment)\b', re.IGNORECASE),
                 re.compile(r'\badd\s+.+?\s+to\s+(?:my\s+)?calendar\b', re.IGNORECASE),
                 re.compile(r'\b(?:schedule|shedule)\s+(?:an?\s+)?(?:event|meeting|meet|appointment)(?:\s+for)?\b', re.IGNORECASE),
@@ -788,9 +850,9 @@ class UnifiedCommandRouter:
                 re.compile(r'\bwhat(?:\'s|\s+is)\s+my\s+height\b', re.IGNORECASE),
                 re.compile(r'\bhow\s+tall\s+am\s+i\b', re.IGNORECASE),
                 re.compile(r'\b(do\s+you\s+remember|can\s+you\s+remember|do\s+you\s+know|do\s+you\s+recall)\s+(?:what\s+)?my\b', re.IGNORECASE),
-                re.compile(r'\bwhat\s+(did\s+i|did\s+we|were\s+we|was\s+i|is\s+my|are\s+my|was\s+my)\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+(did\s+i|did\s+we|were\s+we|was\s+i|is\s+my|are\s+my|was\s+my)\b(?!\s+(?:task|project|website|background\s+task)\b)', re.IGNORECASE),
                 re.compile(r'\bwhat\s+(?:project\s+)?were\s+we\s+(?:working\s+on|doing|discussing|talking\s+about)\b', re.IGNORECASE),
-                re.compile(r'\bwhat(\'s|\s+is)\s+my\b', re.IGNORECASE),
+                re.compile(r'\bwhat(\'s|\s+is)\s+my\b(?!\s+(?:next\s+|upcoming\s+)?(?:appointment|meeting|event|calendar|schedule|task|tasks|project|website|background\s+task)\b)', re.IGNORECASE),
                 re.compile(r'\btell\s+me\s+my\b', re.IGNORECASE),
                 re.compile(r'\bwhich\s+([a-zA-Z\s]+)\s+do\s+i\s+(like|love|prefer)\b', re.IGNORECASE),
                 re.compile(r'\b(?:remember\s+my\b(?!\s+[a-zA-Z0-9_\s]+?\s+(?:is|was|=))|recall\s+my\b)', re.IGNORECASE),
@@ -799,7 +861,15 @@ class UnifiedCommandRouter:
                 re.compile(r'\bwhat\s+do\s+you\s+(know|remember)\s+about\s+me\b', re.IGNORECASE),
                 re.compile(r'\bshow\s+(?:my\s+)?memory\b', re.IGNORECASE),
                 re.compile(r'\b(?:project\s+secret|my\s+project\s+secret)\b', re.IGNORECASE),
-                re.compile(r'\b(?:what(?:\'s|\s+is)|tell\s+me|show\s+me|get)\b.*?\bmy\s+([a-zA-Z0-9_\s]+)', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\'s|\s+is)|tell\s+me|show\s+me|get)\b.*?\bmy\s+(?!(?:next\s+|upcoming\s+)?(?:appointment|meeting|event|calendar|schedule|task|tasks|project|website|background\s+task)\b)([a-zA-Z0-9_\s]+)', re.IGNORECASE),
+                re.compile(r'\b(?:which|what)\s+database\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+(?:backend|technology|tech\s+stack)\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+name\s+did\s+i\s+choose\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+did\s+i\s+(?:ask|tell)\s+you\s+to\s+remember\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+(?:response\s+style|style\s+of\s+response)\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+happened\s+when\s+you\s+tried\s+that\s+command\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+did\s+you\s+change\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+error\s+did\s+we\s+fix\b', re.IGNORECASE),
             ],
 
             # ── Priority 17: MEMORY STORE ──────────────────────────────────
@@ -807,11 +877,19 @@ class UnifiedCommandRouter:
                 re.compile(r'\bmy\s+([a-zA-Z0-9_\s]+?)\s+(?:is|was|=)\s+([^?]+)', re.IGNORECASE),
                 re.compile(r'\b(?:please\s+)?(?:remember|note)\s+(?:that\s+)?(.+)', re.IGNORECASE),
                 re.compile(r'\bi\s+(?:really\s+)?(?:like|love|enjoy|prefer)\s+(.+)', re.IGNORECASE),
+                re.compile(r'\bi\s+prefer\s+([a-zA-Z0-9_\s]+)\s+answers?\b', re.IGNORECASE),
+                re.compile(r'\b(?:the\s+)?database\s+(?:for\s+this\s+project\s+)?(?:is|was|=)\s+([a-zA-Z0-9_\s]+)', re.IGNORECASE),
+                re.compile(r'\b(?:the\s+)?(?:backend|backend\s+technology)\s+(?:for\s+this\s+project\s+)?(?:is|was|=)\s+([a-zA-Z0-9_\s]+)', re.IGNORECASE),
                 re.compile(r'\b(?:save|store|keep)\s+(?:my\s+)?(?!it\b|that\s+file\b|document\b|file\b|.*?\s+as\b)(.+)', re.IGNORECASE),
             ],
 
             # ── Priority 18: TASK MANAGEMENT ─────────────────────────────────
             Intent.TASK_MANAGEMENT: [
+                re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?status\s+of\s+(?:my\s+)?(?:task|project|website|code\s+generation))\b', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\'s|\s+is)\s+happening\s+with\s+(?:my\s+)?(?:project|task|website|code))\b', re.IGNORECASE),
+                re.compile(r'\b(?:how(?:\'s|\s+is)\s+(?:my\s+)?(?:project|task|website|build|code)\s+(?:coming\s+along|progressing|doing))\b', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?progress\s+on\s+(?:my\s+)?(?:project|task|website|code))\b', re.IGNORECASE),
+                re.compile(r'\b(?:cancel\s+(?:the\s+)?(?:project|website|generation)|stop\s+(?:the\s+)?(?:project|website|generation))\b', re.IGNORECASE),
                 re.compile(r'\b(?:queue|add|create|schedule)\s+(?:a\s+)?(?:background\s+)?task\b(?:\s*:\s*|\s+(?:to\s+|for\s+)?|\s+)(.+)', re.IGNORECASE),
                 re.compile(r'\b(?:run\s+(?:this\s+)?as\s+(?:a\s+)?background\s+task|put\s+this\s+in\s+(?:the\s+)?task\s+queue)\b(?:\s*:\s*|\s+(?:to\s+|for\s+)?|\s+)(.+)', re.IGNORECASE),
                 re.compile(r'\b(?:queue\s+task|run\s+(?:this\s+)?in\s+(?:the\s+)?background)\b(?:\s*:\s*|\s+(?:to\s+|for\s+)?|\s+)(.+)', re.IGNORECASE),
@@ -856,6 +934,7 @@ class UnifiedCommandRouter:
             # ── Priority 22: UNDO ────────────────────────────────────────────
             Intent.UNDO: [
                 re.compile(r'\b(?:undo|undo\s+last\s+action|undo\s+that|what\s+can\s+i\s+undo|show\s+undo\s+history|undo\s+history)\b', re.IGNORECASE),
+                re.compile(r'\bundo\s+(?:the\s+)?(?:last\s+)?(?:change|action|operation|step)\b', re.IGNORECASE),
                 re.compile(r'\bwhat(?:\'s|\s+is|\s+was)\s+(?:my\s+)?(?:last\s+)?(?:action\s+that\s+can\s+be\s+undone|undoable\s+action)\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+(?:actions?\s+)?can\s+(?:i|be)\s+undo(?:ne)?\b', re.IGNORECASE),
                 re.compile(r'\b(?:last\s+)?action\s+that\s+can\s+be\s+undone\b', re.IGNORECASE),
@@ -913,6 +992,10 @@ class UnifiedCommandRouter:
             # ── Priority: VISUAL RESPONSE SURFACE ────────────────────────────
             Intent.VISUAL_SURFACE: [
                 re.compile(r'^show\s+visual\s+response(?:\s+([a-zA-Z0-9_]+))?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?(?:can\s+you\s+)?(?:show|display|open)\s+(?:me\s+)?(?:the\s+)?(?:details|details\s+box|full\s+steps|technical\s+details|complete\s+explanation|full\s+explanation|explanation|all\s+(?:the\s+)?information|all\s+info|steps|information|info)(?:\s+(?:of|about)\s+(?:your\s+|the\s+)?(?:previous\s+)?(?:answer|response|explanation))?(?:\s+(?:again|back))?(?:\s+on\s+(?:the\s+)?screen)?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?(?:can\s+you\s+)?(?:show|display)\s+(?:what\s+you\s+(?:just\s+)?(?:explained|said|told\s+me))(?:\s+on\s+(?:the\s+)?screen)?\.?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?(?:put\s+(?:that|it|this)\s+on\s+(?:the\s+)?screen|expand\s+that(?:\s+information)?|i\s+didn\'?t\s+understand\s+everything[;,]?\s*show\s+me)\.?$', re.IGNORECASE),
+                re.compile(r'^(?:please\s+)?(?:show|display)\s+(?:me\s+)?(?:the\s+)?(?:details\s+(?:about|of|for)|information\s+(?:about|of|for))\s+(.+?)(?:\s+on\s+(?:the\s+)?screen)?\.?$', re.IGNORECASE),
                 re.compile(r'^(?:please\s+)?(?:show|display|put|bring|let\s+me\s+see)\s+(?:that|it|what\s+you\s+(?:just\s+)?(?:said|told\s+me)|the\s+result|the\s+previous\s+result)(?:\s+(?:again|back))?(?:\s+on\s+(?:the\s+)?screen)?\.?$', re.IGNORECASE),
                 re.compile(r'^(?:show|display)\s+that\s+again\.?$', re.IGNORECASE),
                 re.compile(r'^(?:can\s+you\s+)?(?:show|display)\s+(?:me\s+)?(?:that|it)(?:\s+(?:again|back))?\.?$', re.IGNORECASE),
@@ -928,6 +1011,14 @@ class UnifiedCommandRouter:
                 re.compile(r'^(?:please\s+)?count\s+(?:up\s+to\s+)?\d+(?:\s+numbers?)?\.?$', re.IGNORECASE),
                 re.compile(r'^(?:please\s+)?count\s+(?:me\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twenty)\s+numbers?\.?$', re.IGNORECASE),
                 re.compile(r'^(?:please\s+)?list\s+numbers?\s+(?:from|between)\s+\d+\s+(?:to|and|-)\s*\d+\.?$', re.IGNORECASE),
+                # Multilingual: Telugu
+                re.compile(r'.*(?:వివరాలు\s+చూపించు|వివరాలను\s+చూపించు|స్క్రీన్‌పై\s+చూపించు|పూర్తి\s+వివరణ\s+చూపించు|మొత్తం\s+సమాచారం\s+చూపించు|వివరాల\s+పెట్టె).*', re.IGNORECASE),
+                # Multilingual: Hindi
+                re.compile(r'.*(?:विवरण\s+दिखाएं|विवरण\s+दिखाओ|पूरी\s+जानकारी\s+दिखाओ|स्क्रीन\s+पर\s+दिखाओ|पूरा\s+विवरण\s+दिखाओ|डिटेल्स\s+दिखाओ).*', re.IGNORECASE),
+                # Multilingual: Tamil
+                re.compile(r'.*(?:விவரங்களை\s+காட்டு|முழு\s+விளக்கத்தை\s+காட்டு|திரையில்\s+காட்டு).*', re.IGNORECASE),
+                # Multilingual: Spanish
+                re.compile(r'.*(?:muestra\s+los\s+detalles|mostrar\s+detalles|abrir\s+la\s+caja\s+de\s+detalles|muestra\s+toda\s+la\s+informaci[oó]n|pon\s+eso\s+en\s+la\s+pantalla).*', re.IGNORECASE),
             ],
 
             # ── Priority 31: SYSTEM COMPATIBILITY ──────────────────────────────
@@ -1155,15 +1246,24 @@ class UnifiedCommandRouter:
         if not user_input or not user_input.strip():
             return Intent.GENERAL_CONVERSATION, {}
 
+        if user_id is None:
+            try:
+                from instance.config import settings
+                user_id = getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user()
+            except Exception:
+                pass
+
         cache_key = user_input.strip().lower()
-        # Contextual commands depend dynamically on live system/audio/reader state and must never be cached statically
-        is_contextual_verb = bool(re.match(r'^(?:(?:hey|ok|okay)\s+\w+\s+)?(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:stop|halt|hold on|pause|continue|resume)(?:\s+(?:that|it|this|speaking|reading|music))?[.!?]?$', cache_key))
+        # Contextual commands depend dynamically on live system/audio/reader/dialogue state and must never be cached statically
+        is_contextual_verb = bool(re.match(r'^(?:(?:hey|ok|okay)\s+\w+\s+)?(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:stop|halt|hold on|pause|continue|resume|repeat|say that again|what did you say|come again)(?:\s+(?:that|it|this|speaking|reading|music|last part))?[.!?]?$', cache_key)) or any(r in cache_key for r in ("repeat", "say that again", "what did you say", "come again"))
         is_email_active = False
-        try:
-            from modules.assistant_email.email_controller import is_active_email_session
-            is_email_active = is_active_email_session(user_id)
-        except Exception:
-            pass
+        import sys
+        if 'modules.assistant_email.email_controller' in sys.modules:
+            try:
+                from modules.assistant_email.email_controller import is_active_email_session
+                is_email_active = is_active_email_session(user_id)
+            except Exception:
+                pass
 
         if hasattr(self, '_route_cache') and not is_contextual_verb and not is_email_active and cache_key in self._route_cache:
             return self._route_cache[cache_key]
@@ -1189,23 +1289,36 @@ class UnifiedCommandRouter:
         # PENDING_EMAIL_CONFIRMATION, or EMAIL_RECIPIENT_RESOLUTION),
         # all spoken utterances belong strictly to the email subsystem. No regex,
         # document generator, reminder, or LLM router may hijack the message.
-        try:
-            from modules.assistant_email.email_controller import (
-                is_active_email_session, is_in_email_dictation, _resolve_user
-            )
-            cur_u = _resolve_user(user_id)
-            if is_in_email_dictation(cur_u):
-                return Intent.EMAIL, {
-                    "action": "email_dictation_turn",
-                    "raw_input": user_input
-                }
-            elif is_active_email_session(cur_u):
-                return Intent.EMAIL, {
-                    "action": "email_session_turn",
-                    "raw_input": user_input
-                }
-        except Exception:
-            pass
+        if is_email_active and 'modules.assistant_email.email_controller' in sys.modules:
+            try:
+                from modules.assistant_email.email_controller import (
+                    is_active_email_session, is_in_email_dictation, _resolve_user,
+                    get_email_session_state, STATE_EMAIL_AMBIGUOUS_OUTCOME
+                )
+                cur_u = _resolve_user(user_id)
+                if is_in_email_dictation(cur_u):
+                    return Intent.EMAIL, {
+                        "action": "email_dictation_turn",
+                        "raw_input": user_input
+                    }
+                elif is_active_email_session(cur_u):
+                    sess_state = get_email_session_state(cur_u)
+                    if sess_state in (STATE_EMAIL_AMBIGUOUS_OUTCOME, "WAITING_FOR_RECIPIENT_ADDRESS", "waiting_for_recipient_address"):
+                        from modules.assistant_email.email_controller import is_email_session_input
+                        if is_email_session_input(user_input, cur_u):
+                            return Intent.EMAIL, {
+                                "action": "email_session_turn",
+                                "raw_input": user_input
+                            }
+                        # Fall through to normal intent resolution so independent commands route independently
+                        # without discarding or modifying the preserved draft in _pending_email_sessions.
+                    else:
+                        return Intent.EMAIL, {
+                            "action": "email_session_turn",
+                            "raw_input": user_input
+                        }
+            except Exception:
+                pass
 
         # ── Step 1: Deterministic regex, strict priority order ─────────────
         # Fast path: Visual Surface requests ("show that again", "show the pairing code", "numbers in a box", etc.)
@@ -1217,7 +1330,7 @@ class UnifiedCommandRouter:
                 return _cache_and_return(Intent.VISUAL_SURFACE, params)
 
         # Fast path: Pure conversational greetings and small talk (bypasses heavy semantic analysis & RAG)
-        if is_conversational_general_query(clean_input) or is_conversational_general_query(input_lower):
+        if is_conversational_general_query(clean_input) or is_conversational_general_query(input_lower) or is_conversational_general_query(clean_no_polite):
             self.logger.debug(f"[FAST_CONVERSATION] '{user_input[:60]}' -> GENERAL_CONVERSATION")
             return _cache_and_return(Intent.GENERAL_CONVERSATION, {"raw_input": user_input})
 
@@ -1251,11 +1364,11 @@ class UnifiedCommandRouter:
             dialogue_mgr = None
             try:
                 from extensions.dialogue_state_manager import get_dialogue_manager
-                dialogue_mgr = get_dialogue_manager()
+                dialogue_mgr = get_dialogue_manager(user_id)
             except Exception:
                 pass
             ds = dialogue_mgr.current_state if dialogue_mgr else None
-            sem_cmd = semantic_understanding_engine.interpret(user_input, dialogue_state=ds)
+            sem_cmd = semantic_understanding_engine.interpret(user_input, dialogue_state=ds, user_id=user_id)
 
             if sem_cmd and sem_cmd.confidence >= 0.95 and sem_cmd.intent not in ("AUTO", "GENERAL_CONVERSATION", "CLARIFICATION"):
                 sem_params = dict(sem_cmd.parameters)
@@ -1266,6 +1379,17 @@ class UnifiedCommandRouter:
                         sem_params["action"] = "system_info"
                     else:
                         target_intent_name = "WINDOW_CONTEXT"
+                elif target_intent_name == "CONTENT_INSERTION":
+                    if any(k in user_input.lower() for k in [
+                        "program", "function", "script", "algorithm", "class", "code",
+                        "python", "javascript", "c++", "cpp", "java", "sql", "html", "css", "rust", "go",
+                        "fastapi", "flask", "project", "binary search", "subarray", "prime", "second-largest", "second largest"
+                    ]):
+                        target_intent_name = "CODE_GENERATION"
+                        sem_params["action"] = "generate_code"
+                    else:
+                        target_intent_name = "DEVICE_CONTROL"
+                        sem_params["action"] = "type_text"
                 if hasattr(Intent, target_intent_name):
                     resolved_enum = Intent[target_intent_name]
                     sem_params["raw_input"] = user_input
@@ -1301,27 +1425,27 @@ class UnifiedCommandRouter:
         ):
             try:
                 from extensions.dialogue_state_manager import get_dialogue_manager, _dialogue_managers
-                dm = get_dialogue_manager()
+                dm = get_dialogue_manager(user_id)
                 target_dm = dm if (dm and (dm.current_state.current_recommendation_list or dm.current_state.current_response)) else next((m for m in _dialogue_managers.values() if m.current_state.current_recommendation_list or m.current_state.current_response), None)
                 if target_dm:
                     return _cache_and_return(Intent.RECOMMENDATION, {"response": target_dm.get_full_list_response(), "action": "full_list", "raw_input": user_input})
             except Exception:
                 pass
 
-        if clean_no_polite in ("repeat last part", "repeat the last part", "repeat what you said", "repeat that", "repeat", "say that again"):
+        if clean_no_polite in ("repeat last part", "repeat the last part", "repeat what you said", "repeat that", "repeat", "say that again", "what did you say", "come again"):
             try:
-                from extensions.dialogue_state_manager import get_dialogue_manager, _dialogue_managers
-                dm = get_dialogue_manager()
-                target_dm = dm if (dm and (dm.current_state.current_spoken_segment or dm.current_state.current_response)) else next((m for m in _dialogue_managers.values() if m.current_state.current_spoken_segment or m.current_state.current_response), None)
-                if target_dm:
-                    return _cache_and_return(Intent.GENERAL_CONVERSATION, {"response": target_dm.get_repeat_last_part(), "raw_input": user_input})
-            except Exception:
-                pass
+                from extensions.dialogue_state_manager import get_dialogue_manager
+                eff_u = user_id or getattr(self, '_current_user_id', None) or "default"
+                dm = get_dialogue_manager(str(eff_u))
+                repeat_text = dm.get_repeat_last_part() if dm else "Nothing was recently spoken to repeat."
+                return _cache_and_return(Intent.GENERAL_CONVERSATION, {"response": repeat_text, "action": "repeat", "raw_input": user_input})
+            except Exception as e:
+                self.logger.warning(f"[ROUTER] Error resolving repeat request: {e}")
 
         if clean_no_polite in ("next item", "what's next", "whats next", "next recommendation", "next"):
             try:
                 from extensions.dialogue_state_manager import get_dialogue_manager, _dialogue_managers
-                dm = get_dialogue_manager()
+                dm = get_dialogue_manager(user_id)
                 target_dm = dm if (dm and dm.current_state.current_recommendation_list) else next((m for m in _dialogue_managers.values() if m.current_state.current_recommendation_list), None)
                 if target_dm:
                     return _cache_and_return(Intent.RECOMMENDATION, {"response": target_dm.get_next_item(), "action": "next_item", "raw_input": user_input})
@@ -1331,7 +1455,7 @@ class UnifiedCommandRouter:
         if clean_no_polite in ("first item", "what was the first item", "first recommendation", "first one", "the first one", "tell me the first one"):
             try:
                 from extensions.dialogue_state_manager import get_dialogue_manager, _dialogue_managers
-                dm = get_dialogue_manager()
+                dm = get_dialogue_manager(user_id)
                 target_dm = dm if (dm and dm.current_state.current_recommendation_list) else next((m for m in _dialogue_managers.values() if m.current_state.current_recommendation_list), None)
                 if target_dm:
                     return _cache_and_return(Intent.RECOMMENDATION, {"response": target_dm.get_first_item(), "action": "first_item", "raw_input": user_input})
@@ -1341,7 +1465,7 @@ class UnifiedCommandRouter:
         if clean_no_polite in ("last item", "what was the last item", "last recommendation", "last one", "the last one", "tell me the last one"):
             try:
                 from extensions.dialogue_state_manager import get_dialogue_manager, _dialogue_managers
-                dm = get_dialogue_manager()
+                dm = get_dialogue_manager(user_id)
                 target_dm = dm if (dm and dm.current_state.current_recommendation_list) else next((m for m in _dialogue_managers.values() if m.current_state.current_recommendation_list), None)
                 if target_dm:
                     return _cache_and_return(Intent.RECOMMENDATION, {"response": target_dm.get_last_item(), "action": "last_item", "raw_input": user_input})
@@ -1351,7 +1475,7 @@ class UnifiedCommandRouter:
         if clean_no_polite in ("previous item", "what was the previous item", "previous recommendation", "previous one", "the previous one", "previous"):
             try:
                 from extensions.dialogue_state_manager import get_dialogue_manager, _dialogue_managers
-                dm = get_dialogue_manager()
+                dm = get_dialogue_manager(user_id)
                 target_dm = dm if (dm and dm.current_state.current_recommendation_list) else next((m for m in _dialogue_managers.values() if m.current_state.current_recommendation_list), None)
                 if target_dm:
                     return _cache_and_return(Intent.RECOMMENDATION, {"response": target_dm.get_previous_item(), "action": "previous_item", "raw_input": user_input})
@@ -1452,7 +1576,7 @@ class UnifiedCommandRouter:
             # 0. Check dialogue continuation state if assistant was speaking or has more to say
             try:
                 from extensions.dialogue_state_manager import get_dialogue_manager
-                dm = get_dialogue_manager()
+                dm = get_dialogue_manager(user_id)
                 if dm and (dm.current_state.interrupted_speech_text or dm.current_state.remaining_response_segments or dm.current_state.current_recommendation_list):
                     cont_resp = dm.get_continue_response()
                     if cont_resp:
@@ -1498,13 +1622,31 @@ class UnifiedCommandRouter:
                     "show the ip", "display the ip", "put that on screen", "let me see it", "display what you just said",
                     "show visual response",
                     "numbers in a box", "digital numbers in a box", "in a box", "numbers 1 to 100",
-                    "active window", "foreground window", "current window",
                     "queue a task", "queue task", "create a background task", "create a task",
                     "add a task", "schedule a background task", "schedule a task",
                     "run this as a background task", "run in the background", "run this in the background",
                     "task queue", "put this in the task queue", "cancel task", "stop task",
                     "task status", "background task", "list my tasks", "list my task", "show my tasks", "what tasks",
                     "remind me", "remember to", "schedule a reminder", "create a reminder", "set a reminder"
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
+                    continue
+                # Code and script writing commands must NOT be hijacked by DEVICE_CONTROL system status patterns
+                if any(any(k in t for k in [
+                    "write a script", "write a powershell", "write a python", "write a bash", "write an sql",
+                    "create a script", "create a function", "write a program", "powershell script", "python script",
+                    "bash script", "write code", "generate code"
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
+                    continue
+                # Active window queries belong to WINDOW_CONTEXT unless explicitly typing/writing text
+                if not any(t.startswith(("type ", "write ")) for t in [clean_input, clean_no_polite, input_lower]):
+                    if any(any(k in t for k in ["active window", "foreground window", "current window"]) for t in [clean_input, clean_no_polite, input_lower]):
+                        continue
+            # Code/script writing and generation requests must not be hijacked by FILE_OPERATIONS
+            if intent == Intent.FILE_OPERATIONS:
+                if any(any(k in t for k in [
+                    "write a script", "write a powershell", "write a python", "write a bash", "write an sql",
+                    "create a script", "create a function", "write a program", "powershell script", "python script",
+                    "bash script", "write code", "generate code"
                 ]) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
             # Preference and learned behavioral rules must not be routed to NOTES
@@ -1535,6 +1677,14 @@ class UnifiedCommandRouter:
                         continue
             # Window management and background task queries must not be routed to OPEN_APPLICATION
             if intent == Intent.OPEN_APPLICATION:
+                # Code generation / programming / algorithm requests must NOT be routed to OPEN_APPLICATION
+                if any(any(k in t for k in [
+                    "write a ", "write an ", "create a python", "create a function", "create a script",
+                    "c++", "cpp", "binary search", "bubble sort", "quick sort", "merge sort",
+                    "algorithm", "function to", "program to", "script to"
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
+                    if not any(k in clean_input for k in ["open ", "launch ", "start ", "switch to "]):
+                        continue
                 # Email commands ("mail my professor", "send email", "check inbox") must NOT be routed to OPEN_APPLICATION
                 if any(re.search(r'\b(?:(?:send|write|prepare|compose|draft)\s+(?:an?\s+)?(?:email|mail)|mail\s+(?:to\s+|for\s+)?(?:my\s+)?[a-z]|email\s+(?:to\s+|for\s+)?(?:my\s+)?[a-z]|check\s+(?:my\s+)?(?:inbox|email|mail))\b', t, re.I) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
@@ -1626,6 +1776,12 @@ class UnifiedCommandRouter:
                     continue
             # General knowledge queries about email history must NOT route to personal EMAIL intent
             if intent == Intent.EMAIL:
+                # Coding / scripting / algorithm requests mentioning email addresses or email validation must NOT be routed to EMAIL
+                if any(any(k in t for k in [
+                    "function", "script", "program", "code", "validate", "validates", "validation", "regex",
+                    "python", "javascript", "js", "typescript", "ts", "java", "c++", "cpp", "c#", "algorithm"
+                ]) for t in [clean_input, clean_no_polite, input_lower]):
+                    continue
                 if any(k in input_lower for k in [
                     "ever sent", "history of email", "invented email", "in the world", "in history",
                     "who sent the first email", "when was email invented", "who invented",
@@ -1884,17 +2040,56 @@ class UnifiedCommandRouter:
                 decision = "DEVICE_CONTROL"
                 reason = "Hardware specification query routed directly to DEVICE_CONTROL"
 
-        # 6. Disambiguate REMINDER vs CALENDAR_EVENT
+        # 6. Disambiguate REMINDER vs CALENDAR_EVENT vs FILE_OPERATIONS vs MEMORY_QUERY
         has_remind_word = bool(re.search(r'\b(?:remind\s+me|reminder|set\s+(?:a\s+)?reminder|alert\s+me)\b', t))
-        has_calendar_schedule = bool(re.search(r'\b(?:schedule|shedule|create|add)\s+(?:an?\s+)?(?:meeting|meet|calendar\s+event|event|appointment)\b', t))
-        if has_remind_word and final_intent == Intent.DAILY_BRIEFING:
+        has_calendar_schedule = (
+            bool(re.search(r'\b(?:schedule|shedule|create|add|book|set\s+up)\s+(?:an?\s+)?(?:another\s+)?(?:meeting|meet|calendar\s+event|event|appointment|project\s+review)\b', t))
+            or bool(re.search(r'\b(?:schedule|shedule)\s+(?:an?\s+)?(.+?)\s+(?:on|for|at)\s+(?:\d{4}-\d{2}-\d{2}|\w+\s+\d{1,2}|\d{1,2}(?::\d{2})?\s*(?:am|pm)|today|tomorrow|the\s+same\s+time)\b', t))
+        )
+        is_calendar_move = bool(re.search(r'\b(?:move|reschedule|shift|postpone)\s+(.+?)\s+to\s+(?:(?:october|november|december|january|february|march|april|may|june|july|august|september|\d{4}-\d{2}-\d{2}|\d{1,2}(?:st|nd|rd|th)?|today|tomorrow)\b|\d{1,2}(?::\d{2})?\s*(?:am|pm))', t))
+        is_calendar_time_chg = bool(re.search(r'\b(?:change|update|reschedule|shift)\s+(?:the\s+)?time\s+(?:of|for)\s+(.+?)\s+to\s+(.+)', t))
+        is_calendar_rename = bool(re.search(r'\b(?:rename|change\s+the\s+name\s+of)\s+(?:the\s+)?(.+?)\s+to\s+(.+)', t))
+        is_calendar_cancel = (
+            bool(re.search(r'\b(?:cancel|delete|remove|drop)\s+(?:all\s+|the\s+|my\s+)?(?:meeting|meetings|event|events|appointment|appointments|sync|standup|huddle|hurdle)(?:\s+(?:for|on|at|tomorrow|today|\d{4}-\d{2}-\d{2}))?\b', t))
+            or bool(re.search(r'\b(?:cancel|delete|remove|drop)\s+(?:the\s+|my\s+)?(?:daily\s+|weekly\s+)?(?:huddle|hurdle)\b', t))
+        )
+        is_calendar_next = bool(re.search(r'\b(?:(?:what(?:\'s|\s+is)|when\s+is)\s+(?:my\s+)?(?:next|upcoming)\s+(?:appointment|meeting|event)|next\s+(?:appointment|meeting|event))\b', t))
+        is_calendar_plan = bool(re.search(r'\b(?:plan\s+(?:my\s+)?(?:week|schedule|days?)|weekly\s+plan(?:ning)?)\b', t))
+        is_calendar_view = bool(
+            re.search(r'\b(?:show|list|view|display|check|get|see|read|tell\s+me)\b.+?\b(?:schedule|calendar|agenda|events?|appointments?|meetings?)\b', t)
+            or re.search(r'\b(?:what(?:\'s|\s+is)\s+(?:on|in)\s+(?:my\s+)?(?:schedule|calendar|agenda))\b', t)
+            or re.search(r'\bwhat\s+(?:do\s+i|do\s+we)\s+have\s+scheduled\b', t)
+            or re.search(r'\b(?:all\s+)?upcoming\s+(?:events?|meetings?|appointments?|schedule)\b', t)
+            or re.search(r'\b(?:show\s+(?:all\s+)?(?:my\s+)?upcoming\s+events?)\b', t)
+            or re.search(r'\b(?:my\s+)?schedule\s+calendar\b', t)
+        )
+
+        is_calendar_conflict_res = bool(re.search(
+            r'\b(?:keep\s+both(?:\s+events)?|schedule\s+anyway|proceed\s+anyway|move\s+(?:it|the\s+new\s+meeting|the\s+new\s+event)?\s+to\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|move\s+to\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|move\s+to\s+another\s+time|cancel\s+(?:the\s+)?(?:new\s+)?request|reschedule\s+(?:the\s+)?existing\s+event)\b', t
+        ))
+        is_calendar_duration = bool(re.search(
+            r'\b(?:make|extend|shorten)\s+(?:the\s+)?(?:meeting|event|appointment|it)\s+\d+\s*(?:minutes?|mins?|hours?|hrs?)\s*(?:longer|shorter)?\b', t
+        ))
+        is_calendar_relative_shift = bool(re.search(
+            r'\b(?:actually,?\s*)?(?:make\s+it|shift\s+it\s+to|change\s+(?:it|the\s+date)\s+to)\s+(?:today|tomorrow|friday|monday|tuesday|wednesday|thursday|saturday|sunday|next\s+week|\w+\s+\d{1,2})\b', t
+        ))
+        is_calendar_holiday = bool(re.search(
+            r'\b(?:public\s+holiday|public\s+holidays|when\s+is\s+diwali|diwali\s+this\s+year|next\s+public\s+holiday|state\'?s?\s+holidays|holidays?\s+in\s+[a-zA-Z]+|holidays?\s+coming\s+up|how\s+many\s+public\s+holidays)\b', t
+        ))
+        is_calendar_overlap_check = bool(re.search(
+            r'\b(?:do\s+i\s+have\s+anything\s+during\s+that\s+time|is\s+there\s+(?:a\s+)?conflict|any\s+conflicts?)\b', t
+        ))
+
+        is_event_reminder = bool(re.search(r'\b(?:with\s+(?:a\s+)?reminder|remind(?:er)?\s+\d+\s*(?:minutes?|mins?|hours?)\s+before)\b', t))
+        if has_remind_word and final_intent == Intent.DAILY_BRIEFING and not (has_calendar_schedule and is_event_reminder):
             final_intent = Intent.REMINDERS
             decision = "REMINDERS"
             reason = "Explicit reminder trigger takes precedence over generic schedule"
-        elif has_calendar_schedule and not has_remind_word and final_intent == Intent.REMINDERS:
+        elif (has_calendar_schedule or is_calendar_view or is_calendar_move or is_calendar_time_chg or is_calendar_rename or is_calendar_cancel or is_calendar_next or is_calendar_plan or is_calendar_conflict_res or is_calendar_duration or is_calendar_relative_shift or is_calendar_holiday or is_calendar_overlap_check) and (not has_remind_word or is_event_reminder):
             final_intent = Intent.DAILY_BRIEFING
+            final_params = {"action": "calendar_query", "raw_input": user_input}
             decision = "DAILY_BRIEFING"
-            reason = "Meeting scheduling without reminder keyword routes to calendar"
+            reason = "Calendar operation routed to DAILY_BRIEFING"
 
         self.logger.info(
             f"[INTENT_ARBITRATION] candidates={candidates} "
@@ -1911,8 +2106,12 @@ class UnifiedCommandRouter:
         try:
             if intent == Intent.VISUAL_SURFACE:
                 text_low = user_input.lower().strip()
+                m_sub = re.search(r'(?:details\s+(?:about|of|for)|information\s+(?:about|of|for))\s+(.+)', text_low)
                 m_spec = re.search(r'show\s+visual\s+response\s+([a-zA-Z0-9_]+)', text_low)
-                if m_spec:
+                if m_sub:
+                    params["target_type"] = "SUBJECT_DETAILS"
+                    params["target_subject"] = m_sub.group(1).strip()
+                elif m_spec:
                     params["target_type"] = m_spec.group(1).upper()
                 elif "box" in text_low and "number" in text_low:
                     params["target_type"] = "NUMBERS_BOX"
@@ -1920,10 +2119,16 @@ class UnifiedCommandRouter:
                     params["target_type"] = "NUMBERS"
                 elif any(w in text_low for w in ["again", "back", "previous result", "what you just"]):
                     params["target_type"] = "AGAIN"
+                elif any(w in text_low for w in ["detail", "details", "details box", "information", "explanation", "steps", "expand", "understand"]):
+                    params["target_type"] = "DETAILS"
+                elif any(w in text_low for w in ["వివరాలు", "विवरण", "விவரங்களை", "detalles"]):
+                    params["target_type"] = "DETAILS"
                 else:
                     m_s = re.search(r'\b(pairing\s+code|code|ip\s+address|ip|address|url|link|file\s+path|file|path|list|devices|table|status|result)\b', text_low)
                     if m_s:
                         params["target_type"] = m_s.group(1).replace(" ", "_").upper()
+                    else:
+                        params["target_type"] = "DETAILS"
                 params["action"] = "show_visual_response"
                 return params
 
@@ -2146,7 +2351,7 @@ class UnifiedCommandRouter:
                     clean_target = re.sub(r'\b(?:the\s+)?process\b', '', target, flags=re.IGNORECASE).strip()
                     params["target"] = clean_target or target
                 else:
-                    params["action"] = "open" if action in ["open", "launch", "start", "run", "go to", "visit", "browse to", "navigate to"] or not action else "close"
+                    params["action"] = "open" if action in ["open", "launch", "start", "run", "go to", "visit", "browse to", "navigate to", "show", "display"] or not action else "close"
                     
                     # Detect web navigation / website request
                     raw_low = user_input.lower()
@@ -2613,7 +2818,7 @@ class UnifiedCommandRouter:
                     params["action"] = "desktop_stats"
 
                 # ── Type text ──────────────────────────────────────────────────
-                elif re.search(r'\b(?:type|write)\s+(?!(?:an?\s+)?(?:note|code|python|script|report|document|email|mail)\b)(.+)', text_low):
+                elif re.search(r'\b(?:type|write)\s+(?!(?:to\b|(?:an?\s+)?(?:note|code|python|script|report|document|email|mail|record|reminder)\b))(.+)', text_low):
                     # Guard: verify this is not a contextual artifact insertion request
                     is_artifact_insertion = False
                     try:
@@ -2624,7 +2829,7 @@ class UnifiedCommandRouter:
                     except Exception:
                         pass
                     if not is_artifact_insertion:
-                        m_type = re.search(r'\b(?:type|write)\s+(?!(?:an?\s+)?(?:note|code|python|script|report|document|email|mail)\b)(.+)', user_input, re.IGNORECASE)
+                        m_type = re.search(r'\b(?:type|write)\s+(?!(?:to\b|(?:an?\s+)?(?:note|code|python|script|report|document|email|mail|record|reminder)\b))(.+)', user_input, re.IGNORECASE)
                         if not m_type:
                             m_type = re.search(r'\bput\s+(?!(?:an?\s+)?(?:file|folder|document)\b)(.+?)\s+(?:in|into|inside|there)(?:\s+it)?[.!?]?$', user_input, re.IGNORECASE)
                         text_to_type = m_type.group(1).strip(' "\'') if m_type else ""
@@ -2938,10 +3143,23 @@ class UnifiedCommandRouter:
                 params["content"] = user_input
             elif intent == Intent.CODE_GENERATION:
                 text_low = user_input.lower()
-                if any(k in text_low for k in ["validate", "check syntax", "syntax error", "does this code have syntax"]):
+                if any(re.search(p, text_low) for p in [
+                    r'\b(?:validate|check)\s+(?:the\s+)?syntax\b',
+                    r'\b(?:validate|check)\s+(?:this\s+)?code\b',
+                    r'\bsyntax\s+errors?\b',
+                    r'\bdoes\s+this\s+code\s+have\s+syntax\b'
+                ]) and not any(k in text_low for k in ["write", "create", "generate", "build", "implement"]):
                     params["action"] = "validate_syntax"
                 elif any(k in text_low for k in ["explain structure", "structure of", "what classes and functions"]):
                     params["action"] = "explain_structure"
+                elif any(k in text_low for k in ["diagnose", "traceback", "classify error", "parse traceback"]):
+                    params["action"] = "diagnose_error"
+                elif any(k in text_low for k in ["refactor", "optimize", "clean up", "improve structure", "modernize"]):
+                    params["action"] = "refactor_code"
+                elif any(k in text_low for k in ["fix", "debug", "repair", "correct"]) and any(c in text_low for c in ["code", "function", "script", "program", "error", "bug", "this"]):
+                    params["action"] = "fix_code"
+                elif any(k in text_low for k in ["explain", "analyze"]) and "code" in text_low:
+                    params["action"] = "explain_code"
                 else:
                     params["action"] = "generate_code"
             elif intent == Intent.DAILY_BRIEFING:
@@ -2959,9 +3177,14 @@ class UnifiedCommandRouter:
                     # not the daily-briefing summary handler.
                     _calendar_keywords = [
                         "calendar", "event", "events", "meeting", "appointment",
-                        "schedule", "create", "add",
+                        "schedule", "create", "add", "move", "rename", "reschedule",
+                        "cancel", "next appointment", "upcoming appointment", "next meeting",
+                        "plan my week", "weekly plan", "holiday", "holidays", "festival",
+                        "time of", "change the time", "update the time",
+                        "free", "busy", "slot", "slots", "agenda", "note", "notes",
+                        "analytics", "utilization", "ics", "sync", "snooze", "huddle", "standup"
                     ]
-                    _creation_verbs = ("create", "schedule", "add", "put", "book", "set up")
+                    _creation_verbs = ("create", "schedule", "add", "put", "book", "set up", "move", "rename", "reschedule", "cancel")
                     _is_creation = any(text_low.startswith(v) or (" " + v + " ") in text_low for v in _creation_verbs)
                     if any(k in text_low for k in _calendar_keywords) or _is_creation:
                         params["action"] = "calendar_query"
@@ -2972,18 +3195,27 @@ class UnifiedCommandRouter:
                 extracted_loc = _default_weather_engine.extract_location(user_input)
                 params["location"] = extracted_loc if extracted_loc else "local"
             elif intent == Intent.EMAIL:
-                # Extract action (send, read, check, reply)
-                text = user_input.lower()
-                if "send" in text:
-                    params["action"] = "send"
-                elif "read" in text:
-                    params["action"] = "read"
-                elif "check" in text:
-                    params["action"] = "check"
-                elif "reply" in text:
-                    params["action"] = "reply"
-                else:
-                    params["action"] = "default"
+                # Extract action and structured email parameters
+                try:
+                    from modules.assistant_email.email_controller import _parse_email_intent
+                    parsed_em = _parse_email_intent(user_input)
+                    params["action"] = parsed_em.get("action", "default")
+                    params["recipient"] = parsed_em.get("recipient_raw")
+                    params["topic"] = parsed_em.get("topic") or parsed_em.get("body_raw")
+                    params["send_versus_draft"] = parsed_em.get("send_versus_draft", "send")
+                    params["is_dictation"] = parsed_em.get("is_dictation", False)
+                except Exception:
+                    text = user_input.lower()
+                    if "send" in text:
+                        params["action"] = "send"
+                    elif "read" in text:
+                        params["action"] = "read"
+                    elif "check" in text:
+                        params["action"] = "check"
+                    elif "reply" in text:
+                        params["action"] = "reply"
+                    else:
+                        params["action"] = "default"
             elif intent == Intent.TASK_MANAGEMENT:
                 text_low = user_input.lower()
                 m_q = re.search(
@@ -3004,13 +3236,13 @@ class UnifiedCommandRouter:
                 elif m_q2:
                     params["action"] = "queue_task"
                     params["goal"] = m_q2.group(1).strip()
-                elif ("cancel" in text_low or "stop" in text_low) and ("task" in text_low or text_low.strip() in ("cancel it", "stop it", "cancel that", "abort it")):
+                elif any(k in text_low for k in ["cancel", "stop", "abort"]) and any(k in text_low for k in ["task", "project", "website", "generation", "build", "it", "that"]):
                     params["action"] = "cancel_task"
-                    m_c = re.search(r'(?:cancel|stop)\s+(?:(?:the|my)\s+)?task\s+([a-zA-Z0-9_\-]+)', text_low)
-                    params["task_id"] = m_c.group(1) if m_c else ""
-                elif any(k in text_low for k in ["status of task", "task status", "show task", "is it still running", "is it running", "its status", "did it finish"]):
+                    m_c = re.search(r'(?:cancel|stop|abort)\s+(?:(?:the|my)\s+)?(?:task|project|website|generation)?\s*([a-zA-Z0-9_\-]+)?', text_low)
+                    params["task_id"] = m_c.group(1) if (m_c and m_c.group(1)) else ""
+                elif any(k in text_low for k in ["status", "happening with", "progress on", "coming along", "progress", "is it still running", "is it running", "its status", "did it finish", "show task"]):
                     params["action"] = "task_status"
-                    m_s = re.search(r'(?:status\s+of\s+(?:(?:the|my)\s+)?task|task\s+status|show\s+task)\s+([a-zA-Z0-9_\-]+)', text_low)
+                    m_s = re.search(r'(?:status\s+of\s+(?:(?:the|my)\s+)?(?:task|project|website)?|task\s+status|show\s+task)\s+([a-zA-Z0-9_\-]+)', text_low)
                     params["task_id"] = m_s.group(1) if m_s else ""
                 else:
                     params["action"] = "list_tasks"
@@ -3048,7 +3280,11 @@ class UnifiedCommandRouter:
             elif intent == Intent.VISUAL_SURFACE:
                 text_low = user_input.lower().strip()
                 params["action"] = "show_visual_response"
-                if "box" in text_low and "number" in text_low:
+                m_sub = re.search(r'(?:details\s+(?:about|of|for)|information\s+(?:about|of|for))\s+(.+)', text_low)
+                if m_sub:
+                    params["target_type"] = "SUBJECT_DETAILS"
+                    params["target_subject"] = m_sub.group(1).strip()
+                elif "box" in text_low and "number" in text_low:
                     params["target_type"] = "NUMBERS_BOX"
                 elif "number" in text_low:
                     params["target_type"] = "NUMBERS"
@@ -3066,6 +3302,12 @@ class UnifiedCommandRouter:
                     params["target_type"] = "DEVICE_INFO"
                 elif any(k in text_low for k in ["again", "back", "previous", "what you just"]):
                     params["target_type"] = "AGAIN"
+                elif any(k in text_low for k in ["detail", "details", "details box", "information", "explanation", "steps", "expand", "understand"]):
+                    params["target_type"] = "DETAILS"
+                elif any(k in text_low for k in ["వివరాలు", "विवरण", "விவரங்களை", "detalles"]):
+                    params["target_type"] = "DETAILS"
+                else:
+                    params["target_type"] = "DETAILS"
             elif intent == Intent.TIME_QUERY:
                 text_low = user_input.lower().strip()
                 if "alarm" in text_low or "wake me up" in text_low:
@@ -3162,6 +3404,9 @@ class UnifiedCommandRouter:
         (Intent.GENERAL_CONVERSATION, {}) so the existing RAG/LLM conversation
         handler deals with it naturally.
         """
+        if is_conversational_general_query(user_input):
+            return Intent.GENERAL_CONVERSATION, {}
+
         engine = self._get_llm_engine()
         if engine is None:
             return Intent.GENERAL_CONVERSATION, {}
@@ -3450,6 +3695,15 @@ class UnifiedCommandRouter:
                 "send": "send", "read": "read", "check": "check", "reply": "reply",
             }
             params["action"] = email_map.get(action_raw, "default")
+            try:
+                from modules.assistant_email.email_controller import _parse_email_intent
+                parsed_em = _parse_email_intent(user_input)
+                params["recipient"] = parsed_em.get("recipient_raw")
+                params["topic"] = parsed_em.get("topic") or parsed_em.get("body_raw")
+                params["send_versus_draft"] = parsed_em.get("send_versus_draft", "send")
+                params["is_dictation"] = parsed_em.get("is_dictation", False)
+            except Exception:
+                pass
 
         # ── All other intents: no extra params beyond raw_input ─────────────
         # TIME_QUERY, DATE_QUERY, CALCULATOR, CODE_GENERATION, TRANSLATION,
@@ -4609,7 +4863,7 @@ class UnifiedCommandRouter:
                         m_d = re.search(r'(\d{4}-\d{2}-\d{2})', user_input)
                         date_str = m_d.group(1) if m_d else None
                         if "tomorrow" in user_input.lower() and not date_str:
-                            from datetime import date, timedelta
+                            from datetime import date
                             date_str = str(date.today() + timedelta(days=1))
                         f_res = build_flight_search_url(origin=origin, destination=dest, departure_date=date_str)
                         result["status"] = "success" if f_res.get("success") else "error"
@@ -6376,76 +6630,278 @@ class UnifiedCommandRouter:
             # 11. CODE GENERATION
             elif intent == Intent.CODE_GENERATION:
                 try:
+                    effective_uid = user_id or 1
                     text_low = user_input.lower()
-                    if any(k in text_low for k in ["validate", "check syntax", "syntax error", "does this code have syntax"]):
+                    from modules.code_generator.utils import detect_language
+                    target_lang = detect_language(user_input)
+
+                    req_action = params.get("action", "")
+
+                    # Sub-workflow A: Syntax Validation
+                    if req_action == "validate_syntax" or (not req_action and any(k in text_low for k in ["validate syntax", "check syntax", "syntax error", "does this code have syntax"])):
                         from modules.code_generator.utils import validate_code_syntax
                         code_to_check = ""
                         if ":" in user_input:
                             code_to_check = user_input.split(":", 1)[1].strip()
                         elif "```" in user_input:
-                            m_c = re.search(r'```(?:python)?(.*?)```', user_input, re.DOTALL)
-                            if m_c: code_to_check = m_c.group(1).strip()
-                        
+                            m_c = re.search(r'```(?:\w+)?(.*?)```', user_input, re.DOTALL)
+                            if m_c:
+                                code_to_check = m_c.group(1).strip()
+
+                        # Spoken or raw code pasted directly without colon/fence
                         if not code_to_check:
-                            from modules.system_controller.system_controller import get_clipboard_text
-                            cb = get_clipboard_text()
-                            code_to_check = cb.get("text", "")
+                            raw_lines = user_input.strip().splitlines()
+                            if len(raw_lines) > 1:
+                                code_to_check = "\n".join(raw_lines[1:]).strip()
 
                         if not code_to_check:
-                            code_to_check = "def example():\n    pass"
+                            # Honest refusal when no code was supplied (do not substitute dummy example)
+                            result["status"] = "error"
+                            result["response"] = "Please supply or paste the code you would like me to validate."
+                            result["handled"] = True
+                        else:
+                            val_res = validate_code_syntax(code_to_check, language=target_lang)
+                            result["status"] = "success" if val_res.get("valid") else "error"
+                            result["response"] = val_res.get("message", "Code syntax checked.")
+                            result["code"] = code_to_check
+                            result["language"] = target_lang
+                            result.update(val_res)
+                            result["handled"] = True
 
-                        val_res = validate_code_syntax(code_to_check, language="python")
-                        result["status"] = "success" if val_res.get("valid") else "error"
-                        result["response"] = val_res.get("message", "Code syntax validated.")
-                        result.update(val_res)
-                        result["handled"] = True
-
-                    elif any(k in text_low for k in ["diagnose", "traceback", "classify error", "parse traceback"]):
-                        from modules.code_generator.utils import classify_execution_error, parse_traceback
+                    # Sub-workflow B: Traceback Diagnosis
+                    elif req_action == "diagnose_error" or (not req_action and any(k in text_low for k in ["diagnose", "traceback", "classify error", "parse traceback"])):
+                        from modules.code_generator.utils import classify_execution_error
                         tb_text = ""
                         if ":" in user_input:
                             tb_text = user_input.split(":", 1)[1].strip()
                         elif "```" in user_input:
-                            m_c = re.search(r'```(?:python)?(.*?)```', user_input, re.DOTALL)
-                            if m_c: tb_text = m_c.group(1).strip()
+                            m_c = re.search(r'```(?:\w+)?(.*?)```', user_input, re.DOTALL)
+                            if m_c:
+                                tb_text = m_c.group(1).strip()
                         if not tb_text:
                             tb_text = user_input
 
                         diag_res = classify_execution_error(tb_text)
-                        result["status"] = "success" if diag_res.get("success") else "error"
-                        result["response"] = diag_res.get("message", "Traceback diagnosed.")
+                        result["status"] = "success"
+                        result["response"] = diag_res.get("message", f"Diagnosed {diag_res.get('category')}: {diag_res.get('suggestion')}")
                         result.update(diag_res)
                         result["handled"] = True
 
-                    elif any(k in text_low for k in ["explain structure", "structure of", "what classes and functions", "explain code", "explain this code"]):
+                    # Sub-workflow C: Static Structure Inspection
+                    elif req_action == "explain_structure" or (not req_action and any(k in text_low for k in ["explain structure", "structure of", "what classes and functions"])):
                         from modules.code_generator.utils import explain_code_structure
                         code_to_explain = ""
                         if ":" in user_input:
                             code_to_explain = user_input.split(":", 1)[1].strip()
                         elif "```" in user_input:
-                            m_c = re.search(r'```(?:python)?(.*?)```', user_input, re.DOTALL)
-                            if m_c: code_to_explain = m_c.group(1).strip()
-                            
-                        if not code_to_explain:
-                            from modules.system_controller.system_controller import get_clipboard_text
-                            cb = get_clipboard_text()
-                            code_to_explain = cb.get("text", "")
+                            m_c = re.search(r'```(?:\w+)?(.*?)```', user_input, re.DOTALL)
+                            if m_c:
+                                code_to_explain = m_c.group(1).strip()
 
                         if not code_to_explain:
-                            code_to_explain = "class Example:\n    def run(self):\n        pass"
+                            result["status"] = "error"
+                            result["response"] = "Please provide the code whose structure you would like to analyze."
+                            result["handled"] = True
+                        else:
+                            exp_res = explain_code_structure(code_to_explain, language=target_lang)
+                            result["status"] = "success" if exp_res.get("success") else "error"
+                            result["response"] = exp_res.get("message", "Code structure analyzed.")
+                            result["code"] = code_to_explain
+                            result.update(exp_res)
+                            result["handled"] = True
 
-                        exp_res = explain_code_structure(code_to_explain, language="python")
-                        result["status"] = "success" if exp_res.get("success") else "error"
-                        result["response"] = exp_res.get("message", "Code structure analyzed.")
-                        result.update(exp_res)
-                        result["handled"] = True
+                    # Sub-workflow D: Code Repair / Bug Fix / Refactor
+                    elif req_action in ("fix_code", "refactor_code") or (not req_action and any(k in text_low for k in ["fix", "debug", "repair", "correct", "refactor", "optimize"]) and any(c in text_low for c in ["code", "function", "script", "program", "error", "bug", "this", "behavior"])):
+                        is_refactor = any(k in text_low for k in ["refactor", "optimize", "clean up", "improve structure", "modernize"])
+                        code_to_process = ""
+                        if ":" in user_input:
+                            code_to_process = user_input.split(":", 1)[1].strip()
+                        elif "```" in user_input:
+                            m_c = re.search(r'```(?:\w+)?(.*?)```', user_input, re.DOTALL)
+                            if m_c:
+                                code_to_process = m_c.group(1).strip()
 
+                        if not code_to_process:
+                            raw_lines = user_input.strip().splitlines()
+                            if len(raw_lines) > 1:
+                                code_to_process = "\n".join(raw_lines[1:]).strip()
+
+                        # Contextual fallback: check dialogue state / last visual response
+                        if not code_to_process:
+                            try:
+                                from extensions.dialogue_state_manager import get_dialogue_manager
+                                dm = get_dialogue_manager(str(effective_uid))
+                                if dm.current_state.last_visual_response:
+                                    vr = dm.current_state.last_visual_response
+                                    if vr.get("actions") and len(vr["actions"]) > 0:
+                                        code_to_process = vr["actions"][0].get("payload", "")
+                                    if not code_to_process:
+                                        code_to_process = vr.get("primary_value", "")
+                            except Exception:
+                                pass
+
+                        if not code_to_process:
+                            result["status"] = "error"
+                            action_name = "refactor" if is_refactor else "fix"
+                            result["response"] = f"Please provide the code you would like me to {action_name}."
+                            result["handled"] = True
+                        elif is_refactor:
+                            from modules.code_generator.generator import refactor_code_with_llm
+                            ref_res = refactor_code_with_llm(code_to_process, query=user_input, language=target_lang, user_id=effective_uid)
+                            result["status"] = "success" if ref_res.get("success") else "error"
+                            result["response"] = ref_res.get("explanation", "Code refactored.")
+                            result["code"] = ref_res.get("refactored_code")
+                            result["language"] = target_lang
+                            result["handled"] = True
+                        else:
+                            from modules.code_generator.generator import fix_code_with_llm
+                            fix_res = fix_code_with_llm(code_to_process, query=user_input, language=target_lang, user_id=effective_uid)
+                            result["status"] = "success" if fix_res.get("success") else "error"
+                            result["response"] = fix_res.get("explanation", "Code repaired.")
+                            result["code"] = fix_res.get("fixed_code")
+                            result["language"] = target_lang
+                            result["handled"] = True
+
+                    # Sub-workflow E: LLM-Based Code Explanation
+                    elif req_action == "explain_code" or (not req_action and any(k in text_low for k in ["explain", "analyze"]) and "code" in text_low):
+                        from modules.code_generator.generator import explain_code_with_llm
+                        code_to_explain = ""
+                        if ":" in user_input:
+                            code_to_explain = user_input.split(":", 1)[1].strip()
+                        elif "```" in user_input:
+                            m_c = re.search(r'```(?:\w+)?(.*?)```', user_input, re.DOTALL)
+                            if m_c:
+                                code_to_explain = m_c.group(1).strip()
+
+                        if not code_to_explain:
+                            raw_lines = user_input.strip().splitlines()
+                            if len(raw_lines) > 1:
+                                code_to_explain = "\n".join(raw_lines[1:]).strip()
+
+                        # Contextual fallback: check dialogue state / last visual response
+                        if not code_to_explain:
+                            try:
+                                from extensions.dialogue_state_manager import get_dialogue_manager
+                                dm = get_dialogue_manager(str(effective_uid))
+                                if dm.current_state.last_visual_response:
+                                    vr = dm.current_state.last_visual_response
+                                    if vr.get("actions") and len(vr["actions"]) > 0:
+                                        code_to_explain = vr["actions"][0].get("payload", "")
+                                    if not code_to_explain:
+                                        code_to_explain = vr.get("primary_value", "")
+                            except Exception:
+                                pass
+
+                        if not code_to_explain:
+                            result["status"] = "error"
+                            result["response"] = "Please provide the code you would like me to explain."
+                            result["handled"] = True
+                        else:
+                            exp_text = explain_code_with_llm(code_to_explain, query=user_input, language=target_lang, user_id=effective_uid)
+                            result["status"] = "success"
+                            result["response"] = exp_text
+                            result["code"] = code_to_explain
+                            result["language"] = target_lang
+                            result["handled"] = True
+
+                    # Sub-workflow F: Code & Project Generation
                     else:
-                        from modules.code_generator.main import process_request
-                        code_res = process_request(user_input)
-                        result.update(code_res)
-                        result["response"] = code_res.get("message", "Code generated.")
-                        result["handled"] = True
+                        from modules.code_generator.task_worker import (
+                            classify_task_complexity,
+                            execute_code_generation_task,
+                            generate_project_milestones,
+                            emit_task_visual_response
+                        )
+                        is_long, reason = classify_task_complexity(user_input)
+
+                        if is_long:
+                            from core.task_execution_manager import get_task_execution_manager, TaskPriority
+                            tem = get_task_execution_manager()
+
+                            # 1. Check for duplicate active task
+                            active_tasks = tem.list_tasks(user_id=effective_uid, active_only=True)
+                            duplicate = next((t for t in active_tasks if t.user_request.strip().lower() == user_input.strip().lower()), None)
+
+                            if duplicate:
+                                result["status"] = "success"
+                                result["task_id"] = duplicate.task_id
+                                result["is_background"] = True
+                                result["is_duplicate"] = True
+                                result["response"] = f"A background task for this project is already active (Task ID: {duplicate.task_id}). Current stage: {duplicate.status.value}."
+                                result["handled"] = True
+                            else:
+                                # 2. Submit new background task
+                                task = tem.create_task(
+                                    user_request=user_input,
+                                    user_id=effective_uid,
+                                    normalized_goal=f"Build {target_lang} project",
+                                    priority=TaskPriority.NORMAL,
+                                    execution_fn=execute_code_generation_task,
+                                    metadata={"target_lang": target_lang}
+                                )
+                                tem.submit_task(task)
+
+                                initial_milestones = generate_project_milestones(user_input, target_lang)
+                                vr = emit_task_visual_response(task, initial_milestones, "Task queued and planning started.")
+
+                                result["status"] = "success"
+                                result["task_id"] = task.task_id
+                                result["is_background"] = True
+                                result["response"] = f"I've started building your project in the background (Task ID: {task.task_id}). I'll plan the architecture, generate the files, and validate the code."
+                                result["visual_response"] = vr.to_dict()
+                                result["handled"] = True
+                        else:
+                            from modules.code_generator.main import process_request
+                            code_res = process_request(user_input, user_id=effective_uid)
+                            result.update(code_res)
+                            result["response"] = code_res.get("message", "Code generated.")
+                            result["handled"] = True
+
+                    # Structured Visual Response Surface Attachment (for synchronous single-file generation)
+                    if result.get("status") == "success" and not result.get("is_background") and (result.get("code") or result.get("files") or result.get("project_path")):
+                        try:
+                            import uuid as _uuid
+                            import time as _time
+                            from core.visual_response import VisualResponse, VisualResponseType, VisualResponseAction
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            from core.assistant_core import assistant_core
+
+                            vr_title = f"{target_lang.upper()} CODE" if target_lang else "CODE GENERATION"
+                            if result.get("project_path"):
+                                vr_title = "PROJECT GENERATED"
+                                sec_text = f"Location: {result.get('project_path')} ({len(result.get('files', []))} files)"
+                            elif result.get("file_path"):
+                                sec_text = f"Saved to: {result.get('file_path')}"
+                            else:
+                                sec_text = result.get("message", "Code generated.")
+
+                            code_payload = result.get("code") or "\n".join(result.get("files", []))
+                            actions = [VisualResponseAction(label="Copy", action_type="copy", payload=code_payload)]
+                            if result.get("file_path"):
+                                actions.append(VisualResponseAction(label="Open File", action_type="open_file", payload=result.get("file_path")))
+                            elif result.get("project_path"):
+                                actions.append(VisualResponseAction(label="Open Folder", action_type="open_folder", payload=result.get("project_path")))
+
+                            vr_obj = VisualResponse(
+                                response_id=str(_uuid.uuid4())[:8],
+                                user_id=str(effective_uid),
+                                response_type=VisualResponseType.CODE,
+                                title=vr_title,
+                                primary_value=code_payload,
+                                secondary_text=sec_text,
+                                raw_content={"code": code_payload, "language": target_lang, "file_path": result.get("file_path"), "project_path": result.get("project_path")},
+                                actions=actions,
+                                created_at=_time.time(),
+                                ttl_seconds=600.0,
+                                source_context="code_generation"
+                            )
+                            dm = get_dialogue_manager(str(effective_uid))
+                            dm.store_visual_response(vr_obj)
+                            result["visual_response"] = vr_obj.to_dict()
+                            assistant_core.show_visual_response(vr_obj, user_input=user_input, intent=intent)
+                        except Exception as vr_err:
+                            self.logger.debug(f"Code visual response generation notice: {vr_err}")
+
                 except Exception as e:
                     result["status"] = "error"
                     result["response"] = f"Code operation failed: {e}"
@@ -6531,7 +6987,12 @@ class UnifiedCommandRouter:
                             result["status"] = "success"
                             result["response"] = f"For {date_label}, you have " + "; ".join(parts) + "."
 
-                    elif action == "calendar_query" or any(k in user_input.lower() for k in ["calendar", "event", "events", "meeting", "appointment"]):
+                    elif action == "calendar_query" or any(k in user_input.lower() for k in [
+                        "calendar", "event", "events", "meeting", "appointment", "schedule", "reschedule",
+                        "holiday", "special days", "plan my week", "next appointment", "upcoming appointment",
+                        "free", "busy", "slot", "slots", "agenda", "note", "notes", "analytics", "utilization",
+                        "ics", "sync", "snooze", "huddle", "hurdle", "standup"
+                    ]):
                         from modules.calendar_manager import calendar_controller
                         cal_res = calendar_controller.process_calendar_query(user_input, user_id=effective_uid)
                         result["status"] = "success" if cal_res.get("success", True) else "error"
@@ -6656,6 +7117,32 @@ class UnifiedCommandRouter:
                     except Exception as _art_err:
                         self.logger.debug(f"[MEMORY_QUERY] Artifact check: {_art_err}")
 
+                    u_low = user_input.lower().rstrip('.?!,').strip()
+                    norm_u_low = re.sub(r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|trevon|nova|jarvis|assistant)[,\s:]*', '', u_low, flags=re.IGNORECASE).strip()
+                    is_user_cmd = bool(
+                        re.search(r'\b(?:what(?:\'s|\s+is|\s+was)\s+(?:my\s+)?(?:last|previous)\s+command|what\s+did\s+i\s+(?:just\s+)?ask(?:\s+you(?:\s+to\s+do)?)?|what\s+was\s+the\s+last\s+thing\s+i\s+asked|what\s+command\s+did\s+i\s+(?:just\s+)?(?:give|issue|say))\b', u_low)
+                        or re.search(r'\b(?:what(?:\'s|\s+is|\s+was)\s+(?:my\s+)?(?:last|previous)\s+command|what\s+did\s+i\s+(?:just\s+)?ask(?:\s+you(?:\s+to\s+do)?)?|what\s+was\s+the\s+last\s+thing\s+i\s+asked|what\s+command\s+did\s+i\s+(?:just\s+)?(?:give|issue|say))\b', norm_u_low)
+                        or u_low in ("what is my last command", "what was my last command", "what did i just ask", "what did i just ask you to do", "what did i just ask you", "what was the last thing i asked", "last command")
+                    )
+                    is_assistant_act = bool(
+                        re.search(r'\b(?:what(?:\'s|\s+is|\s+was)\s+(?:the\s+)?last\s+action(?:\s+(?:you\s+)?performed)?|what\s+was\s+your\s+last\s+action|what\s+action\s+did\s+you\s+(?:just\s+)?perform|what\s+did\s+you\s+(?:just\s+)?do|what\s+did\s+you\s+do\s+last|what\s+was\s+the\s+last\s+thing\s+you\s+did|what\s+action\s+did\s+you\s+take)\b', u_low)
+                        or re.search(r'\b(?:what(?:\'s|\s+is|\s+was)\s+(?:the\s+)?last\s+action(?:\s+(?:you\s+)?performed)?|what\s+was\s+your\s+last\s+action|what\s+action\s+did\s+you\s+(?:just\s+)?perform|what\s+did\s+you\s+(?:just\s+)?do|what\s+did\s+you\s+do\s+last|what\s+was\s+the\s+last\s+thing\s+you\s+did|what\s+action\s+did\s+you\s+take)\b', norm_u_low)
+                        or u_low in ("what was the last action you performed", "what was your last action", "what action did you just perform", "what did you just do", "what did you do last", "what was the last thing you did", "last action")
+                    )
+                    if is_user_cmd or is_assistant_act:
+                        from core.fast_path import FastPathProcessor
+                        from extensions.dialogue_state_manager import get_dialogue_manager
+                        dm = get_dialogue_manager(str(effective_uid))
+                        hist_resp = FastPathProcessor._resolve_recent_history(
+                            is_user_cmd=is_user_cmd,
+                            dialogue_mgr=dm,
+                            user_id=effective_uid
+                        )
+                        result["response"] = hist_resp
+                        result["status"] = "success"
+                        result["handled"] = True
+                        return result
+
                     from legacy.skills import query_memory_first
                     ans = query_memory_first(effective_uid, user_input)
                     if ans:
@@ -6716,9 +7203,20 @@ class UnifiedCommandRouter:
                     if stored:
                         result["response"] = msg
                         result["handled"] = True
+                        result["status"] = "success"
+                        result["success"] = True
                     else:
-                        result["response"] = "I've noted that."
-                        result["handled"] = True
+                        from core.chatgpt_memory import get_chatgpt_memory
+                        extracted = get_chatgpt_memory().extract_and_persist_facts(effective_uid, user_input)
+                        if extracted:
+                            k, v = extracted[0]
+                            result["response"] = f"Understood. I'll remember that {k.replace('_', ' ')} is {v}."
+                            result["handled"] = True
+                            result["status"] = "success"
+                            result["success"] = True
+                        else:
+                            result["response"] = "I couldn't identify a specific fact or preference to remember. Could you please specify what you'd like me to remember?"
+                            result["handled"] = True
                 except Exception as e:
                     self.logger.error(f"Memory store failed: {e}")
                     result["status"] = "error"
@@ -6745,17 +7243,33 @@ class UnifiedCommandRouter:
                         result.update(b_res)
                         result["handled"] = True
                     else:
-                        if not should_use_external_retrieval(Intent.RAG_SEARCH, user_input):
+                        from instance.config import settings
+                        from core.chatgpt_memory import get_chatgpt_memory
+                        from legacy.skills import query_memory_first
+                        resolved_user = user_id if user_id is not None else (getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user())
+                        try:
+                            uid_int = int(resolved_user) if resolved_user is not None else 1
+                        except (ValueError, TypeError):
+                            uid_int = 1
+                        mem_ans = get_chatgpt_memory().answer_historical_fact_query(uid_int, user_input)
+                        if not mem_ans:
+                            mem_ans = query_memory_first(uid_int, user_input)
+                        if mem_ans:
+                            result["response"] = mem_ans
+                            result["handled"] = True
+                            result["status"] = "success"
+                            result["success"] = True
+                        elif not should_use_external_retrieval(Intent.RAG_SEARCH, user_input):
                             # Bypasses RAG / Web Search entirely for stable knowledge or non-web queries
                             from extensions.llm_engine import LLMEngine
                             engine = LLMEngine()
-                            llm_resp = engine.get_completion(prompt=user_input, user_id=user_id)
+                            llm_resp = engine.get_completion(prompt=user_input, user_id=resolved_user)
                             result["response"] = (llm_resp or "No answer found.").strip()
                             result["handled"] = True
                         else:
                             from extensions.rag_system import RAGSystem
                             rag = RAGSystem()
-                            rag_output = rag.process(user_input, user_id=user_id)
+                            rag_output = rag.process(user_input, user_id=resolved_user)
                             if isinstance(rag_output, dict):
                                 result["response"] = rag_output.get("response", "No answer found.")
                                 # CRITICAL: Mark as handled to prevent any fallback to other subsystems
@@ -6764,12 +7278,32 @@ class UnifiedCommandRouter:
                                 result["response"] = str(rag_output)
                                 result["handled"] = True
                 except Exception as e:
+                    self.logger.error(f"[RAG_SEARCH] Execution error: {e}", exc_info=True)
+                    try:
+                        from instance.config import settings
+                        from extensions.llm_engine import LLMEngine
+                        engine = LLMEngine()
+                        resolved_user = user_id if user_id is not None else (getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user())
+                        fallback_resp = engine.get_completion(prompt=user_input, user_id=resolved_user)
+                        if fallback_resp and fallback_resp.strip():
+                            result["status"] = "success"
+                            result["response"] = fallback_resp.strip()
+                            result["handled"] = True
+                            return result
+                    except Exception:
+                        pass
                     result["status"] = "error"
-                    result["response"] = f"RAG search failed: {e}"
+                    result["response"] = "I apologize, but I encountered an issue retrieving that information. Please try again."
                     result["handled"] = True  # Still mark as handled to prevent incorrect fallbacks
                     
             # 19. GENERAL CONVERSATION
             elif intent == Intent.GENERAL_CONVERSATION:
+                if params.get("response"):
+                    result["status"] = "success"
+                    result["response"] = params.get("response")
+                    result["handled"] = True
+                    result["action"] = params.get("action", "general_conversation")
+                    return result
                 if params.get("action") == "implicit_goal":
                     goal_type = params.get("goal_type")
                     suggested_resp = params.get("suggested_response", "I can help with that.")
@@ -6971,11 +7505,70 @@ class UnifiedCommandRouter:
                             else:
                                 result["response"] = "There is no previous response to continue."
                         else:
-                            result["response"] = "I understood your request, but I was temporarily unable to reach any language model within the deadline. Please ensure Ollama is running or check your connection."
+                            err_diag = getattr(engine, 'last_error_summary', '')
+                            if err_diag:
+                                result["response"] = f"I understood your request, but all language model providers failed: {err_diag}."
+                            else:
+                                result["response"] = "I understood your request, but I was temporarily unable to reach any language model within the deadline. Please ensure your provider is configured or check your connection."
                         result["handled"] = True
                 except Exception as e:
                     result["status"] = "error"
                     result["response"] = f"Conversation failed: {e}"
+                    result["handled"] = True
+
+            # 20.5. VOICE CONFIGURATION
+            elif intent == Intent.VOICE_CONFIGURATION:
+                try:
+                    from core.configuration_service import get_configuration_service
+                    from legacy.tts import apply_voice_profile
+                    from instance.config import settings
+                    effective_uid = int(user_id or getattr(settings, 'CURRENT_USER_ID', None) or 1)
+                    cfg = get_configuration_service()
+                    action = params.get("action", "")
+
+                    current_rate = int(cfg.get_preference(effective_uid, "voice_rate", cfg.get_preference(effective_uid, "assistant_voice_rate", 135)))
+                    current_vid = cfg.get_preference(effective_uid, "voice_id", cfg.get_preference(effective_uid, "assistant_voice_id", None))
+                    current_vol_raw = float(cfg.get_preference(effective_uid, "voice_volume", cfg.get_preference(effective_uid, "assistant_voice_volume", 100.0)))
+                    current_vol = current_vol_raw / 100.0 if current_vol_raw > 1.0 else current_vol_raw
+
+                    if action == "decrease_rate":
+                        new_rate = max(110, current_rate - 15)
+                        cfg.set_preference(effective_uid, "voice_rate", new_rate)
+                        apply_voice_profile(current_vid, rate=new_rate, volume=current_vol)
+                        resp_text = f"I have slowed down my speaking rate to {new_rate} words per minute."
+                    elif action == "increase_rate":
+                        new_rate = min(180, current_rate + 15)
+                        cfg.set_preference(effective_uid, "voice_rate", new_rate)
+                        apply_voice_profile(current_vid, rate=new_rate, volume=current_vol)
+                        resp_text = f"I have increased my speaking rate to {new_rate} words per minute."
+                    elif action == "reset_rate":
+                        new_rate = 135
+                        cfg.set_preference(effective_uid, "voice_rate", new_rate)
+                        apply_voice_profile(current_vid, rate=new_rate, volume=current_vol)
+                        resp_text = "I've reset my speaking rate to natural speed, 135 words per minute."
+                    elif action == "restore_voice":
+                        from legacy.memory_manager import get_voice_profile_db
+                        prof = get_voice_profile_db(effective_uid)
+                        saved_vid = prof.get("voice_id")
+                        saved_rate = prof.get("voice_rate", 135)
+                        saved_vol = prof.get("voice_volume", 1.0)
+                        if saved_vid:
+                            cfg.set_preference(effective_uid, "voice_id", saved_vid)
+                            cfg.set_preference(effective_uid, "voice_rate", saved_rate)
+                            apply_voice_profile(saved_vid, rate=saved_rate, volume=saved_vol)
+                            resp_text = "I've restored your previously configured voice profile."
+                        else:
+                            resp_text = "Your voice settings are active at natural conversational speed."
+                    else:
+                        resp_text = "Voice configuration updated."
+
+                    result["status"] = "success"
+                    result["intent"] = "VOICE_CONFIGURATION"
+                    result["response"] = resp_text
+                    result["handled"] = True
+                except Exception as ex:
+                    result["status"] = "error"
+                    result["response"] = f"Failed to update voice configuration: {ex}"
                     result["handled"] = True
 
             # 21. TASK MANAGEMENT
@@ -7012,10 +7605,20 @@ class UnifiedCommandRouter:
                             except Exception:
                                 pass
                         if tid:
+                            from core.task_execution_manager import get_task_execution_manager
+                            tem_inst = get_task_execution_manager()
+                            task_obj = tem_inst.get_task(tid)
                             success = tq.cancel(effective_uid, tid)
+                            saved_notice = ""
+                            if task_obj:
+                                ckpt = task_obj.metadata.get("checkpoint") or {}
+                                sf = ckpt.get("saved_files") or []
+                                pp = ckpt.get("project_path")
+                                if sf and pp:
+                                    saved_notice = f" {len(sf)} files saved at {pp} were preserved."
                             result["status"] = "success" if success else "error"
                             result["task_id"] = tid
-                            result["response"] = f"Task {tid} cancelled." if success else f"Could not cancel task {tid}."
+                            result["response"] = f"Task {tid} cancelled.{saved_notice}" if success else f"Could not cancel task {tid}."
                         else:
                             result["status"] = "error"
                             result["response"] = "You have no active background tasks to cancel. Please specify a task ID."
@@ -7032,14 +7635,50 @@ class UnifiedCommandRouter:
                                 pass
                         if not tid:
                             try:
+                                from core.task_execution_manager import get_task_execution_manager
+                                tem_inst = get_task_execution_manager()
+                                active_user_tasks = tem_inst.list_tasks(user_id=effective_uid, active_only=True)
+                                if active_user_tasks:
+                                    active_user_tasks.sort(key=lambda t: t.created_at, reverse=True)
+                                    tid = active_user_tasks[0].task_id
+                            except Exception:
+                                pass
+                        if not tid:
+                            try:
                                 user_tasks = tq.list_user_tasks(effective_uid)
                                 if user_tasks:
-                                    tid = user_tasks[-1].get("task_id", "")
+                                    tid = user_tasks[0].get("task_id", "")
                             except Exception:
                                 pass
                         if tid:
+                            from core.task_execution_manager import get_task_execution_manager
+                            tem_inst = get_task_execution_manager()
+                            task_obj = tem_inst.get_task(tid)
                             status_info = tq.get_status(effective_uid, tid)
-                            if status_info:
+                            if status_info and task_obj:
+                                result["status"] = "success"
+                                result["task"] = status_info
+                                result["task_id"] = tid
+                                st_name = task_obj.status.value
+                                step_desc = task_obj.current_step
+                                if step_desc:
+                                    result["response"] = f"Task {tid} is currently {st_name}: {step_desc}."
+                                else:
+                                    result["response"] = f"Task {tid} is currently {st_name} ({task_obj.progress})."
+
+                                # Attach visual status card if milestones exist
+                                ms = task_obj.metadata.get("milestones")
+                                if ms:
+                                    from modules.code_generator.task_worker import emit_task_visual_response
+                                    vr = emit_task_visual_response(
+                                        task=task_obj,
+                                        milestones=ms,
+                                        current_activity=task_obj.current_step or task_obj.status.value,
+                                        project_path=task_obj.metadata.get("project_path"),
+                                        files=task_obj.metadata.get("files")
+                                    )
+                                    result["visual_response"] = vr.to_dict()
+                            elif status_info:
                                 result["status"] = "success"
                                 result["task"] = status_info
                                 result["task_id"] = tid
@@ -7343,8 +7982,10 @@ class UnifiedCommandRouter:
                             ttl_seconds=600.0,
                             source_context="numbers_display"
                         )
+                        vr.metadata["user_input"] = user_input
+                        vr.metadata["intent"] = intent.name if hasattr(intent, "name") else str(intent)
                         dm.store_visual_response(vr)
-                        assistant_core.show_visual_response(vr)
+                        assistant_core.show_visual_response(vr, user_input=user_input, intent=intent)
 
                         # Debug logging (Section 13)
                         print(
@@ -7400,7 +8041,9 @@ class UnifiedCommandRouter:
 
                         from core.visual_response import VisualResponse
                         vr_obj = VisualResponse.from_dict(cached_vr)
-                        assistant_core.show_visual_response(vr_obj)
+                        vr_obj.metadata["user_input"] = user_input
+                        vr_obj.metadata["intent"] = intent.name if hasattr(intent, "name") else str(intent)
+                        assistant_core.show_visual_response(vr_obj, user_input=user_input, intent=intent)
 
                         print(
                             f"[VISUAL]\n"
@@ -7446,7 +8089,9 @@ class UnifiedCommandRouter:
                         if cached_vr:
                             from core.visual_response import VisualResponse
                             vr_obj = VisualResponse.from_dict(cached_vr)
-                            assistant_core.show_visual_response(vr_obj)
+                            vr_obj.metadata["user_input"] = user_input
+                            vr_obj.metadata["intent"] = intent.name if hasattr(intent, "name") else str(intent)
+                            assistant_core.show_visual_response(vr_obj, user_input=user_input, intent=intent)
                             print(
                                 f"[VISUAL]\n"
                                 f"Current command: {user_input}\n"
@@ -7470,6 +8115,153 @@ class UnifiedCommandRouter:
                             result["handled"] = True
                             return result
 
+                    # --- CASE 3B: SPECIFIC ENTITY DETAILS (Calendar Event, Meeting, Email, Document) ---
+                    target_subj = params.get("target_subject") or ""
+                    is_calendar_entity = (
+                        req_type in ("CALENDAR_EVENT", "EVENT", "MEETING")
+                        or any(w in raw_low for w in ["meeting", "calendar", "event", "appointment", "schedule"])
+                        or any(w in target_subj.lower() for w in ["meeting", "calendar", "event", "appointment"])
+                    )
+                    if is_calendar_entity and not is_explicit_again:
+                        try:
+                            from modules.calendar_manager.calendar_storage import CalendarStorage
+                            c_storage = CalendarStorage()
+                            uid_int = int(effective_uid) if str(effective_uid).isdigit() else 1
+                            from datetime import datetime, timedelta
+                            today_str = datetime.now().strftime("%Y-%m-%d")
+                            evs = c_storage.get_events(uid_int, today_str)
+                            if not evs:
+                                end_str = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+                                ev_range = c_storage.get_events_range(uid_int, today_str, end_str)
+                                for d_evs in ev_range.values():
+                                    evs.extend(d_evs)
+                            matching_ev = None
+                            subj_filter = target_subj.lower() or raw_low
+                            for fw in ["show", "details", "about", "for", "my", "the", "calendar", "event", "meeting"]:
+                                subj_filter = re.sub(rf'\b{fw}\b', '', subj_filter).strip()
+                            if subj_filter and evs:
+                                for ev in evs:
+                                    t = (ev.get("title") or "").lower()
+                                    d = (ev.get("description") or "").lower()
+                                    if any(tok in t or tok in d for tok in subj_filter.split() if len(tok) >= 3):
+                                        matching_ev = ev
+                                        break
+                            if not matching_ev and evs:
+                                matching_ev = evs[0]
+                            if matching_ev:
+                                from core.visual_response import VisualResponse
+                                vr_obj = VisualResponse.for_calendar_event(matching_ev, user_id=str(effective_uid))
+                                dm.store_visual_response(vr_obj)
+                                ev_title = matching_ev.get("title", "Event")
+                                speech_ans = f"Displaying details for {ev_title}."
+                                from core.multilingual_engine import MultilingualEngine
+                                me = MultilingualEngine.get_instance()
+                                det_l = me.get_active_language(effective_uid)
+                                if det_l and det_l != "en":
+                                    vr_obj.title = me.translate_from_english(vr_obj.title, det_l)
+                                    vr_obj.primary_value = me.translate_from_english(vr_obj.primary_value, det_l)
+                                    speech_ans = me.translate_from_english(speech_ans, det_l)
+                                vr_obj.metadata["user_input"] = user_input
+                                vr_obj.metadata["intent"] = intent.name if hasattr(intent, "name") else str(intent)
+                                assistant_core.show_visual_response(vr_obj, user_input=user_input, intent=intent)
+                                result["status"] = "success"
+                                result["intent"] = "VISUAL_SURFACE"
+                                result["response"] = speech_ans
+                                result["visual_response"] = vr_obj.to_dict()
+                                result["handled"] = True
+                                return result
+                        except Exception as cal_err:
+                            self.logger.warning(f"Calendar details extraction notice: {cal_err}")
+
+                    # --- CASE 3C: EXPLICIT DETAILS / EXPLANATION / STEPS FROM PREVIOUS RESPONSE ---
+                    is_details_query = (
+                        req_type in ("DETAILS", "STEPS", "EXPLANATION", "SUBJECT_DETAILS")
+                        or any(w in raw_low for w in [
+                            "detail", "details", "details box", "information", "info", "explanation",
+                            "full steps", "technical details", "all the information", "expand",
+                            "what you just explained", "understand everything"
+                        ])
+                        or any(w in raw_low for w in ["వివరాలు", "विवरण", "விவரங்களை", "detalles"])
+                    )
+                    if is_details_query:
+                        cached_vr = dm.get_last_visual_response(allow_expired=False)
+                        from core.visual_response import VisualResponse, VisualResponseType, extract_visual_title, format_knowledge_content
+
+                        prev_text = None
+                        prev_user_in = None
+                        target_resp_type = VisualResponseType.KNOWLEDGE
+
+                        if dm.current_state.turns:
+                            for turn in reversed(dm.current_state.turns):
+                                resp_cand = getattr(turn, "assistant_response", "") or ""
+                                in_cand = getattr(turn, "user_input", "") or ""
+                                if resp_cand.strip() and not any(resp_cand.startswith(p) for p in ["There is no recent", "Displaying", "I encountered an error"]):
+                                    prev_text = resp_cand.strip()
+                                    prev_user_in = in_cand.strip()
+                                    break
+                        if not prev_text:
+                            try:
+                                from extensions.conversational_memory import recent_memory, _lock
+                                with _lock:
+                                    if recent_memory:
+                                        for m in reversed(list(recent_memory)):
+                                            r_m = m.get("assistant_response", "")
+                                            if r_m and not any(r_m.startswith(p) for p in ["There is no recent", "Displaying", "I encountered an error"]):
+                                                prev_text = r_m.strip()
+                                                prev_user_in = m.get("user_command", "").strip()
+                                                break
+                            except Exception:
+                                pass
+
+                        if prev_text:
+                            title_cand = extract_visual_title(prev_user_in or user_input, prev_text, default="DETAILS")
+                            formatted_content = format_knowledge_content(prev_text)
+                            if any(k in raw_low for k in ["step", "steps"]) or re.search(r'(?:^|\n)\s*\d+[\.\)]\s+', formatted_content):
+                                target_resp_type = VisualResponseType.PROCEDURE_STEPS
+                            elif "```" in formatted_content or any(k in raw_low for k in ["code", "technical", "command"]):
+                                target_resp_type = VisualResponseType.CODE
+                            else:
+                                target_resp_type = VisualResponseType.KNOWLEDGE
+
+                            vr_obj = VisualResponse.for_text(
+                                formatted_content,
+                                title=title_cand,
+                                description="Full details from previous response.",
+                                user_id=str(effective_uid),
+                                response_type=target_resp_type
+                            )
+                            dm.store_visual_response(vr_obj)
+                        elif cached_vr and not cached_vr.is_expired():
+                            vr_obj = cached_vr
+                        else:
+                            vr_obj = None
+
+                        if vr_obj:
+                            from core.multilingual_engine import MultilingualEngine
+                            me = MultilingualEngine.get_instance()
+                            det_l = me.get_active_language(effective_uid)
+                            speech_ans = "Displaying the details on screen."
+                            if det_l and det_l != "en":
+                                vr_obj.title = me.translate_from_english(vr_obj.title, det_l)
+                                vr_obj.primary_value = me.translate_from_english(vr_obj.primary_value, det_l)
+                                speech_ans = me.translate_from_english(speech_ans, det_l)
+
+                            vr_obj.metadata["user_input"] = user_input
+                            vr_obj.metadata["intent"] = intent.name if hasattr(intent, "name") else str(intent)
+                            assistant_core.show_visual_response(vr_obj, user_input=user_input, intent=intent)
+                            result["status"] = "success"
+                            result["intent"] = "VISUAL_SURFACE"
+                            result["response"] = speech_ans
+                            result["visual_response"] = vr_obj.to_dict()
+                            result["handled"] = True
+                            return result
+                        else:
+                            result["status"] = "success"
+                            result["intent"] = "VISUAL_SURFACE"
+                            result["response"] = "There is no recent information to display in the details panel."
+                            result["handled"] = True
+                            return result
+
                     # --- CASE 4: EXPLICIT VISUAL DIRECTIVE (Weather / Knowledge / Search) ---
                     if "weather" in raw_low or "temperature" in raw_low:
                         from extensions.weather_engine import get_weather_for_query
@@ -7482,7 +8274,9 @@ class UnifiedCommandRouter:
                         vr = detect_visual_response({"response": wx_resp}, user_input, str(effective_uid))
                         if vr:
                             dm.store_visual_response(vr)
-                            assistant_core.show_visual_response(vr)
+                            vr.metadata["user_input"] = user_input
+                            vr.metadata["intent"] = intent.name if hasattr(intent, "name") else str(intent)
+                            assistant_core.show_visual_response(vr, user_input=user_input, intent=intent)
                             result["visual_response"] = vr.to_dict()
                         print(
                             f"[VISUAL]\n"
@@ -7509,7 +8303,9 @@ class UnifiedCommandRouter:
                         vr = detect_visual_response({"response": ans}, user_input, str(effective_uid))
                         if vr:
                             dm.store_visual_response(vr)
-                            assistant_core.show_visual_response(vr)
+                            vr.metadata["user_input"] = user_input
+                            vr.metadata["intent"] = intent.name if hasattr(intent, "name") else str(intent)
+                            assistant_core.show_visual_response(vr, user_input=user_input, intent=intent)
                             result["visual_response"] = vr.to_dict()
                         print(
                             f"[VISUAL]\n"
@@ -7585,6 +8381,15 @@ class UnifiedCommandRouter:
                     if vr:
                         vr.metadata["user_input"] = user_input
                         vr.metadata["intent"] = intent.name if hasattr(intent, "name") else str(intent)
+                        try:
+                            from core.multilingual_engine import MultilingualEngine
+                            me = MultilingualEngine.get_instance()
+                            det_l = me.get_active_language(effective_uid)
+                            if det_l and det_l != "en":
+                                vr.title = me.translate_from_english(vr.title, det_l)
+                                vr.primary_value = me.translate_from_english(vr.primary_value, det_l)
+                        except Exception:
+                            pass
                         from extensions.dialogue_state_manager import get_dialogue_manager
                         dm = get_dialogue_manager(str(effective_uid))
                         dm.store_visual_response(vr)

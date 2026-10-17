@@ -72,6 +72,36 @@ class RAGRetriever:
         self.calendar_controller = CalendarController()
 
     # ------------------------------------------------------------------
+    def _get_user_search_keys(self, provider: str, user_id=None) -> list:
+        resolved_uid = user_id
+        if resolved_uid is None:
+            try:
+                from instance.config import settings
+                resolved_uid = getattr(settings, 'CURRENT_USER_ID', None)
+            except Exception:
+                resolved_uid = None
+
+        if resolved_uid:
+            try:
+                from core.credential_manager import get_credential_manager
+                ukey = get_credential_manager().get_credential(resolved_uid, provider)
+                if ukey and str(ukey).strip():
+                    return [str(ukey).strip()]
+            except Exception:
+                pass
+            return []
+
+        import sys
+        allow_dev = os.getenv("ALLOW_DEV_FALLBACK", "").strip().lower() in ("1", "true")
+        if os.getenv("APP_ENV", "").lower() == "production" or getattr(sys, "frozen", False) or not allow_dev:
+            return []
+        if provider == "serpapi":
+            return self.serpapi_keys
+        elif provider == "tavily":
+            return self.tavily_keys
+        return []
+
+    # ------------------------------------------------------------------
     # Public dispatch
     # ------------------------------------------------------------------
 
@@ -80,13 +110,13 @@ class RAGRetriever:
         print(f"[RAG RETRIEVER] Retrieving for intent: {intent}")
 
         if intent == "calendar_query":
-            return self._retrieve_calendar(query)
+            return self._retrieve_calendar(query, user_id=user_id)
         elif intent == "current_time_query":
             return self._retrieve_current_time(query)
         elif intent == "dynamic_fact_query":
-            return self._retrieve_dynamic_fact(query)
+            return self._retrieve_dynamic_fact(query, user_id=user_id)
         elif intent == "real_time_info":
-            return self._retrieve_web_search(query)
+            return self._retrieve_web_search(query, user_id=user_id)
         elif intent == "location_query":
             return self._retrieve_location(query)
         elif intent == "memory_management":
@@ -124,16 +154,16 @@ class RAGRetriever:
     # Dynamic fact → web search
     # ------------------------------------------------------------------
 
-    def _retrieve_dynamic_fact(self, query: str):
+    def _retrieve_dynamic_fact(self, query: str, user_id=None):
         """Route dynamic fact queries to the web search path."""
         print(f"[RAG RETRIEVER] Routing dynamic fact query to web search: '{query}'")
-        return self._retrieve_web_search(query)
+        return self._retrieve_web_search(query, user_id=user_id)
 
     # ------------------------------------------------------------------
     # Web search with multi-key and provider failover
     # ------------------------------------------------------------------
 
-    def _retrieve_web_search(self, query: str):
+    def _retrieve_web_search(self, query: str, user_id=None):
         """
         Fetch live data with provider health checks, fast-skip cooldowns, and failover:
           1. Healthy provider used immediately.
@@ -144,6 +174,9 @@ class RAGRetriever:
         """
         providers_order = ["serpapi", "tavily"] if self.search_provider == "serpapi" else ["tavily", "serpapi"]
 
+        serp_keys = self._get_user_search_keys("serpapi", user_id)
+        tav_keys = self._get_user_search_keys("tavily", user_id)
+
         last_error = "no search provider succeeded"
 
         # Pass 1: Try only healthy providers
@@ -153,38 +186,60 @@ class RAGRetriever:
                 continue
 
             if provider == "serpapi":
-                result = self._search_serpapi(query)
+                result = self._search_serpapi(query, keys=serp_keys)
             elif provider == "tavily":
-                result = self._search_tavily(query)
+                result = self._search_tavily(query, keys=tav_keys)
             else:
                 result = None
 
-            if result and "error" not in result:
+            if result and result.get("status") == "success" and not result.get("error"):
                 return result
-            elif result and "error" in result:
-                last_error = result["error"]
+            elif result:
+                last_error = result.get("error") or "provider returned unsuccessful result"
 
         # Pass 2: If all providers were skipped (all in cooldown), try fallback provider as last resort
         print(f"[RAG RETRIEVER] All configured providers were in cooldown or failed. Attempting fallback.")
         fallback_prov = "tavily" if self.search_provider == "serpapi" else "serpapi"
         if fallback_prov == "tavily":
-            result = self._search_tavily(query)
+            result = self._search_tavily(query, keys=tav_keys)
         else:
-            result = self._search_serpapi(query)
+            result = self._search_serpapi(query, keys=serp_keys)
 
-        if result and "error" not in result:
+        if result and result.get("status") == "success" and not result.get("error"):
             return result
-        elif result and "error" in result:
-            last_error = result["error"]
+        elif result:
+            last_error = result.get("error") or "fallback provider returned unsuccessful result"
 
         print(f"[RAG ERROR] All search providers failed. Last error: {last_error}")
-        return {"error": f"All search providers failed. Last: {last_error}"}
+        return {
+            "status": "error",
+            "provider": self.search_provider,
+            "direct_answer": None,
+            "ai_overview": [],
+            "answer_box": {},
+            "knowledge_graph": {},
+            "organic_results": [],
+            "organic_titles": [],
+            "organic_items": [],
+            "error": f"All search providers failed. Last: {last_error}"
+        }
 
-    def _search_serpapi(self, query: str):
+    def _search_serpapi(self, query: str, keys: list = None):
         """SerpAPI search with multi-key failover and rich content extraction."""
-        if not self.serpapi_keys:
+        target_keys = keys if keys is not None else self.serpapi_keys
+        if not target_keys:
             print("[RAG RETRIEVER] SerpAPI: no API keys configured.")
-            return {"error": "SerpAPI keys not configured."}
+            return {
+                "status": "error",
+                "provider": "serpapi",
+                "error": "SerpAPI keys not configured.",
+                "direct_answer": None,
+                "ai_overview": [],
+                "answer_box": {},
+                "knowledge_graph": {},
+                "organic_results": [],
+                "organic_items": [],
+            }
 
         params_base = {
             "engine": "google",
@@ -193,7 +248,7 @@ class RAGRetriever:
 
         last_error = "SerpAPI failed"
 
-        for slot_idx, api_key in enumerate(self.serpapi_keys):
+        for slot_idx, api_key in enumerate(target_keys):
             if slot_idx in _exhausted_serpapi_slots:
                 print(f"[RAG RETRIEVER] SerpAPI key slot {slot_idx} skipped (previously exhausted).")
                 continue
@@ -323,6 +378,7 @@ class RAGRetriever:
                     direct_ans = knowledge_graph.get("description", "")
 
                 return {
+                    "status": "success",
                     "provider": "serpapi",
                     "ai_overview": ai_snippets,
                     "answer_box": answer_box,
@@ -331,18 +387,39 @@ class RAGRetriever:
                     "organic_titles": organic_titles,
                     "organic_items": organic_items,
                     "direct_answer": direct_ans,
+                    "error": None,
                     "_search_slot": slot_idx,
                 }
 
             except requests.exceptions.Timeout:
                 print(f"[RAG RETRIEVER] SerpAPI slot {slot_idx}: timed out after {call_timeout}s. Marking provider in cooldown (300s).")
                 mark_search_provider_unhealthy("serpapi", cooldown=300.0)
-                return {"error": "SerpAPI timed out; marked unhealthy."}
+                return {
+                    "status": "timeout",
+                    "provider": "serpapi",
+                    "error": "SerpAPI timed out; marked unhealthy.",
+                    "direct_answer": None,
+                    "ai_overview": [],
+                    "answer_box": {},
+                    "knowledge_graph": {},
+                    "organic_results": [],
+                    "organic_items": [],
+                }
 
             except requests.exceptions.ConnectionError as conn_err:
                 print(f"[RAG RETRIEVER] SerpAPI slot {slot_idx}: connection error ({conn_err}). Marking provider in cooldown (300s).")
                 mark_search_provider_unhealthy("serpapi", cooldown=300.0)
-                return {"error": f"SerpAPI connection error: {conn_err}"}
+                return {
+                    "status": "error",
+                    "provider": "serpapi",
+                    "error": f"SerpAPI connection error: {conn_err}",
+                    "direct_answer": None,
+                    "ai_overview": [],
+                    "answer_box": {},
+                    "knowledge_graph": {},
+                    "organic_results": [],
+                    "organic_items": [],
+                }
 
             except Exception as exc:
                 print(f"[RAG RETRIEVER] SerpAPI slot {slot_idx}: unexpected exception: {exc}. Trying next key slot.")
@@ -350,17 +427,38 @@ class RAGRetriever:
                 continue
 
         print(f"[RAG RETRIEVER] SerpAPI key slots exhausted. Last error: {last_error}")
-        return {"error": f"SerpAPI failed: {last_error}"}
+        return {
+            "status": "error",
+            "provider": "serpapi",
+            "error": f"SerpAPI failed: {last_error}",
+            "direct_answer": None,
+            "ai_overview": [],
+            "answer_box": {},
+            "knowledge_graph": {},
+            "organic_results": [],
+            "organic_items": [],
+        }
 
-    def _search_tavily(self, query: str):
+    def _search_tavily(self, query: str, keys: list = None):
         """Tavily search provider failover."""
-        if not self.tavily_keys:
+        target_keys = keys if keys is not None else self.tavily_keys
+        if not target_keys:
             print("[RAG RETRIEVER] Tavily: no API keys configured.")
-            return {"error": "Tavily keys not configured."}
+            return {
+                "status": "error",
+                "provider": "tavily",
+                "error": "Tavily keys not configured.",
+                "direct_answer": None,
+                "ai_overview": [],
+                "answer_box": {},
+                "knowledge_graph": {},
+                "organic_results": [],
+                "organic_items": [],
+            }
 
         last_error = "Tavily failed"
 
-        for slot_idx, api_key in enumerate(self.tavily_keys):
+        for slot_idx, api_key in enumerate(target_keys):
             if slot_idx in _exhausted_tavily_slots:
                 print(f"[RAG RETRIEVER] Tavily key slot {slot_idx} skipped (previously exhausted).")
                 continue
@@ -421,6 +519,7 @@ class RAGRetriever:
                 print(f"[RAG RETRIEVER] Tavily slot {slot_idx} succeeded. results={len(organic_snippets)}, direct_answer={'yes' if tavily_answer else 'no'}")
 
                 return {
+                    "status": "success",
                     "provider": "tavily",
                     "ai_overview": [tavily_answer] if tavily_answer else [],
                     "answer_box": {"answer": tavily_answer} if tavily_answer else {},
@@ -429,6 +528,7 @@ class RAGRetriever:
                     "organic_titles": organic_titles,
                     "organic_items": tavily_items,
                     "direct_answer": tavily_answer,
+                    "error": None,
                     "_search_slot": slot_idx,
                 }
 
@@ -436,31 +536,98 @@ class RAGRetriever:
                 print(f"[RAG RETRIEVER] Tavily slot {slot_idx}: timed out. Marking provider in cooldown (300s).")
                 mark_search_provider_unhealthy("tavily", cooldown=300.0)
                 last_error = f"Tavily slot {slot_idx} timeout"
-                return {"error": "Tavily timed out; marked unhealthy."}
+                return {
+                    "status": "timeout",
+                    "provider": "tavily",
+                    "error": "Tavily timed out; marked unhealthy.",
+                    "direct_answer": None,
+                    "ai_overview": [],
+                    "answer_box": {},
+                    "knowledge_graph": {},
+                    "organic_results": [],
+                    "organic_items": [],
+                }
             except requests.exceptions.ConnectionError as conn_err:
                 print(f"[RAG RETRIEVER] Tavily slot {slot_idx}: connection error ({conn_err}). Marking provider in cooldown (300s).")
                 mark_search_provider_unhealthy("tavily", cooldown=300.0)
-                return {"error": f"Tavily connection error: {conn_err}"}
+                return {
+                    "status": "error",
+                    "provider": "tavily",
+                    "error": f"Tavily connection error: {conn_err}",
+                    "direct_answer": None,
+                    "ai_overview": [],
+                    "answer_box": {},
+                    "knowledge_graph": {},
+                    "organic_results": [],
+                    "organic_items": [],
+                }
             except Exception as exc:
                 print(f"[RAG RETRIEVER] Tavily slot {slot_idx}: exception: {exc}")
                 last_error = f"Tavily slot {slot_idx} exception: {exc}"
                 continue
 
-        return {"error": f"Tavily failed: {last_error}"}
+        return {
+            "status": "error",
+            "provider": "tavily",
+            "error": f"Tavily failed: {last_error}",
+            "direct_answer": None,
+            "ai_overview": [],
+            "answer_box": {},
+            "knowledge_graph": {},
+            "organic_results": [],
+            "organic_items": [],
+        }
 
     # ------------------------------------------------------------------
     # Calendar
     # ------------------------------------------------------------------
 
-    def _retrieve_calendar(self, query: str):
+    def _retrieve_calendar(self, query: str, user_id=None):
         try:
-            res = self.calendar_controller.process_calendar_query(query)
-            if not res or (isinstance(res, dict) and "error" in res):
-                print(f"[RAG ERROR] Calendar controller returned error: {res}")
-            return res
+            resolved_uid = user_id
+            if resolved_uid is None:
+                try:
+                    from instance.config import settings
+                    resolved_uid = getattr(settings, 'CURRENT_USER_ID', None)
+                except Exception:
+                    pass
+            res = self.calendar_controller.process_calendar_query(query, user_id=resolved_uid)
+            if not isinstance(res, dict):
+                return {
+                    "status": "error",
+                    "provider": "calendar_controller",
+                    "error": "Invalid calendar response format",
+                    "direct_answer": None,
+                    "holidays": [],
+                    "personal_events": [],
+                    "organic_results": [],
+                    "organic_items": [],
+                }
+            speech_resp = res.get("speech_response") or ""
+            return {
+                "status": "success" if res.get("success", True) else "error",
+                "provider": "calendar_controller",
+                "speech_response": speech_resp,
+                "direct_answer": speech_resp,
+                "holidays": res.get("holidays", []),
+                "personal_events": res.get("personal_events", []),
+                "calendar_data": res,
+                "organic_results": [speech_resp] if speech_resp else [],
+                "organic_items": [{"title": "Calendar", "snippet": speech_resp, "link": ""}] if speech_resp else [],
+                "error": None if res.get("success", True) else res.get("status", "error"),
+            }
         except Exception as exc:
             print(f"[RAG ERROR] Calendar retrieval failed: {exc}")
-            return {"error": f"Calendar retrieval failed: {exc}"}
+            return {
+                "status": "error",
+                "provider": "calendar_controller",
+                "error": f"Calendar retrieval failed: {exc}",
+                "direct_answer": None,
+                "holidays": [],
+                "personal_events": [],
+                "organic_results": [],
+                "organic_items": [],
+            }
 
     # ------------------------------------------------------------------
     # Location
@@ -491,7 +658,7 @@ class RAGRetriever:
     # ------------------------------------------------------------------
 
     def _retrieve_memory(self, query: str, user_id=None):
-        effective_uid = user_id or getattr(CONFIG, 'CURRENT_USER_ID', None) or CONFIG.get_last_user()
+        effective_uid = user_id or getattr(CONFIG, 'CURRENT_USER_ID', None)
         if not effective_uid:
             print("[RAG ERROR] Memory retrieval: user not authenticated.")
             return {"error": "User not authenticated. Cannot retrieve memory."}
@@ -540,7 +707,7 @@ class RAGRetriever:
     # ------------------------------------------------------------------
 
     def _retrieve_history(self, query: str, user_id=None):
-        effective_uid = user_id or getattr(CONFIG, 'CURRENT_USER_ID', None) or CONFIG.get_last_user()
+        effective_uid = user_id or getattr(CONFIG, 'CURRENT_USER_ID', None)
         if not effective_uid:
             print("[RAG RETRIEVER] No active session (no authenticated user).")
             return {"recent_history": [], "status": "No active session."}

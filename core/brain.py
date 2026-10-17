@@ -343,6 +343,17 @@ def _evaluate_context_relevance(
     elif has_topic_overlap:
         relevant_topic = prev_topic
 
+    # If current intent is email and topic is not yet extracted from prior context, extract from utterance
+    if not relevant_topic and (current_intent in ("EMAIL", "Intent.EMAIL") or "email" in str(current_intent).lower() or "mail" in inp_low):
+        try:
+            from modules.assistant_email.email_controller import _parse_email_intent
+            p = _parse_email_intent(user_input or routing_input)
+            cand_topic = p.get("topic") or p.get("body_raw")
+            if cand_topic and cand_topic.strip():
+                relevant_topic = cand_topic.strip()
+        except Exception:
+            pass
+
     # 3. Check active goal relevance
     curr_g = dialogue_mgr.current_state.current_goal
     g_status = (curr_g.get("status") if isinstance(curr_g, dict) else None) or dialogue_mgr.current_state.goal_status or "IDLE"
@@ -379,7 +390,7 @@ def _evaluate_context_relevance(
 # Public API
 # ---------------------------------------------------------------------------
 
-def brain_process(
+def _brain_process_core(
     user_input: str,
     user_id: str = "default",
     on_progress: Optional[Callable[[str], None]] = None,
@@ -424,20 +435,30 @@ def brain_process(
     # ------------------------------------------------------------------
     try:
         from modules.assistant_email.email_controller import (
-            is_active_email_session, handle_email_command, _resolve_user
+            is_active_email_session, handle_email_command, _resolve_user,
+            get_email_session_state, is_email_session_input,
+            STATE_WAITING_FOR_RECIPIENT_ADDRESS, STATE_EMAIL_AMBIGUOUS_OUTCOME
         )
         cur_u = _resolve_user(user_id)
         if is_active_email_session(cur_u):
-            em_res = handle_email_command(user_input, user_id=cur_u)
-            resp_str = em_res.get("message") or em_res.get("response") or ""
-            dialogue_mgr.record_response(resp_str)
-            return {
-                "status": "success" if em_res.get("success", False) else "error",
-                "intent": "EMAIL",
-                "response": resp_str,
-                "handled": True,
-                "email_result": em_res,
-            }
+            sess_state = get_email_session_state(cur_u)
+            should_handle = True
+            if sess_state in (STATE_WAITING_FOR_RECIPIENT_ADDRESS, STATE_EMAIL_AMBIGUOUS_OUTCOME):
+                if not is_email_session_input(user_input, cur_u):
+                    should_handle = False
+
+            if should_handle:
+                em_res = handle_email_command(user_input, user_id=cur_u)
+                resp_str = em_res.get("message") or em_res.get("response") or ""
+                dialogue_mgr.record_response(resp_str)
+                is_ok = bool(em_res.get("success", False) or em_res.get("status") in ("clarification", "waiting_for_recipient_address", "pending_confirmation", "recording_email_message") or em_res.get("needs_clarification"))
+                return {
+                    "status": "success" if is_ok else "error",
+                    "intent": "EMAIL",
+                    "response": resp_str,
+                    "handled": True,
+                    "email_result": em_res,
+                }
     except Exception as _em_err:
         pass
 
@@ -496,6 +517,15 @@ def brain_process(
     # Step 1.1c — CONCURRENT TASK ORCHESTRATION & PROGRESSIVE UPDATES
     # ------------------------------------------------------------------
     uid_int = int(user_id) if (user_id and str(user_id).isdigit()) else 1
+
+    # Ensure context manager in-memory history is seeded from PostgreSQL if empty
+    try:
+        from extensions.context_manager import context_manager
+        if not context_manager.history:
+            context_manager.set_db_manager(None, uid_int)
+    except Exception:
+        pass
+
     from core.task_execution_manager import get_task_execution_manager, TaskPriority, TaskStatus
     tem = get_task_execution_manager()
     pending_updates = tem.notification_manager.get_and_clear_notifications(uid_int)
@@ -525,6 +555,84 @@ def brain_process(
             "response": full_resp,
             "handled": True,
             "semantic_representation": semantic_rep.to_dict(),
+        }
+
+    # ------------------------------------------------------------------
+    # Step 1.1b000 — VOICE SPEED & IDENTITY CONFIGURATION (Fast-Path)
+    # ------------------------------------------------------------------
+    if semantic_rep.intent == "VOICE_CONFIGURATION":
+        from core.configuration_service import get_configuration_service
+        from legacy.tts import apply_voice_profile
+        cfg = get_configuration_service()
+        action = getattr(semantic_rep, "action", "") or (getattr(semantic_rep, "parameters", {}) or {}).get("action", "")
+
+        current_rate = int(cfg.get_preference(uid_int, "voice_rate", cfg.get_preference(uid_int, "assistant_voice_rate", 135)))
+        current_vid = cfg.get_preference(uid_int, "voice_id", cfg.get_preference(uid_int, "assistant_voice_id", None))
+        current_vol_raw = float(cfg.get_preference(uid_int, "voice_volume", cfg.get_preference(uid_int, "assistant_voice_volume", 100.0)))
+        current_vol = current_vol_raw / 100.0 if current_vol_raw > 1.0 else current_vol_raw
+
+        if action == "decrease_rate":
+            new_rate = max(110, current_rate - 15)
+            cfg.set_preference(uid_int, "voice_rate", new_rate)
+            apply_voice_profile(current_vid, rate=new_rate, volume=current_vol)
+            resp_text = f"I have slowed down my speaking rate to {new_rate} words per minute."
+        elif action == "increase_rate":
+            new_rate = min(180, current_rate + 15)
+            cfg.set_preference(uid_int, "voice_rate", new_rate)
+            apply_voice_profile(current_vid, rate=new_rate, volume=current_vol)
+            resp_text = f"I have increased my speaking rate to {new_rate} words per minute."
+        elif action == "reset_rate":
+            new_rate = 135
+            cfg.set_preference(uid_int, "voice_rate", new_rate)
+            apply_voice_profile(current_vid, rate=new_rate, volume=current_vol)
+            resp_text = "I've reset my speaking rate to natural speed, 135 words per minute."
+        elif action == "restore_voice":
+            from legacy.memory_manager import get_voice_profile_db
+            prof = get_voice_profile_db(uid_int)
+            saved_vid = prof.get("voice_id")
+            saved_rate = prof.get("voice_rate", 135)
+            saved_vol = prof.get("voice_volume", 1.0)
+            new_rate = saved_rate
+            if saved_vid:
+                cfg.set_preference(uid_int, "voice_id", saved_vid)
+                cfg.set_preference(uid_int, "voice_rate", saved_rate)
+                apply_voice_profile(saved_vid, rate=saved_rate, volume=saved_vol)
+                resp_text = "I've restored your previously configured voice profile."
+            else:
+                resp_text = "Your voice settings are active at natural conversational speed."
+        else:
+            new_rate = current_rate
+            resp_text = "Voice configuration updated."
+
+        dialogue_mgr.current_state.session_context["last_changed_setting"] = "voice_rate"
+        dialogue_mgr.current_state.session_context["last_changed_setting_value"] = locals().get("new_rate", 135)
+        try:
+            from core.os_gateway import get_os_action_history
+            get_os_action_history().record_action(
+                user_id=uid_int,
+                operation_type="CONFIG_CHANGE",
+                capability="SYSTEM_SETTINGS",
+                target="voice_rate",
+                parameters={"value": locals().get("new_rate", 135)},
+                execution_method="configuration_service",
+                risk_level="LOW",
+                status="SUCCESS",
+                verified=True,
+                result_message=resp_text
+            )
+        except Exception:
+            pass
+
+        full_resp = (pending_prefix + resp_text).strip()
+        dialogue_mgr.record_response(full_resp)
+        rep_dict = semantic_rep.to_dict() if hasattr(semantic_rep, "to_dict") else {"intent": "VOICE_CONFIGURATION", "action": action}
+        return {
+            "status": "success",
+            "intent": "VOICE_CONFIGURATION",
+            "response": full_resp,
+            "action_required": True,
+            "handled": True,
+            "semantic_representation": rep_dict,
         }
 
     # ------------------------------------------------------------------
@@ -606,15 +714,241 @@ def brain_process(
             "semantic_representation": semantic_rep.to_dict(),
         }
 
-    if semantic_rep.intent == "MEMORY_QUERY" and (
-        semantic_rep.historical_query_type == "recent_destination"
-        or semantic_rep.action in ("recall_previous_turn", "recall_last_request", "memory_query")
-        or any(w in clean_low for w in ("what did i ask", "what did i just ask", "what was the last thing i asked", "what was my last request"))
+    # ------------------------------------------------------------------
+    # Step 1.1b0b — COMMAND CONTINUITY & CONTEXT HANDOFF
+    # ------------------------------------------------------------------
+    # Case 1: "Change that setting to 150" / "Set that setting to 150"
+    m_change_setting = re.search(r'\b(?:change|set)\s+(?:that|the)\s+(?:setting\s+)?to\s+(\d+)\b', clean_low)
+    if m_change_setting:
+        val = int(m_change_setting.group(1))
+        target_pref = dialogue_mgr.current_state.session_context.get("last_changed_setting") or "voice_rate"
+        from core.configuration_service import get_configuration_service
+        from legacy.tts import apply_voice_profile
+        cfg = get_configuration_service()
+        cfg.set_preference(uid_int, target_pref, val)
+        current_vid = cfg.get_preference(uid_int, "voice_id", None)
+        current_vol_raw = float(cfg.get_preference(uid_int, "voice_volume", 100.0))
+        current_vol = current_vol_raw / 100.0 if current_vol_raw > 1.0 else current_vol_raw
+        apply_voice_profile(current_vid, rate=val, volume=current_vol)
+
+        dialogue_mgr.current_state.session_context["last_changed_setting"] = target_pref
+        dialogue_mgr.current_state.session_context["last_changed_setting_value"] = val
+
+        try:
+            from core.os_gateway import get_os_action_history
+            get_os_action_history().record_action(
+                user_id=uid_int,
+                operation_type="CONFIG_CHANGE",
+                capability="SYSTEM_SETTINGS",
+                target=target_pref,
+                parameters={"value": val},
+                execution_method="configuration_service",
+                risk_level="LOW",
+                status="SUCCESS",
+                verified=True,
+                result_message=f"{target_pref} changed to {val}"
+            )
+        except Exception:
+            pass
+
+        resp_text = f"I've changed your {target_pref.replace('_', ' ')} to {val}."
+        full_resp = (pending_prefix + resp_text).strip()
+        dialogue_mgr.record_response(full_resp)
+        return {
+            "status": "success",
+            "intent": "VOICE_CONFIGURATION" if target_pref == "voice_rate" else "CONFIG_CHANGE",
+            "response": full_resp,
+            "action_required": True,
+            "handled": True,
+            "semantic_representation": semantic_rep.to_dict(),
+        }
+
+    # Case 2: "Now open the website we used earlier" / "open the site we used earlier"
+    if re.search(r'\b(?:open\s+(?:the\s+)?(?:website|site|page|url)\s+(?:we\s+used\s+earlier|from\s+earlier|from\s+before|we\s+were\s+using)|now\s+open\s+the\s+website\s+we\s+used\s+earlier)\b', clean_low):
+        past_sites = semantic_understanding_engine.memory_retriever.retrieve_past_websites(uid_int)
+        target_url = None
+        for s in past_sites:
+            content = s.get("content", "")
+            m_url = re.search(r'(https?://[^\s]+|www\.[^\s]+|[a-zA-Z0-9.\-]+\.(?:com|org|net|edu|gov|io|ai|co)[^\s]*)', content)
+            if m_url:
+                target_url = m_url.group(1)
+                break
+
+        if not target_url:
+            try:
+                from core.os_gateway import get_os_action_history
+                acts = get_os_action_history().get_recent_actions(user_id=uid_int, limit=20)
+                for a in acts:
+                    if a.get("capability") == "BROWSER" or a.get("operation_type") in ("open_url", "open_browser"):
+                        tgt = a.get("target") or (a.get("parameters") or {}).get("url")
+                        if tgt and ("http" in str(tgt) or "." in str(tgt)):
+                            target_url = str(tgt)
+                            break
+            except Exception:
+                pass
+
+        if not target_url:
+            target_url = dialogue_mgr.current_state.session_context.get("last_opened_website")
+
+        if target_url:
+            if not target_url.startswith("http://") and not target_url.startswith("https://"):
+                target_url = "https://" + target_url
+            try:
+                from modules.browser.browser_controller import open_url
+                open_url(target_url)
+            except Exception:
+                import webbrowser
+                webbrowser.open(target_url)
+
+            dialogue_mgr.current_state.session_context["last_opened_website"] = target_url
+
+            try:
+                from core.os_gateway import get_os_action_history
+                get_os_action_history().record_action(
+                    user_id=uid_int,
+                    operation_type="open_url",
+                    capability="BROWSER",
+                    target=target_url,
+                    parameters={"url": target_url},
+                    execution_method="browser_controller.open_url",
+                    risk_level="LOW",
+                    status="SUCCESS",
+                    verified=True,
+                    result_message=f"Opened {target_url}"
+                )
+            except Exception:
+                pass
+
+            resp_text = f"Opening {target_url}."
+            full_resp = (pending_prefix + resp_text).strip()
+            dialogue_mgr.record_response(full_resp)
+            return {
+                "status": "success",
+                "intent": "BROWSER",
+                "action": "open_url",
+                "response": full_resp,
+                "url": target_url,
+                "action_required": True,
+                "handled": True,
+                "semantic_representation": semantic_rep.to_dict(),
+            }
+        else:
+            resp_text = "I don't have a record of a website we used earlier."
+            full_resp = (pending_prefix + resp_text).strip()
+            dialogue_mgr.record_response(full_resp)
+            return {
+                "status": "success",
+                "intent": "MEMORY_QUERY",
+                "response": full_resp,
+                "action_required": False,
+                "handled": True,
+                "semantic_representation": semantic_rep.to_dict(),
+            }
+
+    # Case 3: "Continue what we were doing earlier" / "continue our earlier task"
+    if re.search(r'\b(?:continue\s+(?:what\s+we\s+were\s+doing(?:\s+earlier)?|our\s+earlier\s+task|earlier\s+task|what\s+i\s+was\s+doing))\b', clean_low):
+        resumed = False
+        resumed_title = None
+        if dialogue_mgr.current_state.goal_status == "WAITING_FOR_USER" and dialogue_mgr.current_state.pending_goal_continuation:
+            continuation = dialogue_mgr.current_state.pending_goal_continuation
+            resumed_title = continuation.get("raw_input", "earlier goal")
+            dialogue_mgr.current_state.pending_goal_continuation = None
+            dialogue_mgr.current_state.goal_status = "RUNNING"
+            resumed = True
+        elif dialogue_mgr.current_state.current_goal and isinstance(dialogue_mgr.current_state.current_goal, dict):
+            curr_g = dialogue_mgr.current_state.current_goal
+            if curr_g.get("status") not in ("COMPLETED", "CANCELLED"):
+                resumed_title = curr_g.get("topic") or curr_g.get("goal_id", "earlier goal")
+                dialogue_mgr.current_state.goal_status = "RUNNING"
+                curr_g["status"] = "RUNNING"
+                resumed = True
+
+        if not resumed:
+            active_items = []
+            try:
+                from core.db_pool import get_db_pool
+                pool = get_db_pool()
+                if pool and pool.is_healthy():
+                    with pool.get_cursor() as cur:
+                        cur.execute("""
+                            SELECT goal_id, title FROM goals
+                            WHERE user_id = %s AND status IN ('ACTIVE', 'PAUSED', 'PENDING', 'WAITING_FOR_USER')
+                            ORDER BY updated_at DESC LIMIT 3;
+                        """, (uid_int,))
+                        for row in cur.fetchall():
+                            active_items.append({"id": row[0], "title": row[1] or "goal", "type": "goal"})
+
+                        cur.execute("""
+                            SELECT task_id, normalized_goal FROM concurrent_tasks
+                            WHERE user_id = %s AND status IN ('ACTIVE', 'PAUSED', 'PENDING', 'RUNNING')
+                            ORDER BY created_at DESC LIMIT 3;
+                        """, (uid_int,))
+                        for row in cur.fetchall():
+                            active_items.append({"id": row[0], "title": row[1] or "task", "type": "task"})
+            except Exception:
+                pass
+
+            if len(active_items) == 1:
+                resumed = True
+                resumed_title = active_items[0]["title"]
+            elif len(active_items) > 1:
+                titles_str = " and ".join(f"'{item['title']}'" for item in active_items[:2])
+                resp_text = f"We have multiple tasks from earlier: {titles_str}. Which one would you like to continue?"
+                full_resp = (pending_prefix + resp_text).strip()
+                dialogue_mgr.record_response(full_resp)
+                dialogue_mgr.current_state.goal_status = "WAITING_FOR_USER"
+                return {
+                    "status": "waiting_for_user",
+                    "intent": "GOAL_MANAGEMENT",
+                    "response": full_resp,
+                    "action_required": False,
+                    "handled": True,
+                    "semantic_representation": semantic_rep.to_dict(),
+                }
+
+        if resumed:
+            resp_text = f"Resuming our earlier work on '{resumed_title}'."
+            full_resp = (pending_prefix + resp_text).strip()
+            dialogue_mgr.record_response(full_resp)
+            return {
+                "status": "success",
+                "intent": "GOAL_MANAGEMENT",
+                "response": full_resp,
+                "action_required": True,
+                "handled": True,
+                "semantic_representation": semantic_rep.to_dict(),
+            }
+        else:
+            resp_text = "There are no active or paused tasks from earlier to continue."
+            full_resp = (pending_prefix + resp_text).strip()
+            dialogue_mgr.record_response(full_resp)
+            return {
+                "status": "success",
+                "intent": "GOAL_MANAGEMENT",
+                "response": full_resp,
+                "action_required": False,
+                "handled": True,
+                "semantic_representation": semantic_rep.to_dict(),
+            }
+
+    if (
+        semantic_rep.intent == "MEMORY_QUERY"
+        or (semantic_rep.historical_query_type and semantic_rep.historical_query_type != "current_environment" and semantic_rep.intent != "CURRENT_ENVIRONMENT_QUERY" and not semantic_rep.action_required)
+        or any(w in clean_low for w in (
+            "what did i ask", "what did i just ask", "what was the last thing i asked",
+            "what was my last request", "what did you change", "what was changed",
+            "what happened when you tried", "did that command succeed", "what did i ask you to remember",
+            "what is the database", "what database does this project use", "what is my assistant's name",
+            "what name did i choose for my assistant"
+        ))
     ):
         mem_ans = semantic_understanding_engine.memory_retriever.answer_historical_query(
             uid_int, semantic_rep, dialogue_mgr.current_state
         )
-        sub_int = "RECENT_DESTINATION" if semantic_rep.historical_query_type == "recent_destination" else "CONVERSATIONAL_HISTORY"
+        sub_int = (
+            "RECENT_DESTINATION" if semantic_rep.historical_query_type == "recent_destination"
+            else semantic_rep.historical_query_type or "CONVERSATIONAL_HISTORY"
+        )
         full_resp = (pending_prefix + mem_ans).strip()
         dialogue_mgr.record_response(full_resp)
         return {
@@ -678,10 +1012,16 @@ def brain_process(
         ):
             if any(w in clean_low for w in ("cpu", "ram", "memory", "gpu", "os", "hostname", "specs", "system info", "hardware")):
                 s_info = uca.get_system_info()
+                cpu_cores = s_info.get('cpu_physical_cores') or s_info.get('cpu_logical_cores') or s_info.get('cpu_count', 'N/A')
+                cpu_pct = s_info.get('cpu_usage_percent', s_info.get('cpu_percent', 'N/A'))
+                ram_pct = s_info.get('ram_usage_percent', s_info.get('ram_percent', 'N/A'))
+                arch = s_info.get('architecture', '')
+                uptime = s_info.get('uptime_hours', '')
+                uptime_str = f", up for {uptime:.1f} hours" if isinstance(uptime, (int, float)) else ""
                 ans = (
-                    f"Machine: {s_info['hostname']} ({s_info['os_name']} {s_info['os_release']}, Build {s_info['os_version']}). "
-                    f"CPU: {s_info['cpu_count']} cores ({s_info['cpu_percent']}% usage). "
-                    f"RAM: {s_info['ram_used_gb']} GB used of {s_info['ram_total_gb']} GB ({s_info['ram_percent']}%)."
+                    f"Machine: {s_info.get('hostname')} ({s_info.get('os_name')} {s_info.get('os_release')}, {arch}, Build {s_info.get('os_version')}{uptime_str}). "
+                    f"CPU: {cpu_cores} cores ({cpu_pct}% usage). "
+                    f"RAM: {s_info.get('ram_used_gb')} GB used of {s_info.get('ram_total_gb')} GB ({ram_pct}%)."
                 )
             else:
                 ans = uca.explain_system_visibility(user_id=user_id)
@@ -2940,7 +3280,8 @@ def brain_process(
         "primary_intent": analysis.primary_intent.name,
         "is_multi_step": analysis.has_multiple_intents,
         "created_turn": turn_data.get("turn_number", 1),
-        "status": "RUNNING" if analysis.has_multiple_intents else "IDLE"
+        "status": "RUNNING" if analysis.has_multiple_intents else "IDLE",
+        "topic": sem_topic
     }
     subgoals: List[Dict[str, Any]] = []
 
@@ -3328,6 +3669,51 @@ def brain_process(
     result["goal_outcome"] = outcome.to_dict()
 
     return result
+
+
+def brain_process(
+    user_input: str,
+    user_id: str = "default",
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Main Brain entry point wrapped with persistent memory & interaction recording.
+    Guarantees every interaction is safely persisted to PostgreSQL, synchronous
+    fact extraction is run, in-memory conversational memory is updated, and
+    context manager tracks the history.
+    """
+    res = _brain_process_core(user_input, user_id=user_id, on_progress=on_progress)
+    try:
+        resp_text = (res.get("response") or res.get("summary") or "").strip()
+        if user_input and user_input.strip() and resp_text:
+            uid = int(user_id) if (user_id and str(user_id).isdigit()) else 1
+            # 1. In-memory Conversational memory buffer (synchronous & instant)
+            from extensions.conversational_memory import recent_memory, _lock
+            with _lock:
+                recent_memory.append({
+                    "user_command": user_input,
+                    "assistant_response": resp_text,
+                    "user_id": uid
+                })
+
+            # 2. Context manager history tracking (synchronous & instant)
+            from extensions.context_manager import context_manager
+            intent_name = res.get("intent")
+            context_manager.add_turn("user", user_input, intent=intent_name)
+            context_manager.add_turn("assistant", resp_text, intent=intent_name)
+
+            # 3. PostgreSQL persistent memory & fact extraction (background daemon thread)
+            import threading
+            def _async_db_log():
+                try:
+                    from core.chatgpt_memory import get_chatgpt_memory
+                    get_chatgpt_memory().log_interaction(uid, user_input, resp_text)
+                except Exception:
+                    pass
+            threading.Thread(target=_async_db_log, daemon=True, name="brain-async-log").start()
+    except Exception as _persist_err:
+        pass
+    return res
 
 
 brain_route_and_execute = brain_process
@@ -4106,6 +4492,17 @@ def _verify_action_result(
             exp_mgr.record_from_execution_record(record)
         except Exception as exp_err:
             print(f"[EXPERIENCE] [WARN] Could not record execution experience: {exp_err}")
+
+        # Record execution in dialogue state manager
+        try:
+            from extensions.dialogue_state_manager import get_dialogue_manager
+            dm = get_dialogue_manager(str(user_id))
+            dm.record_execution_result(
+                execution_result=result,
+                intents=[intent_name] if intent_name else []
+            )
+        except Exception as dm_err:
+            print(f"[DIALOGUE] [WARN] Could not record execution result: {dm_err}")
     except Exception as e:
         print(f"[VERIFY] [WARN] Could not save execution record: {e}")
 

@@ -194,7 +194,7 @@ def send_email(
                     candidate = smtplib.SMTP(smtp_host, port, timeout=timeout)
                     candidate.ehlo()
                     candidate.starttls()
-                    candidate.login(email_id, str(email_pass).strip().replace(" ", ""))
+                candidate.login(email_id, str(email_pass).strip().replace(" ", ""))
                 server = candidate
                 break
             except smtplib.SMTPAuthenticationError:

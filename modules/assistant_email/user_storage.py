@@ -200,30 +200,40 @@ def get_user_email(username: Any) -> Tuple[Optional[str], Optional[str]]:
                     except Exception as e:
                         print(f"[SECURITY] [ERROR] Could not decrypt credentials for {k}: {e}")
 
-    # Fallback to .env credentials for primary user if storage is missing or dummy
+    # Check Central CredentialManager for this user
     try:
-        from instance.config import settings
-        primary_uid = getattr(settings, "CURRENT_USER_ID", 8)
-        primary_uname = getattr(settings, "CURRENT_USERNAME", "ram")
-    except Exception:
-        primary_uid = 8
-        primary_uname = "ram"
+        from core.credential_manager import get_credential_manager
+        cred = get_credential_manager().get_credential(username, "email")
+        if cred:
+            parts = cred.split(":", 1) if ":" in cred else (cred, "")
+            if len(parts) == 2 and parts[0] and parts[1]:
+                return parts[0].strip(), parts[1].strip()
+    except Exception as e:
+        print(f"[SECURITY] [WARN] CredentialManager email lookup error: {e}")
 
-    norm_u = _normalize_user_key(username)
-    is_primary = (
-        username is None
-        or norm_u in ("default_user", f"user_{primary_uid}", str(primary_uid), str(primary_uname).lower())
-        or any(k in candidate_keys for k in [str(primary_uname).lower(), f"user_{primary_uid}", str(primary_uid), "default_user"])
-    )
+    # Check default_user in user_emails.json
+    def_user_info = data.get("default_user")
+    if def_user_info and isinstance(def_user_info, dict):
+        d_email = def_user_info.get("email")
+        d_encrypted_pass = def_user_info.get("app_password")
+        if d_email and d_encrypted_pass:
+            clean_e = str(d_email).strip().lower()
+            if not (clean_e.endswith("@example.com") or clean_e.endswith("@test.com")):
+                try:
+                    decrypted_pass = decrypt_password(d_encrypted_pass)
+                    clean_pass = decrypted_pass.strip().replace(" ", "") if decrypted_pass else ""
+                    if clean_pass:
+                        return d_email, clean_pass
+                except Exception:
+                    pass
 
-    if is_primary:
-        from dotenv import load_dotenv
-        load_dotenv()
-        env_email = os.getenv("EMAIL_ID")
-        env_pass = os.getenv("EMAIL_APP_PASSWORD") or os.getenv("EMAIL_PASS")
-        if env_email and env_pass:
-            clean_pass = env_pass.strip().replace(" ", "")
-            return env_email.strip(), clean_pass
+    # Check environment variables fallback for configured email provider
+    env_email = os.getenv("EMAIL_ID")
+    env_pass = os.getenv("EMAIL_APP_PASSWORD") or os.getenv("EMAIL_PASS")
+    if env_email and env_pass:
+        clean_e = env_email.strip().lower()
+        if not (clean_e.endswith("@example.com") or clean_e.endswith("@test.com")):
+            return env_email.strip(), env_pass.strip().replace(" ", "")
 
     return None, None
 
@@ -260,6 +270,12 @@ def save_user_email(username: Any, email: str, password: str, account_name: str 
     if not saved:
         return False
 
+    try:
+        from core.credential_manager import get_credential_manager
+        get_credential_manager().save_credential(username, "email", f"{email.strip()}:{password.strip()}")
+    except Exception:
+        pass
+
     # Verification read to guarantee storage and encryption integrity
     v_email, v_pass = get_user_email(username)
     if v_email == email.strip() and v_pass == password.strip():
@@ -286,6 +302,12 @@ def clear_credentials(username: Any) -> bool:
         if k in data:
             del data[k]
             modified = True
+
+    try:
+        from core.credential_manager import get_credential_manager
+        get_credential_manager().delete_credential(username, "email")
+    except Exception:
+        pass
 
     if modified:
         return save_user_data(data)

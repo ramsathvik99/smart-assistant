@@ -68,7 +68,7 @@ CONFIG = {
 
     # Voice engine settings
     "VOICE_ENGINE": os.getenv("VOICE_ENGINE", "pyttsx3"),
-    "VOICE_RATE": int(os.getenv("VOICE_RATE", "200")),
+    "VOICE_RATE": int(os.getenv("VOICE_RATE", "135")),
     "VOLUME": float(os.getenv("VOLUME", "1.0")),
     "LANGUAGE": os.getenv("LANGUAGE", "en-in"),
 

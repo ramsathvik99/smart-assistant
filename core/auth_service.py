@@ -256,6 +256,37 @@ def log_security_event(user_id: Optional[int], action_name: str, status: str, pa
 
 # ── 4. HIGH-LEVEL USER AUTHENTICATION & REGISTRATION ──────────────────────────
 
+def is_username_available(username: str) -> bool:
+    """
+    Checks if a username is available for registration without creating any database records.
+    Safe against SQL injection and empty/whitespace inputs.
+    """
+    username = (username or "").strip().lower()
+    if not username or len(username) < 2:
+        return False
+    pool = get_db_pool()
+    if pool.is_healthy():
+        try:
+            with pool.get_cursor() as cur:
+                cur.execute("SELECT 1 FROM users WHERE LOWER(username) = %s LIMIT 1;", (username,))
+                return cur.fetchone() is None
+        except Exception as e:
+            print(f"[AUTH] Error checking username availability via pool: {e}")
+    # Fallback to direct connection if pool is unavailable
+    try:
+        from legacy.memory_manager import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM users WHERE LOWER(username) = %s LIMIT 1;", (username,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row is None
+    except Exception as e:
+        print(f"[AUTH] Error checking username availability via direct conn: {e}")
+        return True
+
+
 def register_user(username: str, password: str) -> Dict[str, Any]:
     """
     Registers a new user with secure password hashing and returns an access token.

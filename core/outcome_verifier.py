@@ -1366,6 +1366,27 @@ class VerificationAdapters:
                     found = True
                     break
 
+            if not found:
+                try:
+                    from modules.calendar_manager.calendar_storage import CalendarStorage
+                    cal_storage = CalendarStorage()
+                    from datetime import datetime, timedelta
+                    now = datetime.now()
+                    d1 = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+                    d2 = (now + timedelta(days=30)).strftime("%Y-%m-%d")
+                    ev_map = cal_storage.get_events_range(uid, d1, d2)
+                    for _, ev_list in ev_map.items():
+                        for ev in ev_list:
+                            meta = ev.get("metadata") or {}
+                            n_str = str(meta.get("notes") or "").lower()
+                            if target_content in n_str or (target_content and any(w in n_str for w in target_content.split() if len(w) > 4)):
+                                found = True
+                                break
+                        if found:
+                            break
+                except Exception:
+                    pass
+
             if found or (action_result and action_result.get("success") and not target_content):
                 return OutcomeVerificationResult(
                     status=OutcomeStatus.VERIFIED_SUCCESS,
@@ -1422,7 +1443,7 @@ class VerificationAdapters:
                         verification_method="chatgpt_memory_inspection"
                     )
 
-            if action_result and action_result.get("success"):
+            if action_result and (action_result.get("success") or action_result.get("status") == "success" or action_result.get("handled")):
                 return OutcomeVerificationResult(
                     status=OutcomeStatus.VERIFIED_SUCCESS,
                     verified=True,
@@ -1832,7 +1853,7 @@ class OutcomeVerifier:
             )
 
         # 9. NOTES
-        if (intent_up == "NOTES" or "note" in text_low) and not any(w in text_low for w in ["notepad", "close notepad", "open notepad", "quit notepad"]):
+        if (intent_up == "NOTES" or ("note" in text_low and not any(w in text_low for w in ["meeting", "calendar", "event", "standup", "huddle", "review"]))) and not any(w in text_low for w in ["notepad", "close notepad", "open notepad", "quit notepad"]):
             return ExpectedOutcome(
                 action="save_note",
                 intent=intent_up or "NOTES",

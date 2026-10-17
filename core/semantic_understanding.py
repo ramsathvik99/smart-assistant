@@ -354,6 +354,19 @@ class PostgresHistoricalMemoryRetriever:
         time_filt = rep.time_filter
         user_input_low = rep.user_input.lower()
 
+        # Check factual memory and command recall from centralized ChatGPTMemoryManager
+        try:
+            from core.chatgpt_memory import get_chatgpt_memory
+            chatgpt_mem = get_chatgpt_memory()
+            fact_res = chatgpt_mem.answer_historical_fact_query(int(user_id), rep.user_input)
+            if fact_res:
+                return fact_res
+            cmd_res = chatgpt_mem.answer_historical_command_query(int(user_id), rep.user_input)
+            if cmd_res:
+                return cmd_res
+        except Exception:
+            pass
+
         # 1. Past Search Query ("What did I search for yesterday?", etc.)
         if q_type == "past_search":
             searches = self.retrieve_past_searches(user_id, time_filter=time_filt)
@@ -444,8 +457,17 @@ class PostgresHistoricalMemoryRetriever:
                 if pool and pool.is_healthy():
                     with pool.get_cursor() as cur:
                         cur.execute("""
+                            SELECT target, parameters FROM os_action_history
+                            WHERE user_id = %s AND (operation_type = 'OPEN_APPLICATION' OR capability = 'APPLICATION')
+                            ORDER BY created_at DESC LIMIT 1;
+                        """, (int(user_id),))
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            return f"The last application I opened was {row[0].capitalize()}."
+
+                        cur.execute("""
                             SELECT target, parameters FROM action_records
-                            WHERE user_id = %s AND (action_type = 'OPEN_APPLICATION' OR intent = 'APPLICATION')
+                            WHERE user_id = %s AND (operation = 'OPEN_APPLICATION' OR capability = 'APPLICATION')
                             ORDER BY created_at DESC LIMIT 1;
                         """, (int(user_id),))
                         row = cur.fetchone()
@@ -469,12 +491,12 @@ class PostgresHistoricalMemoryRetriever:
                 if pool and pool.is_healthy():
                     with pool.get_cursor() as cur:
                         cur.execute("""
-                            SELECT topic, content_type FROM content_artifacts
-                            WHERE user_id = %s
+                            SELECT target, parameters FROM os_action_history
+                            WHERE user_id = %s AND operation_type IN ('WEB_SEARCH', 'RESEARCH', 'BROWSE')
                             ORDER BY created_at DESC LIMIT 1;
                         """, (int(user_id),))
                         row = cur.fetchone()
-                        if row:
+                        if row and row[0]:
                             return f"You asked me to gather information about {row[0]}."
             except Exception:
                 pass
@@ -488,15 +510,13 @@ class PostgresHistoricalMemoryRetriever:
                 if pool and pool.is_healthy():
                     with pool.get_cursor() as cur:
                         cur.execute("""
-                            SELECT a.topic, a.content_type, i.target_app
-                            FROM artifact_insertions i
-                            JOIN content_artifacts a ON i.artifact_id = a.artifact_id
-                            WHERE i.user_id = %s
-                            ORDER BY i.inserted_at DESC LIMIT 1;
+                            SELECT target, parameters, result_message FROM os_action_history
+                            WHERE user_id = %s AND operation_type IN ('TYPE_TEXT', 'PASTE_CLIPBOARD', 'INSERT')
+                            ORDER BY created_at DESC LIMIT 1;
                         """, (int(user_id),))
                         row = cur.fetchone()
                         if row:
-                            return f"I inserted the {row[1]} for '{row[0]}' into {row[2].capitalize()}."
+                            return f"I inserted content into {row[0] or 'Notepad'}."
             except Exception:
                 pass
             return "I don't have a record of inserting content into Notepad."
@@ -504,20 +524,10 @@ class PostgresHistoricalMemoryRetriever:
         # 4e. "What did you read before I stopped you?"
         if any(p in user_input_low for p in ("what did you read before", "read before i stopped", "what was being read")):
             try:
-                from core.db_pool import get_db_pool
-                pool = get_db_pool()
-                if pool and pool.is_healthy():
-                    with pool.get_cursor() as cur:
-                        cur.execute("""
-                            SELECT a.topic, a.content_type
-                            FROM artifact_reading_sessions s
-                            JOIN content_artifacts a ON s.artifact_id = a.artifact_id
-                            WHERE s.user_id = %s
-                            ORDER BY s.updated_at DESC LIMIT 1;
-                        """, (int(user_id),))
-                        row = cur.fetchone()
-                        if row:
-                            return f"Before you stopped me, I was reading the {row[1]} for '{row[0]}'."
+                from core.artifact_reader import get_artifact_reading_controller
+                sess = get_artifact_reading_controller().load_latest_paused_session(user_id=int(user_id))
+                if sess and sess.get("filename"):
+                    return f"Before you stopped me, I was reading '{sess.get('filename')}'."
             except Exception:
                 pass
             return "I was not reading any content before being stopped."
@@ -530,12 +540,12 @@ class PostgresHistoricalMemoryRetriever:
                 if pool and pool.is_healthy():
                     with pool.get_cursor() as cur:
                         cur.execute("""
-                            SELECT normalized_goal FROM concurrent_tasks
+                            SELECT title FROM goals
                             WHERE user_id = %s AND status = 'CANCELLED'
-                            ORDER BY completed_at DESC NULLS LAST, created_at DESC LIMIT 1;
+                            ORDER BY updated_at DESC LIMIT 1;
                         """, (int(user_id),))
                         row = cur.fetchone()
-                        if row:
+                        if row and row[0]:
                             return f"You cancelled the task '{row[0]}'."
             except Exception:
                 pass
@@ -1270,7 +1280,7 @@ class SemanticUnderstandingEngine:
         raw_text: str,
         context: Optional[Dict[str, Any]] = None,
         dialogue_state: Optional[Any] = None,
-        user_id: Any = 1,
+        user_id: Any = None,
     ) -> SemanticCommand:
         """
         Derives canonical semantic command representation from natural user language.
@@ -1278,6 +1288,15 @@ class SemanticUnderstandingEngine:
         arbitrates ambiguities, resolves contextual references deterministically,
         and enforces safety invariants.
         """
+        if user_id is None:
+            try:
+                from instance.config import settings
+                user_id = getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user()
+            except Exception:
+                pass
+        if user_id is None:
+            user_id = 1
+
         if not raw_text or not raw_text.strip():
             return SemanticCommand(
                 user_text="",
@@ -1443,6 +1462,36 @@ class SemanticUnderstandingEngine:
                     confidence=1.0,
                 )
 
+        # -------------------------------------------------------------
+        # Calendar & Scheduling Commands (Requirement 1 & AGENTS.md Freeze)
+        # -------------------------------------------------------------
+        is_calendar_schedule = (
+            bool(re.search(r'\b(?:schedule|shedule|create|add|book|set\s+up)\s+(?:an?\s+)?(.+?)\s+(?:on|for|at)\s+(?:\d{4}-\d{2}-\d{2}|\w+\s+\d{1,2}|\d{1,2}(?::\d{2})?\s*(?:am|pm)|today|tomorrow)\b', norm))
+            or bool(re.search(r'\b(?:change|update|reschedule|shift)\s+(?:the\s+)?time\s+of\s+(.+?)\s+to\s+(.+)', norm))
+            or (bool(re.search(r'\b(?:move|reschedule|shift|postpone)\s+(.+?)\s+to\s+(.+)', norm)) and not any(k in norm for k in ["file", "folder", "directory"]))
+            or (bool(re.search(r'\brename\s+(.+?)\s+to\s+(.+)', norm)) and any(k in norm for k in ["sync", "standup", "meeting", "event", "appointment", "call"]) and not any(k in norm for k in ["file", "folder", "directory"]))
+            or bool(re.search(r'\b(?:cancel|delete|remove|drop)\s+(?:all\s+|the\s+|my\s+)?(?:meeting|meetings|event|events|appointment|appointments|sync|standup)(?:\s+(?:for|on|at|tomorrow|today|\d{4}-\d{2}-\d{2}))?\b', norm))
+            or bool(re.search(r'\b(?:what(?:\'s|\s+is)\s+(?:my\s+)?(?:next|upcoming)\s+(?:appointment|meeting|event)|next\s+(?:appointment|meeting|event))\b', norm))
+            or bool(re.search(r'\b(?:plan\s+(?:my\s+)?(?:week|schedule|days?)|weekly\s+plan(?:ning)?)\b', norm))
+            or (bool(re.search(r'\b(?:from|between)\s+(.+?)\s+(?:to|and|-)\s+(.+)', norm)) and any(k in norm for k in ["event", "events", "calendar", "schedule", "meeting", "meetings"]))
+            or bool(re.search(r'\b(?:how\s+many\s+holidays|count\s+(?:the\s+)?holidays|number\s+of\s+holidays)\b', norm))
+            or (bool(re.search(r'\b(?:explain|tell\s+me\s+about)\s+(?:the\s+holiday\s+|holiday\s+)?([a-zA-Z\s]+?)(?:\s+holiday|\s+festival|\s+significance|\s+history|$)', norm)) and any(k in norm for k in ["holiday", "festival", "diwali", "christmas", "easter", "thanksgiving"]))
+            or bool(re.search(r'\b(?:show|check|view|what(?:\'s|\s+is)\s+on)\s+(?:my\s+|today\'?s?\s+)?calendar\b', norm))
+            or bool(re.search(r'\b(?:show|check|view)\s+(?:today\'?s?\s+|my\s+)?events\b', norm))
+        )
+        if is_calendar_schedule and not any(k in norm for k in ["remind me", "reminder", "set a reminder", "alert me"]):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="calendar operation",
+                intent="DAILY_BRIEFING",
+                action="calendar_query",
+                target="calendar",
+                confidence=1.0,
+                safety_class="SAFE",
+                parameters={"action": "calendar_query", "raw_input": text_stripped}
+            )
+
         m_ord = None
         has_browser_links = False
         if dialogue_state:
@@ -1515,6 +1564,87 @@ class SemanticUnderstandingEngine:
                 desired_state="selected",
                 parameters={"action": act_name, "index": idx, "target": str(item_val), "target_type": target_type, "response": f"Selected '{item_val}' from your recommendations."},
                 conversational_reference={"type": "recommendation_item", "index": idx, "value": str(item_val)},
+                confidence=0.99,
+            )
+
+        # --------------------------------------------------------------------
+        # Voice Rate & Speed Configuration Commands
+        # --------------------------------------------------------------------
+        slow_patterns = [
+            r'\b(?:speak|talk)\s+(?:a\s+little\s+|a\s+bit\s+)?(?:slower|more\s+slowly)\b',
+            r'\b(?:you\s+are|you\'re)\s+speaking\s+(?:much\s+|way\s+)?too\s+fast\b',
+            r'\bspeaking\s+too\s+fast\b',
+            r'\bslow\s+down(?:\s+your\s+(?:speech|voice|talking))?\b',
+            r'\b(?:decrease|reduce|lower)\s+(?:your\s+)?(?:speaking\s+|voice\s+|speech\s+)?(?:rate|speed)\b',
+        ]
+        if any(re.search(p, norm) for p in slow_patterns) or norm in (
+            "speak slower", "speak a little slower", "slow down", "you are speaking too fast",
+            "you're speaking too fast", "speaking too fast", "talk slower"
+        ):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="decrease speaking rate",
+                intent="VOICE_CONFIGURATION",
+                action="decrease_rate",
+                parameters={"action": "decrease_rate"},
+                confidence=0.99,
+            )
+
+        fast_patterns = [
+            r'\b(?:speak|talk)\s+(?:a\s+little\s+|a\s+bit\s+)?(?:faster|more\s+quickly)\b',
+            r'\b(?:you\s+are|you\'re)\s+speaking\s+(?:much\s+|way\s+)?too\s+slow\b',
+            r'\bspeaking\s+too\s+slow\b',
+            r'\bspeed\s+up(?:\s+your\s+(?:speech|voice|talking))?\b',
+            r'\b(?:increase|raise)\s+(?:your\s+)?(?:speaking\s+|voice\s+|speech\s+)?(?:rate|speed)\b',
+        ]
+        if any(re.search(p, norm) for p in fast_patterns) or norm in (
+            "speak faster", "speak a little faster", "speed up", "you are speaking too slow",
+            "you're speaking too slow", "speaking too slow", "talk faster"
+        ):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="increase speaking rate",
+                intent="VOICE_CONFIGURATION",
+                action="increase_rate",
+                parameters={"action": "increase_rate"},
+                confidence=0.99,
+            )
+
+        natural_patterns = [
+            r'\b(?:speak|talk)\s+(?:naturally|normally|at\s+normal\s+speed)\b',
+            r'\b(?:normal|natural)\s+(?:speed|rate)\b',
+            r'\breset\s+(?:your\s+)?(?:speaking\s+|voice\s+|speech\s+)?(?:rate|speed)\b',
+        ]
+        if any(re.search(p, norm) for p in natural_patterns) or norm in (
+            "speak naturally", "normal speed", "natural speed", "speak normally",
+            "reset speech speed", "reset speaking rate"
+        ):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="reset speaking rate to natural speed",
+                intent="VOICE_CONFIGURATION",
+                action="reset_rate",
+                parameters={"action": "reset_rate"},
+                confidence=0.99,
+            )
+
+        restore_patterns = [
+            r'\b(?:use|switch\s+to|restore)\s+(?:the\s+)?(?:same|previous|saved)\s+voice(?:\s+as\s+before)?\b',
+            r'\brestore\s+(?:my\s+)?voice\b',
+        ]
+        if any(re.search(p, norm) for p in restore_patterns) or norm in (
+            "use the same voice as before", "restore voice", "restore my voice", "use my saved voice"
+        ):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="restore previously configured voice",
+                intent="VOICE_CONFIGURATION",
+                action="restore_voice",
+                parameters={"action": "restore_voice"},
                 confidence=0.99,
             )
 
@@ -1926,11 +2056,18 @@ class SemanticUnderstandingEngine:
         # -------------------------------------------------------------
         # 10. Polysemous "Play": Games vs Music (Section 4, 8)
         # -------------------------------------------------------------
+        is_email_or_comm = bool(
+            re.search(r'\b(?:email|mail|inbox|unread)\b', norm)
+            or "@" in text_stripped
+            or any(k in norm for k in ("send to", "send an email", "send email", "write email", "compose email", "send him", "send her", "send them", "send a mail", "send mail", "email is", "email address", "'s email"))
+        )
         has_compat = any(k in norm for k in ("compatible", "can i run", "can i download and run", "can run on", "in this system", "on this pc", "requirements"))
         has_game = any(k in norm for k in ("games", "game", "gaming"))
         has_music_noun = any(k in norm for k in ("music", "song", "songs", "tune", "tunes", "track", "spotify"))
+        has_play_game = any(k in norm for k in ("play", "playing", "start a game", "play a game", "play games", "game to play", "games to play", "play some games"))
+        has_game_rec = any(k in norm for k in ("recommend", "recommendation", "recommendations", "suggest", "suggestion", "suggestions", "discover", "discovery", "good games", "best games", "fun games", "ideas for games", "what games", "which games"))
 
-        if has_game and any(k in norm for k in ("installed", "are installed")):
+        if not is_email_or_comm and has_game and any(k in norm for k in ("installed", "are installed")):
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
@@ -1943,7 +2080,7 @@ class SemanticUnderstandingEngine:
                 confidence=1.0,
             )
 
-        if has_game and has_compat:
+        if not is_email_or_comm and has_game and has_compat:
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
@@ -1960,7 +2097,7 @@ class SemanticUnderstandingEngine:
                 parameters={"query": text_stripped, "action": "compatibility_check"},
                 confidence=0.99,
             )
-        if has_game:
+        if not is_email_or_comm and has_game and (has_game_rec or has_play_game) and not has_music_noun:
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
@@ -2369,6 +2506,7 @@ class SemanticUnderstandingEngine:
         text_low = raw_text.lower()
         clean_text = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+|would\s+you\s+|friday\s+|trevon\s+|hey\s+friday\s+|hey\s+trevon\s+)+', '', text_low).strip()
         clean_low = clean_text.rstrip('.?!,').strip()
+        norm = clean_low
 
         # --------------------------------------------------------------------
         # 00. Low Confidence / Garbled STT Plausibility Guard (Section 11)
@@ -2395,6 +2533,87 @@ class SemanticUnderstandingEngine:
                 action="stop_speech",
                 action_required=True,
                 confidence=0.99
+            )
+
+        # --------------------------------------------------------------------
+        # 0.05 Voice Speed & Identity Configuration Commands
+        # --------------------------------------------------------------------
+        slow_patterns = [
+            r'\b(?:speak|talk)\s+(?:a\s+little\s+|a\s+bit\s+)?(?:slower|more\s+slowly)\b',
+            r'\b(?:you\s+are|you\'re)\s+speaking\s+(?:much\s+|way\s+)?too\s+fast\b',
+            r'\bspeaking\s+too\s+fast\b',
+            r'\bslow\s+down(?:\s+your\s+(?:speech|voice|talking))?\b',
+            r'\b(?:decrease|reduce|lower)\s+(?:your\s+)?(?:speaking\s+|voice\s+|speech\s+)?(?:rate|speed)\b',
+        ]
+        if any(re.search(p, clean_low) for p in slow_patterns) or clean_low in (
+            "speak slower", "speak a little slower", "slow down", "you are speaking too fast",
+            "you're speaking too fast", "speaking too fast", "talk slower"
+        ):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User wants assistant to speak slower.",
+                intent="VOICE_CONFIGURATION",
+                action="decrease_rate",
+                sub_intent="DECREASE_RATE",
+                action_required=True,
+                confidence=0.99,
+            )
+
+        fast_patterns = [
+            r'\b(?:speak|talk)\s+(?:a\s+little\s+|a\s+bit\s+)?(?:faster|more\s+quickly)\b',
+            r'\b(?:you\s+are|you\'re)\s+speaking\s+(?:much\s+|way\s+)?too\s+slow\b',
+            r'\bspeaking\s+too\s+slow\b',
+            r'\bspeed\s+up(?:\s+your\s+(?:speech|voice|talking))?\b',
+            r'\b(?:increase|raise)\s+(?:your\s+)?(?:speaking\s+|voice\s+|speech\s+)?(?:rate|speed)\b',
+        ]
+        if any(re.search(p, clean_low) for p in fast_patterns) or clean_low in (
+            "speak faster", "speak a little faster", "speed up", "you are speaking too slow",
+            "you're speaking too slow", "speaking too slow", "talk faster"
+        ):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User wants assistant to speak faster.",
+                intent="VOICE_CONFIGURATION",
+                action="increase_rate",
+                sub_intent="INCREASE_RATE",
+                action_required=True,
+                confidence=0.99,
+            )
+
+        natural_patterns = [
+            r'\b(?:speak|talk)\s+(?:naturally|normally|at\s+normal\s+speed)\b',
+            r'\b(?:normal|natural)\s+(?:speed|rate)\b',
+            r'\breset\s+(?:your\s+)?(?:speaking\s+|voice\s+|speech\s+)?(?:rate|speed)\b',
+        ]
+        if any(re.search(p, clean_low) for p in natural_patterns) or clean_low in (
+            "speak naturally", "normal speed", "natural speed", "speak normally",
+            "reset speech speed", "reset speaking rate"
+        ):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User wants assistant to speak at natural conversational speed.",
+                intent="VOICE_CONFIGURATION",
+                action="reset_rate",
+                sub_intent="RESET_RATE",
+                action_required=True,
+                confidence=0.99,
+            )
+
+        restore_patterns = [
+            r'\b(?:use|switch\s+to|restore)\s+(?:the\s+)?(?:same|previous|saved)\s+voice(?:\s+as\s+before)?\b',
+            r'\brestore\s+(?:my\s+)?voice\b',
+        ]
+        if any(re.search(p, clean_low) for p in restore_patterns) or clean_low in (
+            "use the same voice as before", "restore voice", "restore my voice", "use my saved voice"
+        ):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User wants to restore their previously configured voice.",
+                intent="VOICE_CONFIGURATION",
+                action="restore_voice",
+                sub_intent="RESTORE_VOICE",
+                action_required=True,
+                confidence=0.99,
             )
         if clean_low in ("stop reading", "pause reading"):
             return SemanticIntentRepresentation(
@@ -2704,7 +2923,7 @@ class SemanticUnderstandingEngine:
         # 0c1. Contextual Content Insertion ("write the code here", "put that here")
         # --------------------------------------------------------------------
         has_transfer_verb = bool(re.search(r'\b(?:write|type|put|paste|insert|place)\b', text_low))
-        is_scratch_creation = bool(re.search(r'\b(?:write|create)\s+(?:an?\s+)?(?:note|email|mail|letter|function|program)\b', text_low))
+        is_scratch_creation = bool(re.search(r'\b(?:write|create|generate)\s+(?:an?\s+)?(?:note|email|mail|letter|function|program|query|sql|script|code|algorithm|class|module|interface|struct)\b', text_low))
 
         if has_transfer_verb and not is_scratch_creation:
             # Check if this references an artifact or indicates a transfer to a target/cursor
@@ -2927,6 +3146,47 @@ class SemanticUnderstandingEngine:
                 confidence=0.98
             )
 
+        # Declarative factual recall: Database, Backend, Assistant Name, Preferences, "What did I ask you to remember?"
+        if any(re.search(pat, text_low) for pat in [
+            r'\b(?:which|what)\s+database\b',
+            r'\bwhat\s+database\s+(?:does|is)\b',
+            r'\bwhat\s+(?:technology|backend|tech\s+stack)\s+(?:did\s+i|do\s+we)\s+use\b',
+            r'\bwhat\s+name\s+did\s+i\s+choose\s+(?:for\s+my\s+assistant|for\s+you)\b',
+            r'\bwhat(?:\'s|\s+is)\s+my\s+assistant(?:\'s)?\s+name\b',
+            r'\bwhat\s+did\s+i\s+(?:ask|tell)\s+you\s+to\s+remember\b',
+            r'\bwhat\s+do\s+you\s+remember\s+about\s+(?:me|this\s+project)\b',
+            r'\bwhat\s+(?:response\s+style|style\s+of\s+response)\s+(?:did\s+i|do\s+i)\b',
+        ]):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User is querying persistent declarative facts or preferences from PostgreSQL memory.",
+                intent="MEMORY_QUERY",
+                action="retrieve_user_facts",
+                historical_query_type="factual_memory",
+                memory_required=True,
+                action_required=False,
+                confidence=0.99
+            )
+
+        # Historical command outcomes & settings changes:
+        if any(re.search(pat, text_low) for pat in [
+            r'\bwhat\s+happened\s+when\s+you\s+tried\s+that\s+command\b',
+            r'\bwhat\s+(?:was|were)\s+the\s+outcome\b',
+            r'\bwhat\s+did\s+you\s+change\b',
+            r'\bwhat\s+setting\s+did\s+you\s+change\b',
+            r'\bwhat\s+error\s+did\s+we\s+fix\b',
+        ]):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User is querying historical command outcomes and execution records.",
+                intent="MEMORY_QUERY",
+                action="retrieve_command_history",
+                historical_query_type="past_command",
+                memory_required=True,
+                action_required=False,
+                confidence=0.99
+            )
+
         # Past websites: "What was that website I asked you to open last week?"
         if re.search(r'\bwhat\s+(?:was\s+that\s+website|website\s+did\s+i\s+ask|site\s+did\s+i\s+ask)\b', text_low):
             time_filter = "last_week" if "last week" in text_low else ("yesterday" if "yesterday" in text_low else None)
@@ -2945,6 +3205,8 @@ class SemanticUnderstandingEngine:
         # Past assistant actions: "What did you do?", "What did you do five minutes ago?", "What command did you run?"
         # Also: "What did I ask you to do?", "What did I just ask?", "What was my last request?"
         if re.search(r'\bwhat\s+did\s+you\s+do\b', text_low) or \
+           re.search(r'\bwhat\s+did\s+you\s+(?:change|modify|update)\b', text_low) or \
+           re.search(r'\bwhat\s+(?:changes|change)\s+did\s+you\s+make\b', text_low) or \
            re.search(r'\bwhat\s+command\s+did\s+you\s+run\b', text_low) or \
            re.search(r'\bwhat\s+did\s+you\s+close\b', text_low) or \
            re.search(r'\bwhere\s+did\s+you\s+put\s+that\s+file\b', text_low) or \
@@ -3265,6 +3527,29 @@ class SemanticUnderstandingEngine:
                 target_entity=target,
                 action_required=True,
                 confidence=0.96
+            )
+
+        # --------------------------------------------------------------------
+        # 4.9. Deterministic Conversational & Identity Resolution (Zero LLM Latency)
+        # --------------------------------------------------------------------
+        conv_identity_phrases = (
+            "who are you", "what is your name", "what's your name", "whats your name",
+            "who're you", "tell me about yourself", "introduce yourself", "who made you",
+            "who created you", "who built you", "what are you", "who am i speaking with",
+            "who am i talking to", "what is your identity", "whats your identity", "who is this",
+            "tell me who you are", "what should i call you", "hello", "hi", "hey",
+            "good morning", "good afternoon", "good evening", "how are you",
+            "how are you doing", "how's it going", "how are things", "what's up",
+            "whats up", "thanks", "thank you", "thank you so much", "many thanks"
+        )
+        if norm in conv_identity_phrases or clean_low in conv_identity_phrases or text_low in conv_identity_phrases:
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="Conversational greeting, small talk, or identity inquiry.",
+                intent="GENERAL_CONVERSATION",
+                request_type="CONVERSATION",
+                action_required=False,
+                confidence=1.0,
             )
 
         # --------------------------------------------------------------------

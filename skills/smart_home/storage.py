@@ -6,6 +6,7 @@ Enforces multi-tenant security: User A cannot see or manipulate User B's devices
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -14,6 +15,12 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+
+try:
+    import win32crypt
+    _HAS_DPAPI = True
+except ImportError:
+    _HAS_DPAPI = False
 
 from cryptography.fernet import Fernet
 from .models import SmartDevice
@@ -34,11 +41,43 @@ class CredentialVault:
         self._fernet = Fernet(self._load_or_create_key())
 
     def _load_or_create_key(self) -> bytes:
+        entropy = b"SmartAssistant_SmartHome_Entropy"
         if self._key_path.exists():
-            return self._key_path.read_bytes().strip()
-        key = Fernet.generate_key()
-        self._key_path.write_bytes(key)
-        return key
+            content = self._key_path.read_bytes().strip()
+            if content.startswith(b"dpapi:"):
+                if _HAS_DPAPI:
+                    try:
+                        raw_enc = base64.b64decode(content[6:])
+                        decrypted = win32crypt.CryptUnprotectData(raw_enc, entropy)[1]
+                        return decrypted.strip()
+                    except Exception as e:
+                        logger.error(f"Failed to decrypt DPAPI smart home key: {e}")
+                else:
+                    raise RuntimeError("DPAPI-protected smart home key cannot be read without DPAPI support.")
+            elif len(content) == 44:
+                # Legacy plaintext key detected: migrate immediately to DPAPI
+                legacy_key = content
+                if _HAS_DPAPI:
+                    try:
+                        enc = win32crypt.CryptProtectData(legacy_key, "SmartHomeVaultKey", entropy, None, None, 0)
+                        self._key_path.write_bytes(b"dpapi:" + base64.b64encode(enc))
+                        logger.info("Successfully migrated legacy plaintext smart home key to DPAPI encryption.")
+                    except Exception as e:
+                        logger.warning(f"Could not encrypt legacy smart home key with DPAPI: {e}")
+                return legacy_key
+
+        # Key doesn't exist: generate new key and persist encrypted
+        new_key = Fernet.generate_key()
+        if _HAS_DPAPI:
+            try:
+                enc = win32crypt.CryptProtectData(new_key, "SmartHomeVaultKey", entropy, None, None, 0)
+                self._key_path.write_bytes(b"dpapi:" + base64.b64encode(enc))
+                return new_key
+            except Exception as e:
+                logger.warning(f"DPAPI protection failed for new smart home key: {e}")
+        # Fallback if DPAPI unavailable
+        self._key_path.write_bytes(new_key)
+        return new_key
 
     def encrypt_json(self, payload: dict[str, Any]) -> str:
         raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")

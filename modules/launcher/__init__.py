@@ -1,5 +1,10 @@
+# ════════════════════════════════════════════════════════════════════════
+# RETIRED — This module contains legacy Tkinter launcher components.
+# Active Production UI: modules/ui/floating_launcher.py (PyQt6)
+# Preserved for historical reference only.
+# ════════════════════════════════════════════════════════════════════════
 """
-NOVA Launcher Module
+NOVA Launcher Module (Retired Tkinter Implementation)
 Provides floating launcher panel and context menu components.
 """
 

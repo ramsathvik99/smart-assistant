@@ -17,9 +17,13 @@ IMPORTANT: The backend (brain, router, planner, voice engine, DB, memory)
 is NEVER modified here — this file is purely a presentation layer.
 """
 
+from __future__ import annotations
+
 import sys
 import os
+import time
 import threading
+from typing import Any, Optional, Dict, List, Tuple, Callable
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu
 )
@@ -55,6 +59,10 @@ def _make_tray_icon() -> QIcon:
 class UIBridge(QObject):
     visual_event_sig = pyqtSignal(object)
     speech_spoken_sig = pyqtSignal(str)
+    config_changed_sig = pyqtSignal(str, object)
+    voice_state_sig = pyqtSignal(str, str)
+    voice_level_sig = pyqtSignal(float)
+    voice_transcript_sig = pyqtSignal(str)
 
 
 class AssistantApp(QObject):
@@ -68,6 +76,22 @@ class AssistantApp(QObject):
         self._bridge = UIBridge()
         self._bridge.visual_event_sig.connect(self._handle_visual_event)
         self._bridge.speech_spoken_sig.connect(self._handle_speech_spoken)
+        self._bridge.config_changed_sig.connect(self._handle_config_changed)
+        self._bridge.voice_state_sig.connect(self._handle_voice_state)
+        self._bridge.voice_level_sig.connect(self._on_audio_level)
+        self._bridge.voice_transcript_sig.connect(self._handle_voice_transcript)
+
+        # Wire canonical VoiceLifecycleManager to UIBridge safely across threads
+        try:
+            from core.voice_lifecycle import get_voice_lifecycle
+            _vl = get_voice_lifecycle()
+            _vl.register_state_listener(lambda s, m: self._bridge.voice_state_sig.emit(s, m))
+            _vl.register_level_listener(lambda lvl: self._bridge.voice_level_sig.emit(lvl))
+            _vl.register_transcript_listener(lambda t: self._bridge.voice_transcript_sig.emit(t))
+        except Exception as e:
+            print(f"[UI] Voice lifecycle registration notice: {e}")
+
+        self._config_listener = None
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
         self._app.setQuitOnLastWindowClosed(False)
@@ -131,6 +155,19 @@ class AssistantApp(QObject):
         if text and text.strip() and self._win:
             self._win.add_assistant_message(text)
 
+    @pyqtSlot(str, str)
+    def _handle_voice_state(self, state: str, message: str):
+        self._propagate_state(state, message)
+
+    @pyqtSlot(str)
+    def _handle_voice_transcript(self, text: str):
+        if not text or not text.strip():
+            return
+        if self._win:
+            self._win.add_user_message(text)
+            self._win.show_thinking()
+            self._win.set_input_enabled(False)
+
     # ── Startup ───────────────────────────────────────────────────────────────
     def run(self):
         """Entry point — show login then start event loop."""
@@ -145,9 +182,12 @@ class AssistantApp(QObject):
     # ── Post-login ────────────────────────────────────────────────────────────
     @pyqtSlot(object, str, str)
     def _on_login_complete(self, user_id: object, username: str, session_mode: str = "account"):
+        t_startup_start = time.perf_counter()
+        startup_thread_id = threading.get_ident()
         self._user_id  = int(user_id)
         self._username = username or "user"
         self._session_mode = "account"
+        print(f"[STARTUP] [Thread-{startup_thread_id}] Post-login sequence initialized for user {self._user_id}")
 
         from instance.config import settings
 
@@ -179,18 +219,30 @@ class AssistantApp(QObject):
             print(f"[APP] Core registration notice: {e}")
 
         # 3. Build UI components first so visual interface appears immediately
+        t_ui0 = time.perf_counter()
         self._build_ui()
+        print(f"[STARTUP] UI components built in {time.perf_counter() - t_ui0:.3f}s")
 
         # 3a. Load and apply user-specific color personalization
+        t_col0 = time.perf_counter()
         self._apply_user_colors(self._user_id)
+        print(f"[STARTUP] User color personalization applied in {time.perf_counter() - t_col0:.3f}s")
+
         # 3b. Load and apply per-user voice identity (TTS engine + Settings panel)
+        t_vox0 = time.perf_counter()
         self._apply_user_voice(self._user_id)
+        print(f"[STARTUP] User voice profile applied in {time.perf_counter() - t_vox0:.3f}s")
 
         # 4. Start backend services (Reminders, Proactive system, optional Dashboard)
+        t_srv0 = time.perf_counter()
         self._start_backend_services()
+        print(f"[STARTUP] Backend services initialized in {time.perf_counter() - t_srv0:.3f}s")
 
         # 5. Speak canonical greeting, then start continuous audio stream
         self._speak_greeting()
+
+        total_startup_sec = time.perf_counter() - t_startup_start
+        print(f"[STARTUP] [Thread-{startup_thread_id}] Post-login sequence successfully completed in {total_startup_sec:.3f}s")
 
     def _apply_user_colors(self, user_id: int):
         """
@@ -265,7 +317,7 @@ class AssistantApp(QObject):
                 gender   = profile.get("voice_gender", "male")
                 tone     = profile.get("voice_tone", "professional")
                 provider = profile.get("voice_provider", "windows")
-                rate     = profile.get("voice_rate", 155)
+                rate     = profile.get("voice_rate", 135)
                 vol      = profile.get("voice_volume", 1.0)
 
                 print(f"[VOICE] Loaded profile for user {user_id}")
@@ -292,7 +344,7 @@ class AssistantApp(QObject):
                             from legacy.tts import apply_voice_profile
                             apply_voice_profile(
                                 prof.get("voice_id"),
-                                rate=int(prof.get("voice_rate", 155)),
+                                rate=int(prof.get("voice_rate", 135)),
                                 volume=float(prof.get("voice_volume", 1.0)),
                             )
                             print(f"[VOICE] Voice profile updated live: {prof.get('voice_tone')}")
@@ -396,6 +448,13 @@ class AssistantApp(QObject):
         # ── Floating launcher ──
         self._launcher = FloatingLauncher()
         self._launcher.set_user_context(self._username, self._assistant_name)
+        try:
+            from core.configuration_service import get_configuration_service
+            init_color = get_configuration_service().get_preference(self._user_id, "dashboard_color")
+            if init_color:
+                self._launcher.set_accent_color(init_color)
+        except Exception as e:
+            print(f"[UI] Initial accent load notice: {e}")
         self._launcher.single_clicked.connect(self._toggle_main_window)
         self._launcher.action_requested.connect(self._handle_launcher_action)
 
@@ -407,6 +466,7 @@ class AssistantApp(QObject):
         self._win.command_submitted.connect(self._on_command_submitted)
         self._win.logout_requested.connect(self.logout)
         self._win.assistant_name_changed.connect(self._on_assistant_name_updated)
+        self._win.accent_changed.connect(self._on_accent_changed)
         self._win.minimized.connect(lambda: self._launcher.set_state("idle"))
         # Load recent chat history in background
         self._load_history()
@@ -480,6 +540,23 @@ class AssistantApp(QObject):
         except Exception as e:
             print(f"[UI] UI action handler registration notice: {e}")
 
+        # Register ConfigurationService listener for live settings sync (accent color, assistant name)
+        try:
+            from core.configuration_service import get_configuration_service
+            if getattr(self, "_config_listener", None) is not None:
+                try:
+                    get_configuration_service().unregister_listener(self._config_listener)
+                except Exception:
+                    pass
+            def _on_cfg_change(uid: int, key: str, val: Any):
+                if uid == self._user_id or uid == 0:
+                    self._bridge.config_changed_sig.emit(key, val)
+            self._config_listener = _on_cfg_change
+            get_configuration_service().register_listener(self._config_listener)
+            print("[UI] Registered ConfigurationService listener for live settings sync")
+        except Exception as e:
+            print(f"[UI] ConfigurationService listener registration notice: {e}")
+
         # ── Startup UI state: Floating Launcher only. Dashboard remains closed by default ──
         self._launcher.show()
         print("[UI] PyQt6 UI ready — Floating Launcher active. Dashboard window is closed by default.")
@@ -498,9 +575,8 @@ class AssistantApp(QObject):
         if self._launcher:
             self._launcher.dismiss_visual_response()
 
-        # Show in chat
+        # Record in chat
         if self._win:
-            self._win.show_on_chat()
             self._win.add_user_message(text)
             self._win.show_thinking()
             self._win.set_input_enabled(False)
@@ -532,16 +608,20 @@ class AssistantApp(QObject):
 
     # ── State propagation ─────────────────────────────────────────────────────
     @pyqtSlot(str)
-    def _propagate_state(self, state: str):
+    def _propagate_state(self, state: str, message: str = ""):
         try:
             from core.assistant_core import assistant_core
             assistant_core.set_state(state)
         except Exception:
             pass
         if self._launcher:
-            self._launcher.set_state(state)
+            self._launcher.set_state(state, message)
         if self._win:
             self._win.set_state(state)
+            if state == "listening":
+                self._win.set_listening_indicator(True)
+            elif state in ("idle", "speaking", "error"):
+                self._win.set_listening_indicator(False)
 
     # ── VAD ───────────────────────────────────────────────────────────────────
     def _on_vad_active(self):
@@ -607,17 +687,50 @@ class AssistantApp(QObject):
             self._win.task_dock.complete_task(success=False, message="Task stopped by user.")
 
     def _on_assistant_name_updated(self, new_name: str):
-        self._assistant_name = new_name
+        if not new_name or getattr(self, "_is_updating_name", False):
+            return
+        clean_name = str(new_name).strip()
+        if getattr(self, "_assistant_name", None) == clean_name:
+            return
+        self._is_updating_name = True
         try:
-            from core.assistant_core import assistant_core
-            assistant_core.set_assistant_name(new_name)
-        except Exception:
-            pass
-        if self._launcher:
-            self._launcher.set_assistant_name(new_name)
-        if self._tray:
-            self._tray.setToolTip(new_name)
-        self._toasts.show(f"Assistant renamed to {new_name}", "info", 2500)
+            self._assistant_name = clean_name
+            try:
+                from core.assistant_core import assistant_core
+                assistant_core.set_assistant_name(clean_name)
+            except Exception:
+                pass
+            if self._launcher:
+                self._launcher.set_assistant_name(clean_name)
+            if self._win and getattr(self._win, "_assistant_name", None) != clean_name:
+                self._win.set_assistant_name(clean_name)
+            if self._tray:
+                self._tray.setToolTip(clean_name)
+            self._toasts.show(f"Assistant renamed to {clean_name}", "info", 2500)
+        finally:
+            self._is_updating_name = False
+
+    @pyqtSlot(str)
+    def _on_accent_changed(self, hex_color: str):
+        if not hex_color or getattr(self, "_is_updating_accent", False):
+            return
+        self._is_updating_accent = True
+        try:
+            clean_hex = str(hex_color).strip()
+            if self._launcher:
+                self._launcher.set_accent_color(clean_hex)
+            if self._win and str(getattr(self._win, "_accent", "")).strip().lower() != clean_hex.lower():
+                self._win.set_accent_color(clean_hex)
+        finally:
+            self._is_updating_accent = False
+
+    @pyqtSlot(str, object)
+    def _handle_config_changed(self, key: str, value: object):
+        k = str(key).lower().strip()
+        if k in ("dashboard_color", "accent_color", "floating_button_color"):
+            self._on_accent_changed(str(value))
+        elif k == "assistant_name":
+            self._on_assistant_name_updated(str(value))
 
     def _handle_launcher_action(self, action: str):
         if not self._win:
@@ -625,7 +738,6 @@ class AssistantApp(QObject):
 
         # ── Quick Actions HUD ──
         if action in ("talk", "voice"):
-            self._win.show_on_chat()
             self._toasts.show("Listening for your command…", "info", 2000)
         elif action == "play_video":
             from PyQt6.QtWidgets import QInputDialog
@@ -971,6 +1083,15 @@ class AssistantApp(QObject):
         except Exception:
             pass
 
+        # Unregister ConfigurationService listener
+        if getattr(self, "_config_listener", None) is not None:
+            try:
+                from core.configuration_service import get_configuration_service
+                get_configuration_service().unregister_listener(self._config_listener)
+            except Exception:
+                pass
+            self._config_listener = None
+
         # Stop workers
         for worker in [self._tts_mon, self._vad_mon, self._audio_prov]:
             if worker:
@@ -1006,10 +1127,12 @@ class AssistantApp(QObject):
         try:
             from assistant import shutdown
             shutdown()
-        except Exception:
+        except (Exception, SystemExit):
             pass
 
-        QApplication.quit()
+        app = QApplication.instance()
+        if app:
+            app.quit()
 
     # ── System tray ──────────────────────────────────────────────────────────
     def _build_tray_menu(self) -> QMenu:
@@ -1111,6 +1234,15 @@ class AssistantApp(QObject):
         except Exception:
             pass
 
+        # Unregister ConfigurationService listener
+        if getattr(self, "_config_listener", None):
+            try:
+                from core.configuration_service import get_configuration_service
+                get_configuration_service().unregister_listener(self._config_listener)
+            except Exception:
+                pass
+            self._config_listener = None
+
         # Stop monitoring worker threads
         for worker in [self._tts_mon, self._vad_mon, self._audio_prov]:
             if worker:
@@ -1143,6 +1275,18 @@ class AssistantApp(QObject):
         try:
             from core.assistant_core import assistant_core
             assistant_core.set_authenticated_user(None, "user", "Trevon")
+        except Exception:
+            pass
+
+        try:
+            from core.credential_manager import get_credential_manager
+            get_credential_manager().clear_cache()
+        except Exception:
+            pass
+
+        try:
+            from extensions.context_manager import get_manager
+            get_manager().clear_context()
         except Exception:
             pass
 

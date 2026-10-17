@@ -123,7 +123,7 @@ class RAGSystem:
              
         elif core_intent == "current_time_query":
              print("[PIPELINE - EXECUTION] Fetching current time/date context.")
-             data = self.retriever.retrieve("current_time_query", query)
+             data = self.retriever.retrieve("current_time_query", query, user_id=user_id)
              
         elif core_intent == "dynamic_fact_query":
              from core.unified_command_router import should_use_external_retrieval
@@ -137,7 +137,7 @@ class RAGSystem:
                  data = {"error": "Web search or live data disabled by configuration."}
              else:
                  print(f"[PIPELINE - EXECUTION] Fetching dynamic fact context via {self.search_provider}.")
-                 data = self.retriever.retrieve("dynamic_fact_query", query)
+                 data = self.retriever.retrieve("dynamic_fact_query", query, user_id=user_id)
                  
              # Check validation
              if not self.validator.validate("dynamic_fact_query", data):
@@ -177,7 +177,7 @@ class RAGSystem:
                      
                      from legacy.memory_manager import update_user_memory
                      from instance.config import settings as _cfg
-                     uid = getattr(_cfg, 'CURRENT_USER_ID', None) or _cfg.get_last_user()
+                     uid = user_id or getattr(_cfg, 'CURRENT_USER_ID', None)
                      if uid:
                          update_user_memory(uid, fact["key"], fact["value"])
                      
@@ -213,7 +213,7 @@ class RAGSystem:
                  data = {"error": "Web search or live data disabled by configuration."}
              else:
                  print("[PIPELINE - EXECUTION] Fetching external web knowledge.")
-                 data = self.retriever.retrieve("real_time_info", query)
+                 data = self.retriever.retrieve("real_time_info", query, user_id=user_id)
                  
              # Web search fallback
              if not self.validator.validate("real_time_info", data):
@@ -236,7 +236,7 @@ class RAGSystem:
         if core_intent == "chat":
              print("[PIPELINE - EXECUTION] Building conversational context.")
              # Pull limited recent context for normal chatter
-             data = self.retriever.retrieve("history_query", query)
+             data = self.retriever.retrieve("history_query", query, user_id=user_id)
              
         # 3. Pipeline: Response Generation
         print("[PIPELINE - GENERATION] Synthesizing final response via LLM.")
@@ -250,7 +250,7 @@ class RAGSystem:
             eff_intent = sub_intent if sub_intent else "general_knowledge"
         
         try:
-             response = self.generator.generate(query, eff_intent, data)
+             response = self.generator.generate(query, eff_intent, data, user_id=user_id)
         except Exception as e:
              print(f"[PIPELINE - ERROR] Generation failed: {e}")
              response = "I had a bit of trouble formulating a response. What did you say?"

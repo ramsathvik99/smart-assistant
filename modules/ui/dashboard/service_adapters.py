@@ -12,6 +12,7 @@ uses DashboardWorker (QThread) to execute them off the GUI thread.
 from __future__ import annotations
 
 import os
+import sys
 import json
 import time
 import threading
@@ -53,12 +54,22 @@ def get_identity() -> Dict[str, Any]:
 
 def set_assistant_name_ui(name: str) -> bool:
     """Update assistant name through core (persists to DB if authenticated)."""
+    ok = False
     try:
         from core.assistant_core import assistant_core
         assistant_core.set_assistant_name(name)
-        return True
+        ok = True
     except Exception:
-        return False
+        pass
+    try:
+        from instance.config import settings
+        if hasattr(settings, "set_assistant_name"):
+            settings.set_assistant_name(name)
+        settings.CURRENT_ASSISTANT_NAME = name
+        ok = True
+    except Exception:
+        pass
+    return ok
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,12 +132,17 @@ def send_command(text: str) -> Tuple[bool, str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_user_preferences(user_id: Optional[int] = None) -> Dict[str, Any]:
-    """Load all saved user preferences from PostgreSQL via legacy manager."""
+    """Load all saved user preferences through the authoritative Centralized Configuration Service."""
     if user_id is None:
         ident = get_identity()
         user_id = ident.get("user_id")
     if not user_id:
         return {}
+    try:
+        from core.configuration_service import get_configuration_service
+        return get_configuration_service().get_all_preferences(user_id)
+    except Exception:
+        pass
     prefs: Dict[str, Any] = {}
     try:
         from legacy.memory_manager import get_all_user_preferences_db
@@ -135,25 +151,11 @@ def load_user_preferences(user_id: Optional[int] = None) -> Dict[str, Any]:
             prefs.update(all_prefs)
     except Exception:
         pass
-    # Also try the JSON fallback
-    try:
-        json_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
-            "data", "user_preferences.json"
-        )
-        if os.path.exists(json_path):
-            with open(json_path, "r", encoding="utf-8") as f:
-                json_data = json.load(f)
-            ui_prefs = json_data.get("ui_preferences", {}).get(str(user_id), {})
-            for k, v in ui_prefs.items():
-                prefs.setdefault(k, v)
-    except Exception:
-        pass
     return prefs
 
 
 def save_user_preference(*args, **kwargs) -> bool:
-    """Persist a single preference value for the authenticated user.
+    """Persist a single preference value for the authenticated user and dispatch runtime effects.
     Supports both save_user_preference(key, value) and save_user_preference(user_id, key, value).
     """
     user_id = None
@@ -176,9 +178,164 @@ def save_user_preference(*args, **kwargs) -> bool:
     if not user_id:
         return False
     try:
-        from legacy.memory_manager import set_user_preference_db
-        set_user_preference_db(int(user_id), str(key), str(value))
-        return True
+        from core.configuration_service import get_configuration_service
+        return get_configuration_service().set_preference(int(user_id), str(key), value)
+    except Exception:
+        try:
+            from legacy.memory_manager import set_user_preference_db
+            set_user_preference_db(int(user_id), str(key), str(value))
+            return True
+        except Exception:
+            return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  API Credentials & Integrations
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_api_credentials_status(user_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Load sanitized provider credential statuses for the active user."""
+    if user_id is None:
+        user_id = get_identity().get("user_id")
+    if getattr(sys, "frozen", False):
+        try:
+            from core.api_client import get_api_client
+            client = get_api_client()
+            if getattr(client, "token", None):
+                res = client.get_credentials_status()
+                if res.get("success"):
+                    return res.get("credentials", [])
+        except Exception:
+            pass
+    try:
+        from core.credential_manager import get_credential_manager
+        return get_credential_manager().get_providers_status(user_id)
+    except Exception:
+        return []
+
+
+def save_api_credential(provider: str, key: str, user_id: Optional[int] = None) -> bool:
+    """Save and encrypt an API key for the active user."""
+    if user_id is None:
+        user_id = get_identity().get("user_id")
+    if getattr(sys, "frozen", False):
+        try:
+            from core.api_client import get_api_client
+            client = get_api_client()
+            if getattr(client, "token", None):
+                res = client.save_credential(provider, key)
+                if res.get("success"):
+                    return True
+        except Exception:
+            pass
+    try:
+        from core.credential_manager import get_credential_manager
+        return get_credential_manager().save_credential(user_id, provider, key)
+    except Exception:
+        return False
+
+
+def delete_api_credential(provider: str, user_id: Optional[int] = None) -> bool:
+    """Remove a credential for the active user."""
+    if user_id is None:
+        user_id = get_identity().get("user_id")
+    if getattr(sys, "frozen", False):
+        try:
+            from core.api_client import get_api_client
+            client = get_api_client()
+            if getattr(client, "token", None):
+                res = client.delete_credential(provider)
+                if res.get("success"):
+                    return True
+        except Exception:
+            pass
+    try:
+        from core.credential_manager import get_credential_manager
+        return get_credential_manager().delete_credential(user_id, provider)
+    except Exception:
+        return False
+
+
+def test_api_credential(provider: str, candidate_key: Optional[str] = None, user_id: Optional[int] = None) -> Dict[str, Any]:
+    """Test connection with candidate or stored credential."""
+    if user_id is None:
+        user_id = get_identity().get("user_id")
+    if getattr(sys, "frozen", False):
+        try:
+            from core.api_client import get_api_client
+            client = get_api_client()
+            if getattr(client, "token", None):
+                res = client.test_credential(provider, candidate_key)
+                if res and res.get("success") is not None:
+                    return res
+        except Exception:
+            pass
+    try:
+        from core.credential_manager import get_credential_manager
+        return get_credential_manager().test_provider_connection(user_id, provider, candidate_key)
+    except Exception as e:
+        return {"success": False, "status": "error", "message": str(e)}
+
+
+def get_api_setup_status(user_id: Optional[int] = None) -> bool:
+    """Check if the user has completed their API keys setup wizard."""
+    if user_id is None:
+        user_id = get_identity().get("user_id")
+    if getattr(sys, "frozen", False):
+        try:
+            from core.api_client import get_api_client
+            client = get_api_client()
+            if getattr(client, "token", None):
+                res = client.get_api_setup_status()
+                if res.get("success"):
+                    return bool(res.get("completed"))
+        except Exception:
+            pass
+    try:
+        from core.credential_manager import get_credential_manager
+        return get_credential_manager().has_completed_api_setup(user_id)
+    except Exception:
+        return False
+
+
+def get_primary_provider_adapter(user_id: Optional[int] = None) -> str:
+    """Get active primary provider preference for the user."""
+    if user_id is None:
+        user_id = get_identity().get("user_id")
+    try:
+        from core.credential_manager import get_credential_manager
+        res = get_credential_manager().get_primary_provider(user_id)
+        return res or "groq"
+    except Exception:
+        return "groq"
+
+
+def set_primary_provider_adapter(provider: str, user_id: Optional[int] = None) -> bool:
+    """Set active primary provider preference for the user."""
+    if user_id is None:
+        user_id = get_identity().get("user_id")
+    try:
+        from core.credential_manager import get_credential_manager
+        return get_credential_manager().set_primary_provider(user_id, provider)
+    except Exception:
+        return False
+
+
+
+def set_api_setup_status(completed: bool = True, user_id: Optional[int] = None) -> bool:
+    """Mark first-run API setup wizard as completed."""
+    if user_id is None:
+        user_id = get_identity().get("user_id")
+    if getattr(sys, "frozen", False):
+        try:
+            from core.api_client import get_api_client
+            res = get_api_client().set_api_setup_status(completed)
+            return bool(res.get("success"))
+        except Exception:
+            pass
+    try:
+        from core.credential_manager import get_credential_manager
+        return get_credential_manager().set_completed_api_setup(user_id, completed)
     except Exception:
         return False
 

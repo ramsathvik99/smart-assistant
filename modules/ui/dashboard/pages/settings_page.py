@@ -7,8 +7,8 @@ import traceback
 from datetime import datetime
 from typing import Any, Dict
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QIcon, QPixmap
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
+from PyQt6.QtGui import QColor, QIcon, QPixmap, QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
@@ -32,7 +32,11 @@ from ..service_adapters import (
     has_email_credentials, load_emails,
     load_paired_devices,
     run_diagnostics, export_conversations, clear_conversation_history,
+    load_api_credentials_status, save_api_credential, delete_api_credential, test_api_credential,
+    get_primary_provider_adapter, set_primary_provider_adapter,
 )
+from core.credential_manager import validate_assistant_name, get_credential_manager
+from legacy.tts import enumerate_voices, stop_speaking, apply_voice_profile, preview_voice
 from ..workers import DashboardWorker
 
 try:
@@ -40,6 +44,17 @@ try:
     SETTINGS = _cfg.Settings()
 except Exception:
     SETTINGS = None
+
+
+PROVIDER_MODELS: Dict[str, str] = {
+    "groq": "llama-3.3-70b-versatile",
+    "openai": "gpt-4o-mini",
+    "gemini": "gemini-1.5-flash",
+    "ollama": "llama3",
+    "deepseek": "deepseek-chat",
+    "anthropic": "claude-3-5-sonnet-20241022",
+    "huggingface": "meta-llama/Meta-Llama-3-8B-Instruct",
+}
 
 
 class _PrefCache:
@@ -66,6 +81,7 @@ class SettingsPage(QWidget):
 
     TAB_ORDER = [
         ("profile", "Profile"),
+        ("api_keys", "API Keys & Integrations"),
         ("identity", "Assistant Identity"),
         ("appearance", "Appearance"),
         ("voice", "Voice & Audio"),
@@ -114,6 +130,7 @@ class SettingsPage(QWidget):
         root.addWidget(self.tabs, 1)
 
         self._tab_profile = self._build_tab_profile()
+        self._tab_api_keys = self._build_tab_api_keys()
         self._tab_identity = self._build_tab_identity()
         self._tab_appearance = self._build_tab_appearance()
         self._tab_voice = self._build_tab_voice()
@@ -138,6 +155,7 @@ class SettingsPage(QWidget):
     # -------------------------------------------------------- tab factories
     # Subtle semantic icon identities per section specification
     def _icon_profile(self): return icon(ICONS.USER, C.SEC_COMMUNICATIONS)
+    def _icon_api_keys(self): return icon(ICONS.LOCK, C.SEC_SETTINGS)
     def _icon_identity(self): return icon(ICONS.ASSISTANT, C.SEC_ASSISTANT)
     def _icon_appearance(self): return icon(ICONS.STAR, C.SEC_SCHEDULE)
     def _icon_voice(self): return icon(ICONS.VOLUME_UP, C.SEC_CONNECTED)
@@ -203,6 +221,397 @@ class SettingsPage(QWidget):
         lay.addStretch(1)
         return w
 
+    # ----------------------------------------------------------- API Keys & Integrations
+    def _build_tab_api_keys(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(Spacing.LG, Spacing.LG, Spacing.LG, Spacing.LG)
+        lay.setSpacing(Spacing.MD)
+
+        card_info = Card(title="API Keys & Integrations Architecture")
+        info_lbl = QLabel(
+            "Configure your personal credentials for AI models, search engines, and external integrations.\n"
+            "• Security: Keys are encrypted per-user using Windows Data Protection API (DPAPI) and stored separately from general settings.\n"
+            "• Isolation: When distributed as an .exe, each user configures their own keys. No developer secrets are shared.\n"
+            "• Capability-Aware: Features requiring unconfigured keys are gracefully skipped while unrelated features continue working."
+        )
+        info_lbl.setWordWrap(True)
+        info_lbl.setStyleSheet(f"color: {C.TEXT_MUTED}; font-size: 12px; line-height: 1.4;")
+        card_info.body.addWidget(info_lbl)
+        lay.addWidget(card_info)
+
+        # Primary AI Provider Selector Card
+        card_prim = Card(title="Primary AI Engine Selection")
+        prim_v = QVBoxLayout()
+        prim_h = QHBoxLayout()
+        prim_lbl = QLabel("Preferred Primary Provider:")
+        prim_lbl.setStyleSheet(f"color: {C.TEXT_PRIMARY}; font-size: 13px; font-weight: 600;")
+        prim_h.addWidget(prim_lbl)
+
+        self.primary_provider_combo = QComboBox()
+        self.primary_provider_combo.setStyleSheet(self._combo_qss())
+        for pid, pname in [
+            ("groq", "Groq Cloud (Ultra-fast LLM)"),
+            ("openai", "OpenAI (GPT-4o, GPT-3.5)"),
+            ("gemini", "Google Gemini (Flash, Pro)"),
+            ("ollama", "Ollama (Local Offline Daemon)"),
+            ("deepseek", "DeepSeek"),
+            ("anthropic", "Anthropic Claude"),
+            ("huggingface", "HuggingFace"),
+        ]:
+            self.primary_provider_combo.addItem(pname, pid)
+        self.primary_provider_combo.currentIndexChanged.connect(self._on_primary_provider_changed)
+        prim_h.addWidget(self.primary_provider_combo, 1)
+        prim_v.addLayout(prim_h)
+
+        self.primary_model_lbl = QLabel(f"Active Model: <b>{PROVIDER_MODELS.get('groq', 'llama-3.3-70b-versatile')}</b>")
+        self.primary_model_lbl.setStyleSheet(f"color: {C.TEXT_MUTED}; font-size: 12px; margin-top: 4px;")
+        prim_v.addWidget(self.primary_model_lbl)
+        card_prim.body.addLayout(prim_v)
+        lay.addWidget(card_prim)
+
+        card_keys = Card(title="Manage Credentials")
+        self.api_keys_layout = QVBoxLayout()
+        self.api_keys_layout.setSpacing(Spacing.SM)
+        card_keys.body.addLayout(self.api_keys_layout)
+
+        self._api_key_rows: Dict[str, Dict[str, Any]] = {}
+        providers = [
+            ("groq", "Groq Cloud", "LLM", "Ultra-fast conversational AI (free tier available)", "llama-3.3-70b-versatile", True, "https://console.groq.com/keys"),
+            ("openai", "OpenAI", "LLM", "GPT-4o & GPT-3.5 models for reasoning & completion", "gpt-4o-mini", True, "https://platform.openai.com/api-keys"),
+            ("gemini", "Google Gemini", "LLM", "Multimodal intelligence & reasoning", "gemini-1.5-flash", True, "https://aistudio.google.com/app/apikey"),
+            ("ollama", "Ollama", "Local", "Local offline inference daemon (requires no cloud key)", "llama3", False, "https://ollama.com"),
+            ("deepseek", "DeepSeek", "LLM", "Specialized coding & conversational models", "deepseek-chat", True, "https://platform.deepseek.com/api_keys"),
+            ("anthropic", "Anthropic Claude", "LLM", "Claude 3 models for reasoning", "claude-3-5-sonnet-20241022", True, "https://console.anthropic.com/settings/keys"),
+            ("huggingface", "HuggingFace", "LLM", "Inference router for open-source models", "meta-llama/Meta-Llama-3-8B-Instruct", True, "https://huggingface.co/settings/tokens"),
+            ("serpapi", "SerpAPI", "Search", "Google Search API for real-time web retrieval", "google-search", True, "https://serpapi.com/manage-api-key"),
+            ("tavily", "Tavily Search", "Search", "Search API optimized for AI agent retrieval", "search", True, "https://app.tavily.com/home"),
+            ("email", "Email Account", "Integration", "App password for personal email reading & sending", "smtp-imap", True, "https://myaccount.google.com/apppasswords"),
+            ("openweather", "OpenWeatherMap", "Integration", "Live weather conditions and forecasts", "weather-data", True, "https://home.openweathermap.org/api_keys"),
+            ("tmdb", "TMDB", "Integration", "Movie and series recommendations", "tmdb-v3", True, "https://www.themoviedb.org/settings/api"),
+            ("calendarific", "Calendarific", "Integration", "Public holidays and observance calendar", "holidays", True, "https://calendarific.com/account"),
+        ]
+
+        for pid, name, cat, desc, def_model, req_key, help_url in providers:
+            row_frame = QFrame()
+            row_frame.setStyleSheet(f"""
+                QFrame {{
+                    background: {C.SURFACE_BG};
+                    border: 1px solid {C.BORDER};
+                    border-radius: {Radius.MD}px;
+                    padding: 8px 12px;
+                }}
+            """)
+            rlay = QVBoxLayout(row_frame)
+            rlay.setContentsMargins(4, 4, 4, 4)
+            rlay.setSpacing(6)
+
+            # Header row: Name + Category badge + Status Chip + Masked Hint + Link button
+            top_h = QHBoxLayout()
+            top_h.setSpacing(8)
+
+            lbl_name = QLabel(f"<b>{name}</b> <span style='color:{C.TEXT_MUTED};font-size:11px;'>({cat})</span>")
+            lbl_name.setStyleSheet(f"color: {C.TEXT_PRIMARY}; font-size: 13px;")
+            top_h.addWidget(lbl_name)
+
+            chip = StatusChip("Checking", "neutral")
+            top_h.addWidget(chip)
+
+            hint_lbl = QLabel("")
+            hint_lbl.setStyleSheet(f"color: {C.TEXT_MUTED}; font-size: 11px; font-family: monospace;")
+            top_h.addWidget(hint_lbl)
+
+            top_h.addStretch(1)
+
+            if help_url:
+                get_btn = QPushButton("Get API Key ↗" if req_key else "Get Ollama ↗")
+                get_btn.setFixedHeight(24)
+                get_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: transparent;
+                        color: {C.SEC_SETTINGS};
+                        border: 1px solid {C.BORDER};
+                        border-radius: 4px;
+                        font-size: 11px;
+                        padding: 2px 8px;
+                    }}
+                    QPushButton:hover {{
+                        background: {rgba_str(C.SEC_SETTINGS, 0.1)};
+                        border-color: {C.SEC_SETTINGS};
+                    }}
+                """)
+                get_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                get_btn.setToolTip(f"Open provider portal: {help_url}")
+                get_btn.clicked.connect(lambda _, u=help_url: QDesktopServices.openUrl(QUrl(u)))
+                top_h.addWidget(get_btn)
+
+            rlay.addLayout(top_h)
+
+            # Detail row: Description + Key Requirement + Model info
+            req_tag = "<span style='color:#F59E0B;'>🔑 API Key Required</span>" if req_key else "<span style='color:#10B981;'>💻 Local Server (No Key Needed)</span>"
+            model_tag = f" • <span style='color:{C.TEXT_MUTED};'>Model: <b>{def_model}</b></span>" if cat in ("LLM", "Local") else ""
+            desc_lbl = QLabel(f"{desc}  —  {req_tag}{model_tag}")
+            desc_lbl.setStyleSheet(f"color: {C.TEXT_MUTED}; font-size: 11px;")
+            desc_lbl.setWordWrap(True)
+            rlay.addWidget(desc_lbl)
+
+            # Controls row: Input + Eye + Test + Save + Remove
+            ctrl_h = QHBoxLayout()
+            ctrl_h.setSpacing(6)
+
+            inp = QLineEdit()
+            inp.setEchoMode(QLineEdit.EchoMode.Password)
+            inp.setPlaceholderText("Enter API key or credential...")
+            inp.setStyleSheet(self._line_qss())
+            ctrl_h.addWidget(inp, 1)
+
+            eye_btn = QPushButton("👁")
+            eye_btn.setFixedSize(32, 32)
+            eye_btn.setStyleSheet(self._btn_ghost())
+            eye_btn.setToolTip("Reveal / Hide key")
+            eye_btn.clicked.connect(lambda _, field=inp, btn=eye_btn: self._toggle_field_echo(field, btn))
+            ctrl_h.addWidget(eye_btn)
+
+            test_btn = QPushButton(" Test ")
+            test_btn.setStyleSheet(self._btn_ghost())
+            test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            test_btn.clicked.connect(lambda _, p=pid, field=inp: self._on_test_api_key(p, field))
+            ctrl_h.addWidget(test_btn)
+
+            save_btn = QPushButton(" Save ")
+            save_btn.setStyleSheet(self._btn_primary())
+            save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            save_btn.clicked.connect(lambda _, p=pid, field=inp: self._on_save_api_key(p, field))
+            ctrl_h.addWidget(save_btn)
+
+            del_btn = QPushButton(" Remove ")
+            del_btn.setStyleSheet(self._btn_danger())
+            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            del_btn.clicked.connect(lambda _, p=pid: self._on_delete_api_key(p))
+            ctrl_h.addWidget(del_btn)
+
+            rlay.addLayout(ctrl_h)
+
+            # Feedback label
+            fb_lbl = QLabel("")
+            fb_lbl.setStyleSheet(f"color: {C.TEXT_MUTED}; font-size: 11px;")
+            rlay.addWidget(fb_lbl)
+
+            self.api_keys_layout.addWidget(row_frame)
+            self._api_key_rows[pid] = {
+                "chip": chip,
+                "hint": hint_lbl,
+                "input": inp,
+                "feedback": fb_lbl,
+                "test_btn": test_btn,
+                "save_btn": save_btn,
+                "del_btn": del_btn,
+                "req_key": req_key,
+            }
+
+        lay.addWidget(card_keys)
+        lay.addStretch(1)
+        return w
+
+    def _on_primary_provider_changed(self, idx: int):
+        pid = self.primary_provider_combo.itemData(idx)
+        if pid:
+            if hasattr(self, "primary_model_lbl"):
+                self.primary_model_lbl.setText(f"Active Model: <b>{PROVIDER_MODELS.get(str(pid).lower(), 'default')}</b>")
+            def work():
+                set_primary_provider_adapter(pid)
+                save_user_preference("primary_provider", pid)
+                return True
+            w = DashboardWorker(work)
+            w.result_sig.connect(lambda _: self._flash(f"Primary AI provider set to {pid.upper()}."))
+            self._workers.append(w)
+            w.start()
+
+    def _toggle_field_echo(self, field: QLineEdit, btn: QPushButton):
+        if field.echoMode() == QLineEdit.EchoMode.Password:
+            field.setEchoMode(QLineEdit.EchoMode.Normal)
+            btn.setText("🔒")
+        else:
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            btn.setText("👁")
+
+    def _on_test_api_key(self, provider: str, field: QLineEdit):
+        val = field.text().strip()
+        row = self._api_key_rows.get(provider, {})
+        chip = row.get("chip")
+        fb = row.get("feedback")
+        if chip:
+            chip.setText("Testing…")
+            chip.setProperty("state", "neutral")
+            chip.style().unpolish(chip); chip.style().polish(chip)
+        if fb:
+            fb.setText("Testing connection…")
+            fb.setStyleSheet(f"color: {C.SEC_SETTINGS}; font-size: 11px;")
+
+        def work():
+            from ..service_adapters import test_api_credential
+            return test_api_credential(provider, candidate_key=val or None)
+
+        def done(res):
+            if not fb: return
+            msg = res.get("message", "")
+            status = res.get("status", "")
+            if res.get("success"):
+                if chip:
+                    chip.setText("Connected")
+                    chip.setProperty("state", "online")
+                    chip.style().unpolish(chip); chip.style().polish(chip)
+                fb.setText(f"✔ {msg or 'Connected'}")
+                fb.setStyleSheet(f"color: {C.STATUS_SUCCESS}; font-size: 11px; font-weight: 600;")
+            else:
+                low_msg = (msg or "").lower()
+                if "invalid" in low_msg or "unauthorized" in low_msg or "auth_error" in status or "401" in low_msg:
+                    display_status = "Invalid key"
+                elif "unavailable" in low_msg or "not running" in low_msg or "outage" in low_msg:
+                    display_status = "Provider unavailable"
+                elif "timeout" in low_msg or "connection" in low_msg or "network" in low_msg or "connect" in low_msg:
+                    display_status = "Connection failed"
+                elif "decryption" in low_msg:
+                    display_status = "Decryption failed"
+                else:
+                    display_status = "Connection failed"
+
+                if chip:
+                    chip.setText(display_status)
+                    chip.setProperty("state", "offline")
+                    chip.style().unpolish(chip); chip.style().polish(chip)
+                fb.setText(f"✖ {msg or display_status}")
+                fb.setStyleSheet(f"color: {C.STATUS_ERROR}; font-size: 11px; font-weight: 600;")
+
+        w = DashboardWorker(work)
+        w.result_sig.connect(done)
+        w.error_sig.connect(lambda e: fb and fb.setText(f"Error: {e}"))
+        self._workers.append(w); w.start()
+
+    def _on_save_api_key(self, provider: str, field: QLineEdit):
+        val = field.text().strip()
+        row = self._api_key_rows.get(provider, {})
+        fb = row.get("feedback")
+        if not val and provider != "ollama":
+            if fb:
+                fb.setText("Please enter a key before saving.")
+                fb.setStyleSheet(f"color: {C.STATUS_ERROR}; font-size: 11px;")
+            return
+
+        def work():
+            from ..service_adapters import save_api_credential
+            return save_api_credential(provider, val)
+
+        def done(ok):
+            if ok:
+                if fb:
+                    fb.setText("✔ Credential saved securely.")
+                    fb.setStyleSheet(f"color: {C.STATUS_SUCCESS}; font-size: 11px; font-weight: 600;")
+                field.clear()
+                self._reload_api_credentials()
+            else:
+                if fb:
+                    fb.setText("✖ Failed to save credential.")
+                    fb.setStyleSheet(f"color: {C.STATUS_ERROR}; font-size: 11px;")
+
+        w = DashboardWorker(work)
+        w.result_sig.connect(done)
+        w.error_sig.connect(lambda e: fb and fb.setText(f"Error: {e}"))
+        self._workers.append(w); w.start()
+
+    def _on_delete_api_key(self, provider: str):
+        row = self._api_key_rows.get(provider, {})
+        fb = row.get("feedback")
+        r = QMessageBox.question(self, f"Remove {provider.title()} Credential",
+                                 f"Are you sure you want to remove the stored credential for {provider.title()}?",
+                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if r != QMessageBox.StandardButton.Yes: return
+
+        def work():
+            from ..service_adapters import delete_api_credential
+            return delete_api_credential(provider)
+
+        def done(ok):
+            if ok:
+                if fb:
+                    fb.setText("Credential removed.")
+                    fb.setStyleSheet(f"color: {C.TEXT_MUTED}; font-size: 11px;")
+                self._reload_api_credentials()
+            else:
+                if fb:
+                    fb.setText("Failed to remove.")
+                    fb.setStyleSheet(f"color: {C.STATUS_ERROR}; font-size: 11px;")
+
+        w = DashboardWorker(work)
+        w.result_sig.connect(done)
+        w.error_sig.connect(lambda e: fb and fb.setText(f"Error: {e}"))
+        self._workers.append(w); w.start()
+
+    def _reload_api_credentials(self):
+        def work():
+            from ..service_adapters import load_api_credentials_status
+            return load_api_credentials_status()
+
+        def done(items):
+            self._apply_api_credentials(items or [])
+
+        w = DashboardWorker(work)
+        w.result_sig.connect(done)
+        self._workers.append(w); w.start()
+
+    def _apply_api_credentials(self, items: list):
+        by_prov = {it.get("provider"): it for it in items}
+        for pid, row in self._api_key_rows.items():
+            info = by_prov.get(pid, {})
+            configured = info.get("configured", False)
+            raw_status = info.get("status", "")
+            hint = info.get("masked_hint", "")
+            chip = row.get("chip")
+            hint_lbl = row.get("hint")
+            inp = row.get("input")
+
+            if pid == "ollama":
+                if chip:
+                    chip.setText("Connected" if configured else "Local (No Key Needed)")
+                    chip.setProperty("state", "online" if configured else "neutral")
+                    chip.style().unpolish(chip); chip.style().polish(chip)
+                if hint_lbl: hint_lbl.setText("127.0.0.1:11434")
+            elif raw_status == "decryption_failed":
+                if chip:
+                    chip.setText("Decryption failed")
+                    chip.setProperty("state", "offline")
+                    chip.style().unpolish(chip); chip.style().polish(chip)
+                if hint_lbl: hint_lbl.setText("[Protected]")
+                if inp: inp.setPlaceholderText("Re-enter key to repair…")
+            elif raw_status == "invalid_key":
+                if chip:
+                    chip.setText("Invalid key")
+                    chip.setProperty("state", "offline")
+                    chip.style().unpolish(chip); chip.style().polish(chip)
+                if hint_lbl: hint_lbl.setText(hint or "")
+                if inp: inp.setPlaceholderText("Replace current key…")
+            elif raw_status == "provider_unavailable":
+                if chip:
+                    chip.setText("Provider unavailable")
+                    chip.setProperty("state", "offline")
+                    chip.style().unpolish(chip); chip.style().polish(chip)
+                if hint_lbl: hint_lbl.setText(hint or "")
+                if inp: inp.setPlaceholderText("Replace current key…")
+            elif configured:
+                if chip:
+                    chip.setText("Connected")
+                    chip.setProperty("state", "online")
+                    chip.style().unpolish(chip); chip.style().polish(chip)
+                if hint_lbl: hint_lbl.setText(hint or "")
+                if inp: inp.setPlaceholderText("Replace current key…")
+            else:
+                if chip:
+                    chip.setText("Not configured")
+                    chip.setProperty("state", "offline")
+                    chip.style().unpolish(chip); chip.style().polish(chip)
+                if hint_lbl: hint_lbl.setText("")
+                if inp: inp.setPlaceholderText("Enter API key or credential…")
+
     # ----------------------------------------------------------- Identity
     def _build_tab_identity(self) -> QWidget:
         w = QWidget()
@@ -216,8 +625,14 @@ class SettingsPage(QWidget):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.id_name = QLineEdit()
-        self.id_name.setPlaceholderText("e.g. Nova, Trevon, JARVIS...")
+        self.id_name.setPlaceholderText("e.g. Friday, Nova, Trevon, JARVIS...")
         self.id_name.setStyleSheet(self._line_qss())
+
+        self.id_preview = QLabel("“Hello! I am Friday. How can I help you today?”")
+        self.id_preview.setStyleSheet(f"color: {C.ACCENT}; font-size: 11px; font-style: italic; padding: 2px 4px;")
+        self.id_name.textChanged.connect(lambda t: self.id_preview.setText(
+            f"“Hello! I am {t.strip() or 'Friday'}. How can I help you today?”"
+        ))
 
         self.id_greeting = QLineEdit()
         self.id_greeting.setPlaceholderText("e.g. Hello, sir. What can I do for you?")
@@ -266,6 +681,7 @@ class SettingsPage(QWidget):
         apply_btn.clicked.connect(self._on_save_identity)
 
         form.addRow("Assistant Name", self.id_name)
+        form.addRow("Live Preview", self.id_preview)
         form.addRow("Greeting", self.id_greeting)
         form.addRow("Persona", self.id_persona)
         form.addRow("Response Style", self.id_style)
@@ -442,6 +858,25 @@ class SettingsPage(QWidget):
             self.v_engine.addItem(label)
         self.v_engine.setStyleSheet(self._combo_qss())
 
+        self._all_voices = []
+        self._active_voice_filter = "all"
+
+        cat_row = QHBoxLayout()
+        cat_row.setSpacing(Spacing.SM)
+        self.v_cat_all = QPushButton("All Voices")
+        self.v_cat_female = QPushButton("Female")
+        self.v_cat_male = QPushButton("Male")
+        for b, tag in [(self.v_cat_all, "all"), (self.v_cat_female, "female"), (self.v_cat_male, "male")]:
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _=False, t=tag: self._set_voice_category_filter(t))
+            cat_row.addWidget(b)
+        self.v_cat_all.setChecked(True)
+        cat_row.addStretch(1)
+        cat_wrap = QWidget()
+        cat_wrap.setLayout(cat_row)
+        self._update_category_buttons_style()
+
         self.v_voice = QComboBox()
         self.v_voice.addItem("Loading voices…")
         self.v_voice.setStyleSheet(self._combo_qss())
@@ -460,7 +895,7 @@ class SettingsPage(QWidget):
             wrap.setLayout(row)
             return s, wrap
 
-        self.v_rate, rate_wrap = _mk_slider(50, 400, 200, lambda v: f"{v} wpm")
+        self.v_rate, rate_wrap = _mk_slider(50, 400, 135, lambda v: f"{v} wpm")
         self.v_pitch, pitch_wrap = _mk_slider(0, 200, 100, lambda v: f"{v}%")
         self.v_vol, vol_wrap = _mk_slider(0, 100, 100, lambda v: f"{v}%")
         self.v_hw_thresh, hw_wrap = _mk_slider(0, 100, 35, lambda v: f"{v/100:.2f}")
@@ -497,6 +932,7 @@ class SettingsPage(QWidget):
         btns.addWidget(apply_btn)
 
         form.addRow("Engine", self.v_engine)
+        form.addRow("Voice Filter", cat_wrap)
         form.addRow("Voice", self.v_voice)
         form.addRow("Speech Rate", rate_wrap)
         form.addRow("Pitch", pitch_wrap)
@@ -506,11 +942,96 @@ class SettingsPage(QWidget):
         form.addRow("Speaker", self.v_speaker)
         form.addRow("", self.v_wake)
         form.addRow("", self.v_act)
-        form.addRow("", QWidget().fromLayout(btns) if False else (lambda: _h(btns))())
+        btns_wrap = QWidget()
+        btns_wrap.setLayout(btns)
+        form.addRow("", btns_wrap)
 
         lay.addWidget(card)
         lay.addStretch(1)
         return w
+
+    def _update_category_buttons_style(self):
+        for b, tag in [(self.v_cat_all, "all"), (self.v_cat_female, "female"), (self.v_cat_male, "male")]:
+            is_active = (self._active_voice_filter == tag)
+            b.setChecked(is_active)
+            if is_active:
+                b.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {rgba_str(C.ACCENT, 0.22)};
+                        color: {C.TEXT_PRIMARY};
+                        border: 1px solid {C.ACCENT};
+                        border-radius: {Radius.SM}px;
+                        padding: 4px 12px;
+                        font-weight: 600;
+                        font-size: 11px;
+                    }}
+                """)
+            else:
+                card_bg_alt = getattr(C, "CARD_BG_ALT", getattr(C, "CARD_HIGHLIGHT", "#121C27"))
+                b.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {rgba_str(card_bg_alt, 0.4)};
+                        color: {C.TEXT_MUTED};
+                        border: 1px solid {C.BORDER};
+                        border-radius: {Radius.SM}px;
+                        padding: 4px 12px;
+                        font-size: 11px;
+                    }}
+                    QPushButton:hover {{
+                        background: {rgba_str(card_bg_alt, 0.8)};
+                        color: {C.TEXT_PRIMARY};
+                    }}
+                """)
+
+    def _set_voice_category_filter(self, category: str):
+        self._active_voice_filter = category
+        self._update_category_buttons_style()
+        self._populate_voice_combo()
+
+    def _populate_voice_combo(self):
+        current_selected = self.v_voice.currentData()
+        if not current_selected and hasattr(self, "_prefs"):
+            current_selected = self._prefs.get("voice_id") or self._prefs.get("assistant_voice_id")
+        self.v_voice.blockSignals(True)
+        self.v_voice.clear()
+
+        filtered = []
+        for v in (self._all_voices or []):
+            gender = str(v.get("gender", "unknown")).lower()
+            if self._active_voice_filter == "female" and gender != "female":
+                continue
+            if self._active_voice_filter == "male" and gender != "male":
+                continue
+            filtered.append(v)
+
+        if not filtered and self._all_voices:
+            filtered = self._all_voices
+
+        target_idx = 0
+        found_selected = False
+        for i, v in enumerate(filtered):
+            name = v.get("name", "Voice")
+            gender = v.get("gender", "unknown").title()
+            vid = v.get("id", "")
+            self.v_voice.addItem(f"{name} ({gender})", vid)
+            if vid and current_selected and vid == current_selected:
+                target_idx = i
+                found_selected = True
+
+        if not found_selected and not current_selected:
+            # Prioritize natural conversational US voice (Zira or David) over Hazel (UK) default
+            for i, v in enumerate(filtered):
+                vid_low = str(v.get("id", "")).lower()
+                name_low = str(v.get("name", "")).lower()
+                if "zira" in vid_low or "zira" in name_low:
+                    target_idx = i
+                    break
+
+        if self.v_voice.count() > 0:
+            self.v_voice.setCurrentIndex(target_idx)
+        else:
+            self.v_voice.addItem("Default System Voice", "")
+        self.v_voice.blockSignals(False)
 
     # ------------------------------------------------------ Intelligence
     def _build_tab_intelligence(self) -> QWidget:
@@ -1050,13 +1571,18 @@ class SettingsPage(QWidget):
             rules = load_learned_rules() or []
             ident = get_identity() or {}
             diag = run_diagnostics() or {}
+            api_keys = []
+            try:
+                api_keys = load_api_credentials_status()
+            except Exception:
+                pass
             try:
                 has_mail = has_email_credentials()
             except Exception:
                 has_mail = False
             return {
                 "prefs": prefs, "rules": rules, "identity": ident,
-                "diag": diag, "has_email": has_mail,
+                "diag": diag, "has_email": has_mail, "api_keys": api_keys,
             }
         w = DashboardWorker(work)
         w.result_sig.connect(self._apply_init_data)
@@ -1069,15 +1595,8 @@ class SettingsPage(QWidget):
     def _load_voices_later(self):
         def v_work():
             try:
-                import pyttsx3
-                eng = pyttsx3.init()
-                voices = eng.getProperty("voices")
-                items = []
-                for v in voices:
-                    n = getattr(v, "name", "Voice")
-                    lid = getattr(v, "id", "")
-                    items.append((str(n), str(lid)))
-                return items
+                from legacy.tts import enumerate_voices
+                return enumerate_voices()
             except Exception:
                 return []
         w = DashboardWorker(v_work)
@@ -1085,13 +1604,15 @@ class SettingsPage(QWidget):
         self._workers.append(w)
         w.start()
 
-    def _apply_voices(self, items):
-        self.v_voice.clear()
-        if not items:
-            self.v_voice.addItem("Default System Voice")
-            return
-        for n, lid in items:
-            self.v_voice.addItem(n, lid)
+    def _apply_voices(self, voices):
+        self._all_voices = voices or []
+        self._populate_voice_combo()
+        saved_vid = self._prefs.get("voice_id")
+        if saved_vid:
+            for k in range(self.v_voice.count()):
+                if self.v_voice.itemData(k) == saved_vid:
+                    self.v_voice.setCurrentIndex(k)
+                    break
 
     def _load_devices(self):
         def work():
@@ -1124,6 +1645,24 @@ class SettingsPage(QWidget):
         rules = data.get("rules") or []
         diag = data.get("diag") or {}
         self._prefs.load(prefs)
+        # API Keys & Integrations
+        self._apply_api_credentials(data.get("api_keys") or [])
+        try:
+            prim = get_primary_provider_adapter()
+        except Exception:
+            prim = None
+        if not prim:
+            prim = self._prefs.get("primary_provider")
+        if prim:
+            self.primary_provider_combo.blockSignals(True)
+            for k in range(self.primary_provider_combo.count()):
+                if self.primary_provider_combo.itemData(k) == str(prim).lower():
+                    self.primary_provider_combo.setCurrentIndex(k)
+                    break
+            self.primary_provider_combo.blockSignals(False)
+            if hasattr(self, "primary_model_lbl"):
+                cur_pid = self.primary_provider_combo.currentData() or "groq"
+                self.primary_model_lbl.setText(f"Active Model: <b>{PROVIDER_MODELS.get(str(cur_pid).lower(), 'default')}</b>")
         # Profile
         self.pf_name.setText(str(ident.get("username") or self._prefs.get("display_name") or ""))
         self.pf_email.setText(str(ident.get("email") or "— not configured —"))
@@ -1187,13 +1726,23 @@ class SettingsPage(QWidget):
         # Voice
         eng_idx = int(self._prefs.get("voice_engine_idx", 0) or 0)
         self.v_engine.setCurrentIndex(max(0, min(self.v_engine.count() - 1, eng_idx)))
-        self.v_rate.setValue(max(50, min(400, int(self._prefs.get("voice_rate", 200) or 200))))
+        saved_rate = int(self._prefs.get("voice_rate") or self._prefs.get("assistant_voice_rate") or 135)
+        self.v_rate.setValue(max(50, min(400, saved_rate)))
         self.v_pitch.setValue(max(0, min(200, int(self._prefs.get("voice_pitch", 100) or 100))))
-        self.v_vol.setValue(max(0, min(100, int(self._prefs.get("voice_volume", 100) or 100))))
+        saved_vol = float(self._prefs.get("voice_volume") or self._prefs.get("assistant_voice_volume") or 100)
+        if saved_vol <= 1.0:
+            saved_vol = saved_vol * 100.0
+        self.v_vol.setValue(max(0, min(100, int(round(saved_vol)))))
         hw = float(self._prefs.get("hotword_threshold", 0.35) or 0.35)
         self.v_hw_thresh.setValue(max(0, min(100, int(round(hw * 100)))))
         self.v_wake.setChecked(bool(self._prefs.get("wake_word_enabled", True)))
         self.v_act.setChecked(bool(self._prefs.get("voice_activation_enabled", True)))
+        saved_vid = self._prefs.get("voice_id") or self._prefs.get("assistant_voice_id")
+        if saved_vid:
+            for k in range(self.v_voice.count()):
+                if self.v_voice.itemData(k) == saved_vid:
+                    self.v_voice.setCurrentIndex(k)
+                    break
         # Intelligence
         prov = self._prefs.get("ai_provider", "Auto (Failover)") or "Auto (Failover)"
         i = self.ai_provider.findText(str(prov))
@@ -1317,12 +1866,19 @@ class SettingsPage(QWidget):
         self._workers.append(w); w.start()
 
     def _on_save_identity(self, flash=True):
-        name = self.id_name.text().strip()
+        raw_name = self.id_name.text().strip()
+        clean_name = validate_assistant_name(raw_name)
         def work():
-            if name:
-                try: set_assistant_name_ui(name)
+            if clean_name:
+                try: set_assistant_name_ui(clean_name)
                 except Exception: pass
-                save_user_preference("assistant_name", name)
+                try:
+                    from core.credential_manager import get_credential_manager
+                    from core.assistant_core import assistant_core
+                    uid = assistant_core.get_current_user_id()
+                    get_credential_manager().set_assistant_name(uid, clean_name)
+                except Exception: pass
+                save_user_preference("assistant_name", clean_name)
             save_user_preference("greeting", self.id_greeting.text().strip())
             save_user_preference("persona", self.id_persona.currentText())
             save_user_preference("response_style", self.id_style.currentText())
@@ -1393,53 +1949,77 @@ class SettingsPage(QWidget):
         self._flash(f"Accent color updated.")
 
     def _on_save_voice(self, flash=True):
+        vid = self.v_voice.currentData() or ""
+        rate = self.v_rate.value()
+        pitch = self.v_pitch.value()
+        vol = self.v_vol.value()
+        hw_thresh = round(self.v_hw_thresh.value() / 100.0, 2)
+        wake = self.v_wake.isChecked()
+        act = self.v_act.isChecked()
+        eng_idx = self.v_engine.currentIndex()
+        eng_text = self.v_engine.currentText()
+
         def work():
-            save_user_preference("voice_engine_idx", self.v_engine.currentIndex())
-            save_user_preference("voice_engine", self.v_engine.currentText())
-            if self.v_voice.currentData():
-                save_user_preference("voice_id", self.v_voice.currentData())
-            save_user_preference("voice_rate", self.v_rate.value())
-            save_user_preference("voice_pitch", self.v_pitch.value())
-            save_user_preference("voice_volume", self.v_vol.value())
-            save_user_preference("hotword_threshold", round(self.v_hw_thresh.value() / 100.0, 2))
-            save_user_preference("wake_word_enabled", self.v_wake.isChecked())
-            save_user_preference("voice_activation_enabled", self.v_act.isChecked())
+            save_user_preference("voice_engine_idx", eng_idx)
+            save_user_preference("voice_engine", eng_text)
+            if vid:
+                save_user_preference("voice_id", vid)
+                save_user_preference("assistant_voice_id", vid)
+            save_user_preference("voice_rate", rate)
+            save_user_preference("assistant_voice_rate", rate)
+            save_user_preference("voice_pitch", pitch)
+            save_user_preference("voice_volume", vol)
+            save_user_preference("assistant_voice_volume", vol / 100.0)
+            save_user_preference("hotword_threshold", hw_thresh)
+            save_user_preference("wake_word_enabled", wake)
+            save_user_preference("voice_activation_enabled", act)
+
+            try:
+                apply_voice_profile(voice_id=vid if vid else None, rate=rate, volume=vol / 100.0)
+            except Exception as ex:
+                print(f"[SETTINGS] Live voice apply warning: {ex}")
+
             if SETTINGS is not None:
                 try:
                     if hasattr(SETTINGS, 'VOICE_RATE'):
-                        SETTINGS.VOICE_RATE = self.v_rate.value()
+                        SETTINGS.VOICE_RATE = rate
                     if hasattr(SETTINGS, 'VOLUME'):
-                        SETTINGS.VOLUME = self.v_vol.value() / 100.0
+                        SETTINGS.VOLUME = vol / 100.0
                     if hasattr(SETTINGS, 'HOTWORD_WAKE_THRESHOLD'):
-                        SETTINGS.HOTWORD_WAKE_THRESHOLD = round(self.v_hw_thresh.value() / 100.0, 2)
-                except Exception: pass
+                        SETTINGS.HOTWORD_WAKE_THRESHOLD = hw_thresh
+                    if vid and hasattr(SETTINGS, 'VOICE_ID'):
+                        SETTINGS.VOICE_ID = vid
+                except Exception:
+                    pass
             return True
+
         w = DashboardWorker(work)
-        w.result_sig.connect(lambda _=None, f=flash: f and self._flash("Voice settings applied."))
+        w.result_sig.connect(lambda _=None, f=flash: f and self._flash("Voice settings applied and active."))
         w.error_sig.connect(lambda e: self._flash(f"Error: {e}"))
         self._workers.append(w); w.start()
 
     def _on_test_voice(self):
-        self._flash("Testing voice engine…")
-        text = (f"{self.id_name.text() or 'Assistant'} reporting in. "
-                f"This is a voice test at {self.v_rate.value()} words per minute, "
-                f"volume {self.v_vol.value()} percent.")
+        try:
+            stop_speaking(interrupted=True)
+        except Exception:
+            pass
+        self._flash("Auditioning voice…")
+        raw_name = self.id_name.text().strip() or "Assistant"
+        text = f"Hello! I am {raw_name}. This is a preview of my voice."
+        vid = self.v_voice.currentData() or ""
+        rate = self.v_rate.value()
+        vol = max(0.0, min(1.0, self.v_vol.value() / 100.0))
+
         def work():
             try:
-                import pyttsx3
-                eng = pyttsx3.init()
-                eng.setProperty("rate", self.v_rate.value())
-                eng.setProperty("volume", max(0.0, min(1.0, self.v_vol.value() / 100.0)))
-                vid = self.v_voice.currentData()
-                if vid: eng.setProperty("voice", vid)
-                eng.say(text)
-                eng.runAndWait()
-                return True
+                ok = preview_voice(voice_id=vid, rate=rate, volume=vol, text=text)
+                return ok
             except Exception as e:
                 return f"failed: {e}"
+
         w = DashboardWorker(work)
-        w.result_sig.connect(lambda r: self._flash("Voice playback complete." if r is True else f"Voice error: {r}"))
-        w.error_sig.connect(lambda e: self._flash(f"Voice error: {e}"))
+        w.result_sig.connect(lambda r: self._flash("Audition complete." if r is True else f"Audition error: {r}"))
+        w.error_sig.connect(lambda e: self._flash(f"Audition error: {e}"))
         self._workers.append(w); w.start()
 
     def _on_ai_provider_change(self, text: str):

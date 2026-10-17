@@ -174,7 +174,20 @@ def _clear_user_session():
         # Clear runtime config
         save_runtime_config({"LAST_USER_ID": None})
 
-        log_debug("User session cleared (user, username, assistant name all reset)")
+        # Clear in-memory credential cache and conversational context
+        try:
+            from core.credential_manager import get_credential_manager
+            get_credential_manager().clear_cache()
+        except Exception:
+            pass
+
+        try:
+            from extensions.context_manager import get_manager
+            get_manager().clear_context()
+        except Exception:
+            pass
+
+        log_debug("User session cleared (user, username, assistant name, credentials, and context all reset)")
     except Exception as e:
         log_debug(f"Error clearing session: {e}")
 

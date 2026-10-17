@@ -329,11 +329,11 @@ class ArtifactReferenceResolver:
 
     def _detect_ordinal_index(self, text: str) -> Optional[int]:
         """Detect ordinal references like 'the first one', 'the second code'."""
-        if any(w in text for w in ("first one", "1st one", "first code", "1st code", "the first")):
+        if re.search(r'\b(?:the\s+)?first\s+(?:one|artifact|code|notes?|summary|doc|document|result)\b|\b1st\s+(?:one|artifact|code)\b|\bthe\s+first\b(?![-_\s]*(?:largest|smallest|highest|lowest|element|number|max|min|half|quarter|row|column|order|degree))', text, re.I):
             return 0
-        if any(w in text for w in ("second one", "2nd one", "second code", "2nd code", "the second")):
+        if re.search(r'\b(?:the\s+)?second\s+(?:one|artifact|code|notes?|summary|doc|document|result)\b|\b2nd\s+(?:one|artifact|code)\b|\bthe\s+second\b(?![-_\s]*(?:largest|smallest|highest|lowest|element|number|max|min|half|quarter|row|column|order|degree))', text, re.I):
             return 1
-        if any(w in text for w in ("third one", "3rd one", "third code", "3rd code", "the third")):
+        if re.search(r'\b(?:the\s+)?third\s+(?:one|artifact|code|notes?|summary|doc|document|result)\b|\b3rd\s+(?:one|artifact|code)\b|\bthe\s+third\b(?![-_\s]*(?:largest|smallest|highest|lowest|element|number|max|min|half|quarter|row|column|order|degree))', text, re.I):
             return 2
         return None
 

@@ -94,6 +94,15 @@ class Settings:
             os.getenv("HF_API_KEY_3", ""),
         ] if key]
 
+        self.ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+        self.ANTHROPIC_API_KEYS = [key for key in [
+            os.getenv("ANTHROPIC_API_KEY", ""),
+            os.getenv("ANTHROPIC_API_KEY_1", ""),
+            os.getenv("ANTHROPIC_API_KEY_2", ""),
+        ] if key]
+        self.ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+        self.ANTHROPIC_TIMEOUT = float(os.getenv("ANTHROPIC_TIMEOUT", "8.0"))
+
         # --- SEARCH PROVIDERS (web search / live retrieval) ---
         self.SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "serpapi")
 
@@ -182,7 +191,7 @@ class Settings:
 
         self.VOICE_ENGINE = os.getenv("VOICE_ENGINE", "pyttsx3")
 
-        self.VOICE_RATE = int(os.getenv("VOICE_RATE", "200"))
+        self.VOICE_RATE = int(os.getenv("VOICE_RATE", "135"))
 
         self.VOLUME = float(os.getenv("VOLUME", "1.0"))
 
@@ -260,8 +269,8 @@ class Settings:
         # --- RUNTIME STATE (Legacy support) ---
         self.RUNTIME_CONFIG_FILE = "runtime_config.json"
         
-        # Initialize from last session
-        self.CURRENT_USER_ID = self.get_last_user()
+        # Explicit authenticated session state (None until authenticated)
+        self.CURRENT_USER_ID = None
         self.CURRENT_USERNAME = None
         self.LAST_ASSISTANT_MSG = ""
 

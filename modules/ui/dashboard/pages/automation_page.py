@@ -270,48 +270,54 @@ class AutomationPage(QWidget):
             self._sc4._val_lbl.setStyleSheet(f"font-size: 18px; font-weight: 700; color: {C.TEXT};")
 
     def _on_rems(self, rems):
-        self._rems = list(rems or [])
-        self._sc3._val_lbl.setText(str(len(self._rems)))
-        # Update stat last trigger
-        last = ""
-        for r in (self._rems or []):
-            if r.get("created_at"):
-                last = str(r["created_at"])[:16].replace("T", " ")
-                break
-        self._sc4._val_lbl.setText(last or "—")
-        if len(last) > 10:
-            self._sc4._val_lbl.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {C.TEXT};")
-        else:
-            self._sc4._val_lbl.setStyleSheet(f"font-size: 18px; font-weight: 700; color: {C.TEXT};")
+        try:
+            self._rems = list(rems or [])
+            self._sc3._val_lbl.setText(str(len(self._rems)))
+            # Update stat last trigger
+            last = ""
+            for r in (self._rems or []):
+                if r.get("created_at"):
+                    last = str(r["created_at"])[:16].replace("T", " ")
+                    break
+            self._sc4._val_lbl.setText(last or "—")
+            if len(last) > 10:
+                self._sc4._val_lbl.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {C.TEXT};")
+            else:
+                self._sc4._val_lbl.setStyleSheet(f"font-size: 18px; font-weight: 700; color: {C.TEXT};")
 
-        # Render history
-        from ..ds import clear_layout
-        clear_layout(self._hist_stack)
-        rems_sorted = sorted(self._rems,
-                             key=lambda x: (x.get("created_at") or ""), reverse=True)
-        if not rems_sorted:
-            self._hist_stack.addWidget(self._hist_empty)
-            return
-        for r in rems_sorted[:8]:
-            w = QFrame(); w.setProperty("class", "CardInner")
-            w.setMinimumHeight(44)
-            w.setMaximumHeight(54)
-            l = QHBoxLayout(w); l.setContentsMargins(Spacing.MD, 6, Spacing.MD, 6)
-            l.setSpacing(Spacing.MD)
-            state = "NOTIFIED" if r.get("is_notified") else "SCHEDULED"
-            col = "success" if r.get("is_notified") else "pending"
-            chip = StatusChip(state, col); l.addWidget(chip)
-            col2 = QVBoxLayout(); col2.setSpacing(2)
-            t = QLabel(r.get("task_text") or ""); t.setStyleSheet("font-weight: 500;")
-            t.setWordWrap(True)
-            c_date = str(r.get('created_at') or '')[:16].replace('T', ' ')
-            d_date = str(r.get('due_at') or '')[:16].replace('T', ' ')
-            sub = QLabel(f"Created {c_date}  ·  Due {d_date}")
-            sub.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px;")
-            col2.addWidget(t); col2.addWidget(sub)
-            l.addLayout(col2, 1)
-            self._hist_stack.addWidget(w)
-        self._hist_stack.addStretch(1)
+            # Render history
+            from ..ds import clear_layout
+            clear_layout(self._hist_stack)
+            rems_sorted = sorted(self._rems,
+                                 key=lambda x: (x.get("created_at") or ""), reverse=True)
+            if not rems_sorted:
+                empty = EmptyState(ICONS.BARS, "No recent triggers",
+                                   "The reminder engine will show its most recent activity here.",
+                                   accent=C.SEC_AUTOMATION)
+                self._hist_stack.addWidget(empty)
+                return
+            for r in rems_sorted[:8]:
+                w = QFrame(); w.setProperty("class", "CardInner")
+                w.setMinimumHeight(44)
+                w.setMaximumHeight(54)
+                l = QHBoxLayout(w); l.setContentsMargins(Spacing.MD, 6, Spacing.MD, 6)
+                l.setSpacing(Spacing.MD)
+                state = "NOTIFIED" if r.get("is_notified") else "SCHEDULED"
+                col = "success" if r.get("is_notified") else "pending"
+                chip = StatusChip(state, col); l.addWidget(chip)
+                col2 = QVBoxLayout(); col2.setSpacing(2)
+                t = QLabel(r.get("task_text") or ""); t.setStyleSheet("font-weight: 500;")
+                t.setWordWrap(True)
+                c_date = str(r.get('created_at') or '')[:16].replace('T', ' ')
+                d_date = str(r.get('due_at') or '')[:16].replace('T', ' ')
+                sub = QLabel(f"Created {c_date}  ·  Due {d_date}")
+                sub.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px;")
+                col2.addWidget(t); col2.addWidget(sub)
+                l.addLayout(col2, 1)
+                self._hist_stack.addWidget(w)
+            self._hist_stack.addStretch(1)
+        except Exception as e:
+            print(f"[AUTOMATION_PAGE] Error updating reminders: {e}")
 
     # ------------------------------ actions ----------------------------
     def _copy_rule(self, text: str):
