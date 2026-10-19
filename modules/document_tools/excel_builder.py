@@ -1,5 +1,5 @@
 """
-Excel (.xlsx) Spreadsheet Generator for Nova Smart Assistant.
+Excel (.xlsx) Spreadsheet Generator for Smart Assistant.
 Generates styled Excel workbooks with headers, borders, and auto-sized columns using openpyxl.
 """
 
@@ -12,13 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 def get_default_output_dir() -> str:
+    """
+    Get user Desktop directory, checking OneDrive Desktop first then standard Desktop.
+    """
     home = os.path.expanduser("~")
-    docs = os.path.join(home, "Documents")
-    if os.path.exists(docs):
-        return docs
-    desktop = os.path.join(home, "Desktop")
-    if os.path.exists(desktop):
-        return desktop
+    onedrive_desktop = os.path.join(home, "OneDrive", "Desktop")
+    if os.path.exists(onedrive_desktop) and os.path.isdir(onedrive_desktop):
+        return onedrive_desktop
+    standard_desktop = os.path.join(home, "Desktop")
+    if os.path.exists(standard_desktop) and os.path.isdir(standard_desktop):
+        return standard_desktop
     return home
 
 
@@ -29,7 +32,9 @@ def create_excel_spreadsheet(
     filename: Optional[str] = None,
     sheets: Optional[List[Dict[str, Any]]] = None,
     add_totals: bool = False,
-    chart_type: Optional[str] = None
+    chart_type: Optional[str] = None,
+    title: Optional[str] = None,
+    **kwargs: Any
 ) -> Dict[str, Any]:
     """
     Create a styled Excel spreadsheet with professional formatting.
@@ -42,6 +47,7 @@ def create_excel_spreadsheet(
         sheets: Optional list of sheet dicts: [{"title": "...", "headers": [...], "rows": [[...], ...], "totals": bool}]
         add_totals: If True, adds a Total row with =SUM() formulas for numeric columns
         chart_type: Optional "bar" or "line" chart to embed
+        title: Optional overall spreadsheet title used for semantic filename resolution
     """
     try:
         import openpyxl
@@ -49,6 +55,12 @@ def create_excel_spreadsheet(
         from openpyxl.utils import get_column_letter
 
         wb = openpyxl.Workbook()
+        try:
+            from instance.config import get_branding_author
+            wb.properties.creator = get_branding_author()
+            wb.properties.title = str(title or sheet_title)
+        except Exception:
+            pass
 
         # Styles
         header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -194,19 +206,30 @@ def create_excel_spreadsheet(
                     logger.warning(f"[EXCEL] Could not generate chart: {c_err}")
 
         # Determine target file path
-        first_title = sheet_configs[0].get("title") or sheet_configs[0].get("name") or "Sheet1"
-        if not filename:
-            safe_title = "".join(c for c in first_title if c.isalnum() or c in (' ', '_', '-')).rstrip()
-            filename = f"{safe_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        elif not filename.endswith(".xlsx"):
-            filename += ".xlsx"
+        # Determine target file path using canonical SemanticFileNamingService
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        namer = get_semantic_file_naming_service()
 
-        if os.path.isabs(filename):
-            target_path = filename
+        first_title = (sheet_configs[0].get("title") or sheet_configs[0].get("name")) if sheet_configs else None
+        eff_title = title or first_title or sheet_title or "Spreadsheet"
+        if not filename:
+            target_path, _ = namer.resolve_output_path(
+                task_description=eff_title,
+                title=eff_title,
+                artifact_type="spreadsheet",
+                extension=".xlsx"
+            )
             out_dir = os.path.dirname(target_path)
         else:
-            out_dir = get_default_output_dir()
-            target_path = os.path.join(out_dir, filename)
+            clean_name = namer.sanitize_filename(filename)
+            if not clean_name.endswith(".xlsx"):
+                clean_name += ".xlsx"
+            if os.path.isabs(filename):
+                target_path = filename
+                out_dir = os.path.dirname(target_path)
+            else:
+                out_dir = namer.get_default_output_dir()
+                target_path = namer.get_unique_path(out_dir, os.path.splitext(clean_name)[0], ".xlsx")
 
         os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
         wb.save(target_path)

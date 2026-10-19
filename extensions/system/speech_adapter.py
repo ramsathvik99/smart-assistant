@@ -27,15 +27,13 @@ def sanitize_user_response(text: str, user_input: str = "") -> str:
 
     s = text.strip()
 
-    # 0. Clean raw engine exceptions and provider failure dumps
+    # 0. Clean raw engine exceptions and crash dumps
     if any(err_token in s for err_token in (
-        "[LLM]", "[BRAIN FALLBACK]", "all language model providers failed",
-        "Traceback (most recent call last)", "Provider=Ollama request timed out",
-        "name 'norm' is not defined"
+        "Traceback (most recent call last)", "name 'norm' is not defined"
     )):
-        return "I understood your request, but I was temporarily unable to reach the language model. Please check your provider settings or try again in a moment."
+        return "I encountered an internal error processing your request. Please try again."
 
-    s = re.sub(r'\[(?:VOICE|TTS|ERROR|DEBUG|INFO|CONFIG)\]\s*', '', s).strip()
+    s = re.sub(r'\[(?:VOICE|TTS|ERROR|DEBUG|INFO|CONFIG|LLM|BRAIN FALLBACK)\]\s*', '', s).strip()
     debug_sentences = [
         r"(?:I(?:\'ve|\s+have)?\s+(?:queried|checked|searched|accessed|retrieved)\s+(?:the\s+|your\s+)?(?:database|memory|history|context|historical\s+records|records|previous\s+conversations?)[^.\n]*[.\?!]\s*)",
         r"(?:I(?:\'ve|\s+have)?\s+(?:used|executed|called)\s+(?:the\s+)?(?:tool|subsystem|function)[^.\n]*[.\?!]\s*)",

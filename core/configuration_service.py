@@ -155,12 +155,18 @@ class ConfigurationService:
                     user_cache = self._prefs_cache.get(str(uid), {})
                     if alias_key in user_cache:
                         val = user_cache[alias_key]
-                if val is None and uid > 0:
-                    try:
-                        from legacy.memory_manager import get_user_preference_db
-                        val = get_user_preference_db(uid, alias_key, None)
-                    except Exception:
-                        pass
+        if val is None and uid > 0:
+            if key_str in ("voice_id", "assistant_voice_id", "voice_rate", "voice_volume", "voice_provider", "voice_gender", "voice_tone"):
+                try:
+                    from legacy.memory_manager import get_voice_profile_db
+                    vprof = get_voice_profile_db(uid)
+                    if isinstance(vprof, dict):
+                        if key_str in ("voice_id", "assistant_voice_id"):
+                            val = vprof.get("voice_id")
+                        else:
+                            val = vprof.get(key_str)
+                except Exception:
+                    pass
 
         if val is not None:
             with self._cache_lock:
@@ -176,10 +182,18 @@ class ConfigurationService:
 
         if uid > 0:
             try:
-                from legacy.memory_manager import get_all_user_preferences_db
+                from legacy.memory_manager import get_all_user_preferences_db, get_voice_profile_db, has_voice_profile_db
                 db_prefs = get_all_user_preferences_db(uid)
                 if isinstance(db_prefs, dict):
                     all_prefs.update(db_prefs)
+                if has_voice_profile_db(uid):
+                    vprof = get_voice_profile_db(uid)
+                    if isinstance(vprof, dict):
+                        for vk, vv in vprof.items():
+                            if vv is not None:
+                                all_prefs.setdefault(vk, vv)
+                        if vprof.get("voice_id"):
+                            all_prefs.setdefault("assistant_voice_id", vprof.get("voice_id"))
             except Exception as e:
                 logger.debug("DB get_all_user_preferences_db failed: %s", e)
 
@@ -321,7 +335,7 @@ class ConfigurationService:
                 logger.warning("[CONFIG] Live voice dispatch warning: %s", e)
 
         # C. AI Provider & Models
-        elif key_lower in ("ai_provider", "primary_provider", "ai_model", "ai_failover"):
+        elif key_lower in ("ai_provider", "primary_provider", "ai_model", "ai_failover", "openai_enabled"):
             try:
                 from instance.config import settings
                 if key_lower in ("ai_provider", "primary_provider"):
@@ -332,6 +346,10 @@ class ConfigurationService:
                     mod = str(value).strip()
                     if hasattr(settings, "DEFAULT_MODEL"):
                         settings.DEFAULT_MODEL = mod
+                if key_lower == "openai_enabled":
+                    is_en = str(value).lower() in ("true", "1", "yes")
+                    if hasattr(settings, "OPENAI_ENABLED"):
+                        settings.OPENAI_ENABLED = is_en
             except Exception:
                 pass
 

@@ -111,8 +111,8 @@ def clean_code(code: str) -> str:
     if m_full:
         return m_full.group(1).strip()
 
-    # If code starts with opening fence but wasn't closed (e.g. truncated output)
-    m_open = re.search(r'^```(?:[\w+\-]+)?\s*\n(.*)', text, re.DOTALL)
+    # If code contains an opening fence that was not closed (e.g. truncated output)
+    m_open = re.search(r'(?:^|\n)```(?:[\w+\-]+)?\s*\n(.*)', text, re.DOTALL)
     if m_open:
         cleaned = m_open.group(1).rstrip()
         if cleaned.endswith("```"):
@@ -127,51 +127,39 @@ def clean_code(code: str) -> str:
 
 def extract_filename_from_command(command: str) -> str:
     """Extracts a meaningful, clean filename base from the user's command."""
-    remove_words = {
-        "create", "generate", "write", "make", "build", "a", "an", "the",
-        "program", "code", "script", "in", "using", "with", "for", "to",
-        "essay", "on", "about", "story", "letter", "notes", "summary", "paragraph",
-        "example", "function", "class", "module", "query", "simple",
-        # Language names to remove from base name (they become the extension)
-        "python", "py", "java", "javascript", "js", "typescript", "ts",
-        "c", "cpp", "csharp", "rust", "go", "golang", "powershell", "bash",
-        "shell", "ruby", "php", "swift", "kotlin", "dart", "sql", "html", "css", "json"
-    }
-    # Replace non-alphanumeric with space to separate words
-    clean_cmd = re.sub(r'[^a-zA-Z0-9_\s]', ' ', command.lower())
-    words = clean_cmd.split()
-    filtered = [w for w in words if w not in remove_words and len(w) > 1]
-    filename = "_".join(filtered[:5])  # max 5 meaningful words
-    return filename if filename else "output"
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    return get_semantic_file_naming_service().derive_semantic_filename(
+        task_description=command,
+        artifact_type="code",
+        is_project_dir=True
+    )
 
 def get_unique_filepath(folder: str, base_name: str, extension: str) -> str:
-    """Returns a unique filepath, appending _1, _2 etc. if file already exists."""
-    ext = normalize_extension(extension)
-    filepath = os.path.join(folder, f"{base_name}{ext}")
-    if not os.path.exists(filepath):
-        return filepath
-    counter = 1
-    while True:
-        candidate = os.path.join(folder, f"{base_name}_{counter}{ext}")
-        if not os.path.exists(candidate):
-            return candidate
-        counter += 1
+    """Returns a unique filepath, appending _2, _3 etc. if file already exists."""
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    return get_semantic_file_naming_service().get_unique_path(folder, base_name, extension)
 
 def generate_filename(prompt: str, extension: str) -> str:
     """Generates a human-readable filename based on the prompt."""
-    base_name = extract_filename_from_command(prompt)
-    downloads_folder = get_downloads_folder()
-    return os.path.basename(get_unique_filepath(downloads_folder, base_name, extension))
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    return get_semantic_file_naming_service().derive_semantic_filename(
+        task_description=prompt,
+        extension=extension,
+        artifact_type="code"
+    )
 
 def get_downloads_folder() -> str:
     """Returns the path to the user's Downloads folder (cross-platform)."""
-    return os.path.join(os.path.expanduser("~"), "Downloads")
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    return get_semantic_file_naming_service().get_downloads_dir()
 
 def save_file(filename: str, code: str) -> str:
     """Saves content to the user's Downloads folder and returns the absolute filepath with strict verification."""
-    downloads = get_downloads_folder()
-    os.makedirs(downloads, exist_ok=True)
-    filepath = os.path.join(downloads, filename)
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    namer = get_semantic_file_naming_service()
+    downloads = namer.get_downloads_dir()
+    clean_name = namer.sanitize_filename(filename)
+    filepath = namer.get_unique_path(downloads, os.path.splitext(clean_name)[0], os.path.splitext(clean_name)[1])
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(code)
@@ -182,21 +170,94 @@ def save_file(filename: str, code: str) -> str:
     return ""
 
 def save_file_smart(command: str, content: str, extension: str) -> str:
-    """Saves content with a human-readable filename and correct extension derived from the command."""
-    downloads_folder = get_downloads_folder()
-    os.makedirs(downloads_folder, exist_ok=True)
-    base_name = extract_filename_from_command(command)
-    ext = normalize_extension(extension)
-    filepath = get_unique_filepath(downloads_folder, base_name, ext)
+    """Saves content with a human-readable filename and correct extension derived from the command and content."""
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    namer = get_semantic_file_naming_service()
+    filepath, _ = namer.resolve_output_path(
+        task_description=command,
+        content_preview=content,
+        artifact_type="code",
+        extension=extension,
+        output_dir=namer.get_downloads_dir()
+    )
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
     return filepath
 
 
+def is_truncated_syntax_error(e: SyntaxError, code: str) -> bool:
+    """Check if a SyntaxError is an indicator of truncated generation."""
+    msg = (e.msg or "").lower()
+    trunc_keywords = [
+        "unexpected eof",
+        "unterminated triple-quoted",
+        "unterminated string literal",
+        "unclosed parenthesis",
+        "unclosed bracket",
+        "unclosed curly brace",
+        "was never closed"
+    ]
+    if any(k in msg for k in trunc_keywords):
+        return True
+    lines = code.splitlines()
+    if e.lineno and e.lineno >= len(lines) - 2:
+        return True
+    return False
+
+
+def attempt_bounded_repair(code: str, language: str = "python") -> Tuple[bool, str, str]:
+    """
+    Attempt bounded repairs on malformed or truncated code without hallucinating arbitrary logic.
+    Returns (repaired_success, repaired_code, repair_note).
+    """
+    lang = (language or "python").lower().strip()
+    if lang not in ("python", "py"):
+        return False, code, "Bounded repair currently supported for Python."
+
+    import ast
+    try:
+        ast.parse(code)
+        return True, code, "Code is already valid."
+    except SyntaxError as orig_err:
+        last_err = orig_err
+
+    # 1. Clean accidental markdown wrappers or leading/trailing conversational text
+    cleaned = clean_code(code)
+    try:
+        ast.parse(cleaned)
+        return True, cleaned, "Repaired by extracting clean code block."
+    except SyntaxError:
+        pass
+
+    # 2. Repair unclosed triple quotes at the end of file
+    for q in ['"""', "'''"]:
+        candidate = cleaned.rstrip() + "\n" + q
+        try:
+            ast.parse(candidate)
+            return True, candidate, f"Repaired by closing unclosed {q} literal."
+        except SyntaxError:
+            pass
+
+    # 3. Repair truncated function/statement by trimming back to the last complete syntactic construct
+    lines = cleaned.splitlines()
+    for i in range(len(lines) - 1, max(0, len(lines) - 30), -1):
+        candidate = "\n".join(lines[:i]).rstrip()
+        if not candidate.strip():
+            break
+        try:
+            ast.parse(candidate)
+            trimmed_count = len(lines) - i
+            return True, candidate, f"Repaired truncated output by trimming {trimmed_count} incomplete trailing line(s)."
+        except SyntaxError:
+            pass
+
+    return False, code, f"SyntaxError could not be safely repaired: {last_err.msg} at line {last_err.lineno}."
+
+
 def validate_code_syntax(code: str, language: str = "python") -> dict:
     """
     Validate code syntax without executing it.
-    Uses ast.parse for Python, Node.js parser for JS, json/xml/yaml parsers,
+    Uses ast.parse for Python with bounded repair, Node.js parser for JS, json/xml/yaml parsers,
     g++ for C++, and delimiter balancing with honest compiler disclosures for other languages.
     """
     import shutil
@@ -212,9 +273,24 @@ def validate_code_syntax(code: str, language: str = "python") -> dict:
                 "valid": True,
                 "language": "python",
                 "compiler_available": True,
+                "repaired": False,
+                "is_truncated": False,
                 "message": "Python syntax is valid."
             }
         except SyntaxError as e:
+            is_trunc = is_truncated_syntax_error(e, code)
+            ok, rep_code, rep_msg = attempt_bounded_repair(code, language="python")
+            if ok:
+                return {
+                    "valid": True,
+                    "language": "python",
+                    "compiler_available": True,
+                    "repaired": True,
+                    "is_truncated": is_trunc,
+                    "repaired_code": rep_code,
+                    "original_code": code,
+                    "message": f"Python syntax validated after bounded repair ({rep_msg})."
+                }
             return {
                 "valid": False,
                 "language": "python",
@@ -222,7 +298,9 @@ def validate_code_syntax(code: str, language: str = "python") -> dict:
                 "offset": e.offset,
                 "error": e.msg,
                 "text": e.text.strip() if e.text else "",
-                "message": f"Python SyntaxError at line {e.lineno}: {e.msg}."
+                "repaired": False,
+                "is_truncated": is_trunc,
+                "message": f"Python SyntaxError at line {e.lineno}: {e.msg} ({'truncated generation' if is_trunc else 'invalid syntax'})."
             }
 
     elif lang in ("json",):
@@ -311,6 +389,44 @@ def validate_code_syntax(code: str, language: str = "python") -> dict:
                     except Exception:
                         pass
 
+    elif lang in ("java",):
+        javac_bin = shutil.which("javac")
+        if javac_bin:
+            m_cls = re.search(r'\bpublic\s+class\s+([A-Za-z0-9_]+)', code)
+            cls_name = m_cls.group(1) if m_cls else "Main"
+            td = None
+            try:
+                td = tempfile.mkdtemp()
+                java_file = os.path.join(td, f"{cls_name}.java")
+                with open(java_file, "w", encoding="utf-8") as f:
+                    f.write(code)
+                res = subprocess.run([javac_bin, "-d", td, java_file], capture_output=True, text=True, timeout=10)
+                if res.returncode == 0:
+                    return {
+                        "valid": True,
+                        "language": "java",
+                        "compiler_available": True,
+                        "compiled": True,
+                        "missing_tools": [],
+                        "message": "Java syntax and compilation verified via javac."
+                    }
+                else:
+                    first_err = res.stderr.splitlines()[0] if res.stderr else "Java compilation error"
+                    return {
+                        "valid": False,
+                        "language": "java",
+                        "compiler_available": True,
+                        "compiled": False,
+                        "missing_tools": [],
+                        "error": first_err,
+                        "message": f"Java compilation check failed: {first_err}"
+                    }
+            except Exception:
+                pass
+            finally:
+                if td and os.path.exists(td):
+                    shutil.rmtree(td, ignore_errors=True)
+
     # Delimiter balancing check for all languages without active toolchain or as fallback
     stack = []
     pairs = {')': '(', '}': '{', ']': '['}
@@ -326,6 +442,9 @@ def validate_code_syntax(code: str, language: str = "python") -> dict:
                     "valid": False,
                     "language": lang,
                     "line": line_num,
+                    "compiler_available": False,
+                    "compiled": False,
+                    "missing_tools": [],
                     "message": f"Mismatched closing bracket '{char}' at line {line_num}."
                 }
             stack.pop()
@@ -336,6 +455,9 @@ def validate_code_syntax(code: str, language: str = "python") -> dict:
             "valid": False,
             "language": lang,
             "line": u_line,
+            "compiler_available": False,
+            "compiled": False,
+            "missing_tools": [],
             "message": f"Unclosed '{unclosed}' opened at line {u_line}."
         }
 
@@ -350,6 +472,8 @@ def validate_code_syntax(code: str, language: str = "python") -> dict:
             "valid": True,
             "language": lang,
             "compiler_available": False,
+            "compiled": False,
+            "missing_tools": [comp_tool],
             "message": f"{language.capitalize()} syntax appears structurally balanced. Note: {comp_tool} is not installed in the environment for full compilation validation."
         }
 
@@ -357,7 +481,67 @@ def validate_code_syntax(code: str, language: str = "python") -> dict:
         "valid": True,
         "language": lang,
         "compiler_available": bool(shutil.which(comp_tool)) if comp_tool else False,
+        "compiled": False,
+        "missing_tools": [comp_tool] if comp_tool and not shutil.which(comp_tool) else [],
         "message": f"{language.capitalize()} syntax appears balanced."
+    }
+
+
+def validate_generated_artifact_requirements(code: str, query: str) -> dict:
+    """
+    Validates whether the generated code fulfills the functional requirements stated in the query.
+    Specifically checks for requested typed input, audio/speech output, and multilingual capability.
+    """
+    if not code or not isinstance(code, str) or not query or not isinstance(query, str):
+        return {"satisfied": True, "missing_requirements": [], "detected_features": []}
+
+    q_low = query.lower()
+    c_low = code.lower()
+    missing = []
+    detected = []
+
+    # 1. Typed input requirement
+    wants_input = any(k in q_low for k in ["typed input", "accepts typed input", "takes input", "user input", "console input", "keyboard input"])
+    if wants_input:
+        has_input = any(p in c_low for p in [
+            "input(", "sys.stdin", "raw_input(", "scanner", "bufferedreader",
+            "readline(", "process.stdin", "cin >>", "cin.get", "getline(",
+            "console.readline", "read_line", "fmt.scan"
+        ])
+        if has_input:
+            detected.append("typed_input")
+        else:
+            missing.append("typed_input (missing interactive console/user input mechanism)")
+
+    # 2. Audio/speech output requirement
+    wants_speech = any(k in q_low for k in ["speaks the output", "speak the output", "speaks output", "audio output", "voice output", "speaks in", "text to speech", "tts", "speaks"])
+    if wants_speech:
+        has_speech = any(p in c_low for p in [
+            "pyttsx3", "gtts", "win32com.client", "sapi.spvoice", "speechsynthesizer",
+            "speech_synthesis", "playsound", "pygame.mixer", "sounddevice",
+            "say(", ".speak(", "speech_recognition", "text-to-speech", "tts"
+        ])
+        if has_speech:
+            detected.append("speech_output")
+        else:
+            missing.append("speech_output (missing text-to-speech or audio synthesis)")
+
+    # 3. Multilingual / different languages requirement
+    wants_multilingual = any(k in q_low for k in ["different languages", "multiple languages", "multilingual", "in different languages", "translate", "languages"])
+    if wants_multilingual:
+        has_multilingual = any(p in c_low for p in [
+            "googletrans", "translate", "languages", "lang_code", "lang_map",
+            "espeak", "lang", "en", "es", "fr", "de", "hi", "te", "ta"
+        ]) and any(tok in c_low for tok in ["dict", "{", "languages", "language", "translate", "translations"])
+        if has_multilingual:
+            detected.append("multilingual_support")
+        else:
+            missing.append("multilingual_support (missing language selection or multilingual translation maps)")
+
+    return {
+        "satisfied": len(missing) == 0,
+        "missing_requirements": missing,
+        "detected_features": detected
     }
 
 

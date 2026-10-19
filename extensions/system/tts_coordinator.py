@@ -94,6 +94,7 @@ class TTSCoordinator:
         self._init_lock    = threading.Lock()
         self._current_request: Optional[TTSRequest] = None
         self._request_lock = threading.Lock()
+        self._interrupted_flag = threading.Event()
 
     # ------------------------------------------------------------------
     # Initialization
@@ -247,6 +248,7 @@ class TTSCoordinator:
         to the underlying TTS engine.
         Returns the interrupted speech info dict if available.
         """
+        self._interrupted_flag.set()
         # Drain coordinator priority queue
         while not self.queue.empty():
             try:
@@ -277,6 +279,7 @@ class TTSCoordinator:
                 continue
 
             try:
+                self._interrupted_flag.clear()
                 with self._request_lock:
                     self._current_request = request
 
@@ -288,10 +291,10 @@ class TTSCoordinator:
                     _engine_label = "Windows SAPI/pyttsx3"
 
                 try:
-                    print(f"[TTS COORDINATOR] SPEECH START (Priority: {request.priority.name}, Engine: {_engine_label}): {request.text[:60]!r}")
+                    print(f"[TTS COORDINATOR] SPEECH START (Priority: {request.priority.name}, Target Engine: {_engine_label}): {request.text[:60]!r}")
                 except Exception:
                     try:
-                        print(f"[TTS COORDINATOR] SPEECH START (Priority: {request.priority.name}, Engine: {_engine_label}): {ascii(request.text[:60])}")
+                        print(f"[TTS COORDINATOR] SPEECH START (Priority: {request.priority.name}, Target Engine: {_engine_label}): {ascii(request.text[:60])}")
                     except Exception:
                         pass
                 logger.info(
@@ -314,7 +317,13 @@ class TTSCoordinator:
                 except Exception:
                     pass
 
-                if last_metrics.get("interrupted"):
+                is_interrupted = bool(
+                    self._interrupted_flag.is_set()
+                    or last_metrics.get("interrupted")
+                    or (last_metrics.get("speech_text") == request.text and last_metrics.get("interrupted"))
+                )
+
+                if is_interrupted:
                     try:
                         print(f"[TTS COORDINATOR] SPEECH INTERRUPTED: {request.text[:60]!r}")
                     except Exception:

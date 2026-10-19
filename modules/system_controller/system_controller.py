@@ -9,6 +9,7 @@ import ctypes
 import os
 import re
 import subprocess
+import time
 import psutil
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -117,32 +118,83 @@ def get_disk_space(drive: str = "C:") -> Dict[str, Any]:
 def get_top_processes(n: int = 5, sort_by: str = "memory") -> Dict[str, Any]:
     """
     Get top resource-consuming processes by CPU or RAM.
+    Implements a reliable two-pass measurement method with a non-zero sampling delta
+    so per-process CPU percent is genuinely measured rather than defaulting to instantaneous 0.0.
     """
     try:
         procs = []
-        for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
-            try:
-                info = p.info
-                if info.get('name'):
-                    procs.append({
-                        "pid": info['pid'],
-                        "name": info['name'],
-                        "cpu": round(info.get('cpu_percent') or 0.0, 1),
-                        "memory": round(info.get('memory_percent') or 0.0, 1)
-                    })
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+        is_cpu = str(sort_by).lower() == "cpu"
 
-        if sort_by.lower() == "cpu":
+        if is_cpu:
+            # Pass 1: Prime CPU counters for all currently running processes
+            candidates = []
+            for p in psutil.process_iter(['pid', 'name']):
+                try:
+                    p.cpu_percent(None)
+                    candidates.append(p)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
+            # Sampling interval to compute real CPU delta
+            time.sleep(0.15)
+
+            # Pass 2: Measure delta CPU percentage
+            for p in candidates:
+                try:
+                    pname = p.name()
+                    if not pname or pname in ("System Idle Process", "System Idle", "Idle"):
+                        continue
+                    cpu = p.cpu_percent(None)
+                    try:
+                        mem = p.memory_percent()
+                    except Exception:
+                        mem = 0.0
+                    procs.append({
+                        "pid": p.pid,
+                        "name": pname,
+                        "cpu": round(cpu, 1),
+                        "memory": round(mem or 0.0, 1)
+                    })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
             procs.sort(key=lambda x: x["cpu"], reverse=True)
             top_list = procs[:n]
-            summary = ", ".join([f"{p['name']} ({p['cpu']}% CPU)" for p in top_list])
-            speech_text = f"Top {len(top_list)} processes by CPU: {summary}."
+
+            if not top_list:
+                speech_text = "No active processes could be measured."
+            elif n == 1 or len(top_list) == 1:
+                speech_text = f"The application using the most CPU is {top_list[0]['name']} with {top_list[0]['cpu']}% CPU usage."
+            else:
+                summary = ", ".join([f"{p['name']} ({p['cpu']}% CPU)" for p in top_list])
+                speech_text = f"Top {len(top_list)} processes by CPU: {summary}."
+
         else:
+            for p in psutil.process_iter(['pid', 'name', 'memory_percent']):
+                try:
+                    info = p.info
+                    pname = info.get('name')
+                    if not pname or pname in ("System Idle Process", "System Idle", "Idle"):
+                        continue
+                    procs.append({
+                        "pid": info['pid'],
+                        "name": pname,
+                        "cpu": 0.0,
+                        "memory": round(info.get('memory_percent') or 0.0, 1)
+                    })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
             procs.sort(key=lambda x: x["memory"], reverse=True)
             top_list = procs[:n]
-            summary = ", ".join([f"{p['name']} ({p['memory']}% RAM)" for p in top_list])
-            speech_text = f"Top {len(top_list)} processes by memory: {summary}."
+
+            if not top_list:
+                speech_text = "No active processes could be measured."
+            elif n == 1 or len(top_list) == 1:
+                speech_text = f"The application using the most memory is {top_list[0]['name']} with {top_list[0]['memory']}% RAM."
+            else:
+                summary = ", ".join([f"{p['name']} ({p['memory']}% RAM)" for p in top_list])
+                speech_text = f"Top {len(top_list)} processes by memory: {summary}."
 
         return {
             "success": True,
@@ -540,10 +592,44 @@ PROTECTED_PROCESSES = {
 }
 
 
-def terminate_process(pid: Optional[int] = None, name: Optional[str] = None, process_name: Optional[str] = None) -> Dict[str, Any]:
+def _send_wm_close(target_pid: int) -> bool:
+    """Attempt graceful window close via Win32 WM_CLOSE message."""
+    try:
+        import win32gui
+        import win32con
+        import win32process
+
+        hwnds = []
+        def enum_cb(hwnd, extra):
+            if win32gui.IsWindowVisible(hwnd):
+                _, win_pid = win32process.GetWindowThreadProcessId(hwnd)
+                if win_pid == target_pid:
+                    hwnds.append(hwnd)
+            return True
+
+        win32gui.EnumWindows(enum_cb, None)
+        sent = False
+        for hwnd in hwnds:
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            sent = True
+        return sent
+    except Exception:
+        return False
+
+
+def terminate_process(
+    pid: Optional[int] = None,
+    name: Optional[str] = None,
+    process_name: Optional[str] = None,
+    graceful: bool = True,
+    force: bool = False,
+    timeout: float = 2.0
+) -> Dict[str, Any]:
     """
     Safely terminate a user application process by PID or process name.
     Strictly forbids terminating critical Windows OS processes or the assistant itself.
+    First attempts graceful closure (WM_CLOSE) to allow saving work, then escalates if needed.
+    Verifies actual process termination before reporting success.
     """
     try:
         name = name or process_name
@@ -561,12 +647,52 @@ def terminate_process(pid: Optional[int] = None, name: Optional[str] = None, pro
                         "status": "protected",
                         "message": f"Refused: '{proc.name()}' is a protected system process and cannot be terminated."
                     }
+
+                # Step 1: Graceful closure attempt
+                if graceful:
+                    _send_wm_close(pid)
+                    try:
+                        proc.wait(timeout=timeout)
+                        return {
+                            "success": True,
+                            "status": "success",
+                            "verification_status": "verified",
+                            "message": f"Process '{proc.name()}' (PID {pid}) closed gracefully."
+                        }
+                    except psutil.TimeoutExpired:
+                        pass
+
+                # Step 2: Termination escalation
                 proc.terminate()
-                return {"success": True, "status": "success", "message": f"Process '{proc.name()}' (PID {pid}) terminated successfully."}
+                try:
+                    proc.wait(timeout=1.5)
+                except psutil.TimeoutExpired:
+                    if force:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=1.0)
+                        except psutil.TimeoutExpired:
+                            pass
+
+                # Step 3: Verification
+                if psutil.pid_exists(pid):
+                    return {
+                        "success": False,
+                        "status": "failed_to_exit",
+                        "verification_status": "failed",
+                        "message": f"Process '{p_name}' (PID {pid}) did not exit after termination request."
+                    }
+
+                return {
+                    "success": True,
+                    "status": "success",
+                    "verification_status": "verified",
+                    "message": f"Process '{p_name}' (PID {pid}) terminated and verified closed."
+                }
             except psutil.NoSuchProcess:
-                return {"success": False, "status": "error", "message": f"Process with PID {pid} was not found."}
+                return {"success": False, "status": "error", "verification_status": "not_found", "message": f"Process with PID {pid} was not found."}
             except psutil.AccessDenied:
-                return {"success": False, "status": "error", "message": f"Permission denied terminating PID {pid}. Administrator rights required."}
+                return {"success": False, "status": "error", "verification_status": "access_denied", "message": f"Permission denied terminating PID {pid}. Administrator elevation required."}
 
         elif name:
             target_name = name.lower()
@@ -582,27 +708,72 @@ def terminate_process(pid: Optional[int] = None, name: Optional[str] = None, pro
                     "message": f"Refused: '{name}' is a protected system process and cannot be terminated."
                 }
 
-            terminated = []
+            matched_procs = []
             for p in psutil.process_iter(['pid', 'name']):
                 try:
                     p_name = (p.info['name'] or "").lower()
                     if p_name in (target_name, target_name_exe):
                         if p.info['pid'] == current_pid:
                             continue
-                        p.terminate()
-                        terminated.append(p.info['pid'])
+                        matched_procs.append(p)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
 
-            if terminated:
+            if not matched_procs:
+                return {"success": False, "status": "error", "verification_status": "not_found", "message": f"No running processes matched '{name}'."}
+
+            terminated = []
+            failed_pids = []
+            for p in matched_procs:
+                p_pid = p.info['pid']
+                try:
+                    if graceful:
+                        _send_wm_close(p_pid)
+                    p.terminate()
+                except Exception:
+                    pass
+
+            # Give a brief moment for all matched processes to exit
+            time.sleep(1.0)
+
+            for p in matched_procs:
+                p_pid = p.info['pid']
+                if psutil.pid_exists(p_pid):
+                    try:
+                        p.kill()
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+                if not psutil.pid_exists(p_pid):
+                    terminated.append(p_pid)
+                else:
+                    failed_pids.append(p_pid)
+
+            if terminated and not failed_pids:
                 return {
                     "success": True, 
                     "status": "success",
+                    "verification_status": "verified",
                     "terminated_pids": terminated,
                     "message": f"Terminated {len(terminated)} instance(s) of '{name}' (PIDs: {terminated})."
                 }
+            elif terminated and failed_pids:
+                return {
+                    "success": False,
+                    "status": "partial_success",
+                    "verification_status": "partial",
+                    "terminated_pids": terminated,
+                    "failed_pids": failed_pids,
+                    "message": f"Partially terminated '{name}': closed PIDs {terminated}, but PIDs {failed_pids} could not be terminated."
+                }
             else:
-                return {"success": False, "status": "error", "message": f"No running processes matched '{name}'."}
+                return {
+                    "success": False,
+                    "status": "error",
+                    "verification_status": "failed",
+                    "failed_pids": failed_pids,
+                    "message": f"Failed to terminate instances of '{name}' (PIDs: {failed_pids})."
+                }
 
         return {"success": False, "status": "error", "message": "Either process PID or name must be specified."}
 
@@ -844,6 +1015,13 @@ def get_volume() -> Dict[str, Any]:
 def set_volume(level: int) -> Dict[str, Any]:
     """Set master audio volume percentage (0-100) and verify the actual resulting volume."""
     target = max(0, min(100, int(level)))
+    try:
+        from modules.music.music_controller import get_controller
+        mc = get_controller()
+        if mc and mc.is_active():
+            mc.set_volume(target)
+    except Exception:
+        pass
     cur_res = get_volume()
     if cur_res.get("success") and cur_res.get("level") is not None:
         curr_lvl = cur_res["level"]
@@ -897,11 +1075,23 @@ def volume_up(steps: int = 10) -> Dict[str, Any]:
     """Increase system volume by the specified percentage (default 10%) and verify."""
     cur_res = get_volume()
     if cur_res.get("success") and cur_res.get("level") is not None:
-        target = min(100, cur_res["level"] + steps)
+        start_lvl = cur_res["level"]
+        target = min(100, start_lvl + steps)
         res = set_volume(target)
         if res.get("success"):
-            res["message"] = f"Volume increased to {res.get('level')}%."
-        return res
+            actual_lvl = res.get("level", target)
+            res["start_level"] = start_lvl
+            res["message"] = f"Volume increased from {start_lvl}% to {actual_lvl}%."
+            return res
+        else:
+            return {
+                "success": False,
+                "status": "error",
+                "start_level": start_lvl,
+                "level": res.get("level"),
+                "target": target,
+                "message": f"Volume change could not be verified; requested increase to {target}%, but system reports {res.get('level')}%."
+            }
 
     # Fallback to key events if COM endpoint is not available
     try:
@@ -910,6 +1100,9 @@ def volume_up(steps: int = 10) -> Dict[str, Any]:
         for _ in range(presses):
             user32.keybd_event(VK_VOLUME_UP, 0, 0, 0)
             user32.keybd_event(VK_VOLUME_UP, 0, KEYEVENTF_KEYUP, 0)
+        verify_res = get_volume()
+        if verify_res.get("success") and verify_res.get("level") is not None:
+            return {"success": True, "level": verify_res["level"], "message": f"Volume increased to {verify_res['level']}%."}
         return {"success": True, "message": "Volume increased."}
     except Exception as e:
         return {"success": False, "message": f"I couldn't change the volume: {e}"}
@@ -919,11 +1112,23 @@ def volume_down(steps: int = 10) -> Dict[str, Any]:
     """Decrease system volume by the specified percentage (default 10%) and verify."""
     cur_res = get_volume()
     if cur_res.get("success") and cur_res.get("level") is not None:
-        target = max(0, cur_res["level"] - steps)
+        start_lvl = cur_res["level"]
+        target = max(0, start_lvl - steps)
         res = set_volume(target)
         if res.get("success"):
-            res["message"] = f"Volume decreased to {res.get('level')}%."
-        return res
+            actual_lvl = res.get("level", target)
+            res["start_level"] = start_lvl
+            res["message"] = f"Volume decreased from {start_lvl}% to {actual_lvl}%."
+            return res
+        else:
+            return {
+                "success": False,
+                "status": "error",
+                "start_level": start_lvl,
+                "level": res.get("level"),
+                "target": target,
+                "message": f"Volume change could not be verified; requested decrease to {target}%, but system reports {res.get('level')}%."
+            }
 
     # Fallback to key events if COM endpoint is not available
     try:
@@ -932,6 +1137,9 @@ def volume_down(steps: int = 10) -> Dict[str, Any]:
         for _ in range(presses):
             user32.keybd_event(VK_VOLUME_DOWN, 0, 0, 0)
             user32.keybd_event(VK_VOLUME_DOWN, 0, KEYEVENTF_KEYUP, 0)
+        verify_res = get_volume()
+        if verify_res.get("success") and verify_res.get("level") is not None:
+            return {"success": True, "level": verify_res["level"], "message": f"Volume decreased to {verify_res['level']}%."}
         return {"success": True, "message": "Volume decreased."}
     except Exception as e:
         return {"success": False, "message": f"I couldn't change the volume: {e}"}
@@ -1738,9 +1946,10 @@ def set_display_resolution(width: int, height: int) -> Dict[str, Any]:
         return {"success": False, "status": "error", "message": f"Could not set resolution: {e}"}
 
 
-def initiate_system_power(action: str, delay_seconds: int = 0) -> Dict[str, Any]:
+def initiate_system_power(action: str, delay_seconds: int = 0, confirmed_by_user: bool = False) -> Dict[str, Any]:
     """
     Perform safe power management action: lock, sleep, hibernate, shutdown, restart, abort.
+    Properly propagates user confirmation to the OS gateway.
     """
     act = action.lower().strip()
 
@@ -1776,7 +1985,7 @@ def initiate_system_power(action: str, delay_seconds: int = 0) -> Dict[str, Any]
             original_goal=f"{act} system",
             parameters={"delay_seconds": delay_seconds}
         )
-        res = get_os_gateway().execute(op, user_id=1, confirmed_by_user=False)
+        res = get_os_gateway().execute(op, user_id=1, confirmed_by_user=confirmed_by_user)
         return {
             "success": res.success,
             "status": res.status,
@@ -1787,6 +1996,146 @@ def initiate_system_power(action: str, delay_seconds: int = 0) -> Dict[str, Any]
     except Exception as e:
         logger.error(f"[SYSTEM] Power action failed: {e}")
         return {"success": False, "status": "error", "message": f"System power action failed: {e}"}
+
+
+def list_installed_software(query: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Query installed applications via Windows Registry (HKLM & HKCU, 32-bit & 64-bit).
+    """
+    try:
+        from core.universal_computer_access import get_universal_computer_access
+        uca = get_universal_computer_access()
+        raw_apps = uca.enumerate_installed_applications()
+        apps = []
+        for app in raw_apps:
+            name = app.get("name") or app.get("display_name")
+            if not name:
+                continue
+            if query and query.lower() not in name.lower():
+                continue
+            apps.append({
+                "name": name,
+                "version": app.get("version") or app.get("display_version", "Unknown"),
+                "publisher": app.get("publisher", "Unknown"),
+                "install_location": app.get("install_location", ""),
+            })
+        return {
+            "success": True,
+            "status": "success",
+            "count": len(apps),
+            "software": apps[:100],
+            "message": f"Found {len(apps)} installed application(s)."
+        }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to list installed software: {e}")
+        return {"success": False, "status": "error", "message": f"Failed to list software: {e}"}
+
+
+def install_software_package(package_name: str, source: str = "winget", confirmed_by_user: bool = False) -> Dict[str, Any]:
+    """
+    Install a software package using legitimate Windows winget package manager.
+    Strictly requires user confirmation as software installation is high-risk.
+    """
+    if not confirmed_by_user:
+        return {
+            "success": False,
+            "status": "requires_confirmation",
+            "requires_confirmation": True,
+            "package_name": package_name,
+            "source": source,
+            "message": f"Installing software '{package_name}' modifies system state and requires explicit confirmation."
+        }
+    
+    clean_name = package_name.strip()
+    if not clean_name or any(c in clean_name for c in [";", "&", "|", "`", "$", ">", "<"]):
+        return {"success": False, "status": "invalid_parameter", "message": f"Invalid package name '{package_name}'."}
+
+    try:
+        import subprocess
+        # Check if winget is available
+        check = subprocess.run(["winget", "--version"], capture_output=True, text=True, timeout=5)
+        if check.returncode != 0:
+            return {"success": False, "status": "unsupported", "message": "Windows Package Manager (winget) is not available on this system."}
+
+        # Run installation with winget
+        cmd = ["winget", "install", "--name", clean_name, "--accept-package-agreements", "--accept-source-agreements", "--silent"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        # Verify installation by querying registry
+        verify_res = list_installed_software(query=clean_name)
+        is_installed = verify_res.get("count", 0) > 0
+        
+        if is_installed or proc.returncode == 0:
+            return {
+                "success": True,
+                "status": "success",
+                "verification_status": "verified" if is_installed else "unverified_zero_exit",
+                "package_name": clean_name,
+                "exit_code": proc.returncode,
+                "message": f"Software '{clean_name}' successfully installed."
+            }
+        else:
+            return {
+                "success": False,
+                "status": "installation_failed",
+                "verification_status": "failed",
+                "package_name": clean_name,
+                "exit_code": proc.returncode,
+                "error_details": proc.stderr or proc.stdout,
+                "message": f"Failed to install '{clean_name}': {proc.stderr or proc.stdout}"
+            }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Installation exception: {e}")
+        return {"success": False, "status": "error", "message": f"Installation error: {e}"}
+
+
+def uninstall_software_package(package_name: str, confirmed_by_user: bool = False) -> Dict[str, Any]:
+    """
+    Uninstall a software package safely using winget or registered uninstaller.
+    Strictly requires user confirmation.
+    """
+    if not confirmed_by_user:
+        return {
+            "success": False,
+            "status": "requires_confirmation",
+            "requires_confirmation": True,
+            "package_name": package_name,
+            "message": f"Uninstalling software '{package_name}' is a destructive operation and requires explicit confirmation."
+        }
+
+    clean_name = package_name.strip()
+    if not clean_name or any(c in clean_name for c in [";", "&", "|", "`", "$", ">", "<"]):
+        return {"success": False, "status": "invalid_parameter", "message": f"Invalid package name '{package_name}'."}
+
+    try:
+        import subprocess
+        cmd = ["winget", "uninstall", "--name", clean_name, "--silent"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+        # Verify removal
+        verify_res = list_installed_software(query=clean_name)
+        still_present = verify_res.get("count", 0) > 0
+
+        if not still_present or proc.returncode == 0:
+            return {
+                "success": True,
+                "status": "success",
+                "verification_status": "verified",
+                "package_name": clean_name,
+                "message": f"Software '{clean_name}' successfully uninstalled."
+            }
+        else:
+            return {
+                "success": False,
+                "status": "uninstall_failed",
+                "verification_status": "failed",
+                "package_name": clean_name,
+                "error_details": proc.stderr or proc.stdout,
+                "message": f"Failed to uninstall '{clean_name}': {proc.stderr or proc.stdout}"
+            }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Uninstallation exception: {e}")
+        return {"success": False, "status": "error", "message": f"Uninstallation error: {e}"}
 
 
 def get_gpu_telemetry(detailed: bool = False) -> Dict[str, Any]:

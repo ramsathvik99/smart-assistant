@@ -2791,7 +2791,7 @@ class LoginWindow(QWidget):
         try:
             from modules.ui.dashboard.service_adapters import get_api_setup_status
             res = get_api_setup_status(user_id)
-            has_setup = bool(res.get("completed", False))
+            has_setup = bool(res.get("completed", False)) if isinstance(res, dict) else bool(res)
         except Exception:
             has_setup = True
 
@@ -2890,6 +2890,13 @@ class LoginWindow(QWidget):
 
         # 5. Mark setup completed
         mgr.set_completed_api_setup(user_id, True)
+
+        # 5b. Initialize default capability consents in PostgreSQL
+        try:
+            from core.capability_consent_manager import get_capability_consent_manager
+            get_capability_consent_manager().grant_all_default_consents(user_id)
+        except Exception as e:
+            print(f"[SIGNUP COMMIT] Capability consent initialization notice: {e}")
 
         # 6. Discard temporary signup session safely
         self._signup_session.clear()

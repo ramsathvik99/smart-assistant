@@ -275,10 +275,19 @@ CREATE TABLE IF NOT EXISTS memory_facts (
     fact_value TEXT NOT NULL,
     confidence FLOAT DEFAULT 0.0,
     source VARCHAR(50) DEFAULT 'conversation',
+    category VARCHAR(50) DEFAULT 'general',
+    status VARCHAR(20) DEFAULT 'confirmed',
+    source_ref TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    last_accessed TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    last_accessed TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    last_confirmed TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    expiration_date TIMESTAMP WITH TIME ZONE,
+    superseded_by INTEGER REFERENCES memory_facts(id) ON DELETE SET NULL
 );
 
 -- Create indexes for semantic memory
 CREATE INDEX IF NOT EXISTS idx_memory_facts_user_key ON memory_facts (user_id, fact_key);
 CREATE INDEX IF NOT EXISTS idx_memory_facts_source ON memory_facts (source);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_user_cat ON memory_facts (user_id, category);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_user_status ON memory_facts (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_expiration ON memory_facts (expiration_date);

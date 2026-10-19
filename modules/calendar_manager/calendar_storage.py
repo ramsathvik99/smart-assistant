@@ -70,6 +70,9 @@ class CalendarStorage:
         if not raw_time:
             return None
         cleaned = str(raw_time).strip().upper()
+        cleaned = re.sub(r'P\.?M\.?', 'PM', cleaned)
+        cleaned = re.sub(r'A\.?M\.?', 'AM', cleaned)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
         formats = [
             "%H:%M", "%H:%M:%S",
             "%I:%M %p", "%I %p",
@@ -80,6 +83,15 @@ class CalendarStorage:
                 return datetime.strptime(cleaned, fmt).time()
             except ValueError:
                 continue
+        # Also handle bare integer hour e.g. "3" or "15"
+        try:
+            val = int(cleaned)
+            if 0 <= val <= 23:
+                if 1 <= val <= 6:
+                    val += 12
+                return time(val, 0)
+        except ValueError:
+            pass
         return None
 
     def add_event(self, user_id: int, event: Dict) -> str:
@@ -102,13 +114,18 @@ class CalendarStorage:
             raw_time = event.get('time')
             t_obj = self._parse_time(raw_time)
 
-            is_all_day = event.get('is_all_day', t_obj is None)
+            is_all_day_spec = event.get('is_all_day')
+            if is_all_day_spec is not None:
+                is_all_day = bool(is_all_day_spec)
+            else:
+                is_all_day = (t_obj is None)
             
-            if t_obj and not is_all_day:
+            if t_obj is not None and not is_all_day:
                 start_dt = datetime.combine(date_obj, t_obj)
             else:
                 start_dt = datetime.combine(date_obj, time(0, 0))
-                is_all_day = True
+                if t_obj is None:
+                    is_all_day = True
 
             # 2. Compute end datetime
             duration_minutes = event.get('duration_minutes')
@@ -122,10 +139,10 @@ class CalendarStorage:
             elif raw_end_time:
                 end_t = self._parse_time(raw_end_time) or time(23, 59)
                 end_dt = datetime.combine(date_obj, end_t)
-            elif duration_minutes:
-                end_dt = start_dt + timedelta(minutes=int(duration_minutes))
             elif is_all_day:
                 end_dt = datetime.combine(date_obj, time(23, 59, 59))
+            elif duration_minutes:
+                end_dt = start_dt + timedelta(minutes=int(duration_minutes))
             else:
                 # Default duration: 60 minutes for timed events
                 end_dt = start_dt + timedelta(minutes=60)
@@ -281,6 +298,7 @@ class CalendarStorage:
                     'location': row['location'],
                     'category': row['category'] or 'General',
                     'metadata': row['metadata'] or {},
+                    'attendees': (row['metadata'] or {}).get('attendees', []) if isinstance(row['metadata'], dict) else [],
                     'is_recurring': False,
                     'start_datetime': row['start_datetime'],
                     'end_datetime': end_dt_val
@@ -789,6 +807,49 @@ class CalendarStorage:
             'end_datetime': best['end_datetime']
         }
 
+    def get_event_by_id(self, user_id: int, event_id: str) -> Optional[Dict]:
+        """Get an event by its unique ID for the authenticated user."""
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            user_id = 0
+
+        real_id = str(event_id).split("_")[0]
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        try:
+            cur.execute("""
+                SELECT id, user_id, title, description, start_datetime, end_datetime,
+                       is_all_day, event_type, location, category, metadata
+                FROM calendar_events
+                WHERE id = %s AND user_id = %s
+                LIMIT 1
+            """, (real_id, user_id))
+            row = cur.fetchone()
+            if not row:
+                return None
+            s_dt = row['start_datetime']
+            e_dt = row['end_datetime']
+            dur = int((e_dt - s_dt).total_seconds() // 60) if (e_dt and s_dt) else 60
+            return {
+                'id': row['id'],
+                'user_id': row['user_id'],
+                'title': row['title'],
+                'description': row['description'],
+                'date': s_dt.strftime("%Y-%m-%d"),
+                'time': s_dt.strftime("%H:%M:%S") if not row['is_all_day'] else None,
+                'start_datetime': s_dt,
+                'end_datetime': e_dt,
+                'duration_minutes': dur,
+                'is_all_day': row['is_all_day'],
+                'location': row['location'],
+                'category': row['category'],
+                'metadata': row['metadata']
+            }
+        finally:
+            cur.close()
+            conn.close()
+
     def find_events_by_title(self, user_id: int, title_keyword: str, event_date: Optional[str] = None) -> List[Dict]:
         """Find events matching a title keyword, optionally filtered by date."""
         try:
@@ -1126,6 +1187,7 @@ class CalendarStorage:
                 'location': row['location'],
                 'category': row['category'],
                 'metadata': meta,
+                'attendees': meta.get('attendees', []) if isinstance(meta, dict) else [],
                 'notes': meta.get('notes', ''),
                 'agenda': meta.get('agenda', []),
                 'checklist': meta.get('checklist', []),

@@ -148,6 +148,7 @@ def is_capability_query(text: str) -> bool:
         r'^(?:what\s+can\s+you\s+do|what\s+are\s+your\s+capabilities|what\s+can\s+you\s+help\s+(?:me\s+)?with)$',
         r'^(?:tell\s+me\s+what\s+you\s+can\s+do|list\s+(?:your\s+)?capabilities|what\s+are\s+you\s+capable\s+of)$',
         r'^(?:what\s+can\s+you\s+do\s+for\s+me|show\s+(?:me\s+)?what\s+you\s+can\s+do)$',
+        r'^(?:show\s+(?:me\s+)?(?:the\s+)?full\s+list\s+of\s+capabilities|full\s+list\s+of\s+capabilities|list\s+all\s+capabilities)$',
     ]
     for pat in cap_patterns:
         if re.search(pat, t):
@@ -242,7 +243,7 @@ def validate_device_action_agreement(
     # 2. Target vs Action domain cross-contamination check
     domain_map = {
         "bluetooth": {"BLUETOOTH_ON", "BLUETOOTH_OFF", "BLUETOOTH_QUERY"},
-        "volume": {"VOLUME_SET", "VOLUME_MUTE", "VOLUME_UNMUTE", "VOLUME_QUERY"},
+        "volume": {"VOLUME_SET", "VOLUME_DECREASE", "VOLUME_INCREASE", "VOLUME_MUTE", "VOLUME_UNMUTE", "VOLUME_QUERY"},
         "wifi": {"WIFI_ON", "WIFI_OFF", "WIFI_QUERY"},
         "lock": {"LOCK"},
         "unlock": {"UNLOCK"},
@@ -262,7 +263,10 @@ def validate_device_action_agreement(
         "BLUETOOTH_ON": {"enable_bluetooth"},
         "BLUETOOTH_OFF": {"disable_bluetooth"},
         "BLUETOOTH_QUERY": {"bluetooth_status"},
-        "VOLUME_SET": {"set_volume"},
+        "VOLUME_SET": {"set_volume", "decrease_volume", "increase_volume", "volume_up", "volume_down"},
+        "VOLUME_DECREASE": {"decrease_volume", "volume_down"},
+        "VOLUME_INCREASE": {"increase_volume", "volume_up"},
+        "VOLUME_QUERY": {"get_volume"},
         "VOLUME_MUTE": {"mute"},
         "VOLUME_UNMUTE": {"unmute"},
         "WIFI_ON": {"enable_wifi"},
@@ -338,16 +342,30 @@ class UnifiedCommandRouter:
             # ── Priority 3: DEVICE CONTROL ────────────────────────────────────
             # Exclude 'open ... volume' constructs so OPEN_APPLICATION wins.
             Intent.DEVICE_CONTROL: [
+                # Software management (install / uninstall / package)
+                re.compile(r'\b(?:install\s+software|install\s+app|install\s+package|install)\s+([a-zA-Z0-9_\-\.]+)\b', re.IGNORECASE),
+                re.compile(r'\b(?:uninstall\s+software|uninstall\s+app|remove\s+software|remove\s+app|uninstall)\s+([a-zA-Z0-9_\-\.]+)\b', re.IGNORECASE),
+                # Windows Service control
+                re.compile(r'\b(?:start|stop|restart|status\s+of)\s+service\s+([a-zA-Z0-9_\-\.]+)\b', re.IGNORECASE),
+                re.compile(r'\bservice\s+([a-zA-Z0-9_\-\.]+)\s+(?:start|stop|restart)\b', re.IGNORECASE),
+                # Administrator Elevation Testing / Request
+                re.compile(r'\b(?:test|request|check|trigger|verify|prompt)\s+(?:for\s+)?(?:admin(?:istrator)?\s+)?(?:uac\s+)?elevation\b', re.IGNORECASE),
+                re.compile(r'\b(?:test|request)\s+(?:admin(?:istrator)?|uac)\s+permissions?\b', re.IGNORECASE),
+                re.compile(r'\b(?:elevate|request)\s+(?:to\s+)?(?:admin(?:istrator)?|administrator\s+privileges?|admin\s+privileges?)\b', re.IGNORECASE),
                 # Text typing / writing
-                re.compile(r'\b(?:type|write)\s+(?!(?:to\b|(?:an?\s+)?(?:note|code|python|javascript|js|typescript|ts|java|c\+\+|cpp|c#|csharp|golang|go|rust|php|ruby|swift|kotlin|dart|r|matlab|sql|html|css|json|yaml|xml|markdown|bash|powershell|shell|script|function|algorithm|class|program|query|interface|struct|module|project|api|scraper|backend|frontend|webpage|website|app|application|report|document|email|mail|record|reminder|binary\s+search|bubble\s+sort|merge\s+sort|quick\s+sort|prime\s+check)(?!\w)))(.+)', re.IGNORECASE),
+                re.compile(r'\b(?:type|write)[:\s]+\s*(?!(?:to\b|(?:an?\s+)?(?:note|code|python|javascript|js|typescript|ts|java|c\+\+|cpp|c#|csharp|golang|go|rust|php|ruby|swift|kotlin|dart|r|matlab|sql|html|css|json|yaml|xml|markdown|bash|powershell|shell|script|function|algorithm|class|program|query|interface|struct|module|project|api|scraper|backend|frontend|webpage|website|app|application|report|document|email|mail|record|reminder|binary\s+search|bubble\s+sort|merge\s+sort|quick\s+sort|prime\s+check)(?!\w)))(.+)', re.IGNORECASE),
                 re.compile(r'\bput\s+(?!(?:an?\s+)?(?:file|folder|document)\b)(.+?)\s+(?:in|into|inside|there)(?:\s+it)?[.!?]?$', re.IGNORECASE),
                 re.compile(r'\b(mute|unmute)\b', re.IGNORECASE),
                 # volume only when NOT preceded by 'open'/'launch'/'start'
-                re.compile(r'(?<!open\s)(?<!launch\s)(?<!start\s)\b(increase|decrease|raise|lower|set|change)\s+(?:the\s+)?volume\b', re.IGNORECASE),
+                re.compile(r'(?<![Oo]pen\s)(?<![Ll]aunch\s)(?<![Ss]tart\s)\b(increase|decrease|raise|lower|set|change)\s+(?:the\s+)?(?:system\s+)?volume\b', re.IGNORECASE),
                 re.compile(r'\b(?:set|change)\s+(?:the\s+)?volume\s+(?:to\s+)?(\d+)\s*%?\b', re.IGNORECASE),
+                # Volume by N percentage points (e.g. "decrease volume by 12 percentage points")
+                re.compile(r'\b(increase|decrease|raise|lower)\s+(?:the\s+)?(?:system\s+|master\s+)?volume\s+(?:by\s+)?(\d+)\s+percentage\s+points?\b', re.IGNORECASE),
+                # Ambiguous transcription "[name] is the volume" → ask clarification
+                re.compile(r'\b(?:friday|trevon|nova|jarvis|assistant)\s+(?:is|boost|up|down)\s+(?:the\s+)?volume\b', re.IGNORECASE),
                 re.compile(r'\b(volume\s+(?:up|down|control|level))\b', re.IGNORECASE),
                 re.compile(r'\b(turn\s+(?:up|down)\s+(?:the\s+)?volume)\b', re.IGNORECASE),
-                re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?(?:current\s+)?volume|check\s+volume)\b', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\x27s|\s+is)\s+(?:my\s+|the\s+)?(?:current\s+)?volum?e?|check\s+(?:my\s+|the\s+)?(?:current\s+)?volum?e?|get\s+(?:my\s+|the\s+)?(?:current\s+)?volum?e?|(?:current\s+)?volum?e?\s+(?:level|status))\b', re.IGNORECASE),
                 re.compile(r'\b(?:close|shut)\s+(?:this\s+|the\s+|current\s+|browser\s+)?tab(?:s)?\b', re.IGNORECASE),
                 re.compile(r'\b(take\s+(?:a\s+)?screenshot|capture\s+(?:the\s+)?screen|screen\s*capture|screenshot)\b', re.IGNORECASE),
                 re.compile(r'\b(lock|logout)\s*(?:the\s+)?(?:computer|pc|system|workstation|screen)?\b', re.IGNORECASE),
@@ -360,33 +378,53 @@ class UnifiedCommandRouter:
                 # Battery diagnostics
                 re.compile(r'\b(?:battery|battery\s+(?:status|level|percentage|life|info(?:rmation)?|health)|how\s+much\s+battery|charging\s+status|is\s+(?:the\s+)?battery\s+charging)\b', re.IGNORECASE),
                 re.compile(r'\b(?:tell\s+me\s+(?:my\s+)?)?battery\s+(?:status|percentage|level|life|info(?:rmation)?|health)\b', re.IGNORECASE),
+                # System Uptime / Computer running time
+                re.compile(r'\b(?:how\s+long\s+(?:has|is)\s+(?:my|the|this)?\s*(?:pc|comput[er]{1,2}|system|mach[in]{1,3}e?|device|laptop|workstation)\s+(?:been\s+|being\s+)?(?:run[in]{1,3}g|on|up)|(?:what(?:\x27s|\s+is)\s+(?:my|the)?\s*(?:system\s+)?uptime|(?:system\s+)?uptime|check\s+(?:my|the)?\s*uptime|how\s+long\s+(?:has\s+it|have\s+you|is\s+it)\s+(?:been\s+|being\s+)?(?:run[in]{1,3}g|on|up)))\b', re.IGNORECASE),
+                # Voice listening controls
+                re.compile(r'\b(?:toggle|start|stop|pause|resume)\s+(?:voice\s+)?listening\b', re.IGNORECASE),
                 # Disk / Storage diagnostics
-                re.compile(r'\b(?:disk\s+space|free\s+space|free\s+storage|storage\s+space|how\s+much\s+(?:free\s+)?(?:storage|disk\s+space|space)|check\s+disk|disk\s+usage|storage\s+usage|drive\s+information|disk\s+details|disk\s+info(?:rmation)?|available\s+(?:disk|storage))\b', re.IGNORECASE),
+                re.compile(r'\b(?:how\s+much\s+(?:disk\s+space|storage|space)\s+is\s+(?:avai?la?ble|free|left)|(?:what\s+is\s+(?:the\s+)?(?:storage|disk\s+space|space)\s+(?:left|free|available))|(?:disk\s+space|free\s+space|free\s+storage|storage\s+space|storage\s+left|space\s+left|how\s+much\s+(?:free\s+)?(?:storage|disk\s+space|space)|check\s+disk|disk\s+usage|storage\s+usage|drive\s+information|disk\s+details|disk\s+info(?:rmation)?|avai?la?ble\s+(?:disk|storage)))\b', re.IGNORECASE),
+                re.compile(r'\b(?:storage|disk\s+space|space|free\s+space)\s+(?:left|remaining|available|free)\s+(?:in|on)\s+(?:the\s+)?[a-zA-Z]:?(?:\s+drive)?\b', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?storage\s+(?:left|free|available)\s+(?:in|on)\s+(?:the\s+)?[a-zA-Z]:?(?:\s+drive)?)\b', re.IGNORECASE),
                 re.compile(r'\b(?:tell\s+me\s+(?:my\s+)?)?disk\s+(?:usage|space|details|info(?:rmation)?)\b', re.IGNORECASE),
                 # CPU / Processor diagnostics
-                re.compile(r'\b(?:(?:tell\s+me\s+(?:about\s+)?(?:my\s+)?|give\s+me\s+(?:detailed\s+)?|show\s+(?:my\s+)?|check\s+(?:my\s+)?|what\s+is\s+(?:my\s+)?|what\s+)?(?:cpu|processor)\s+(?:usage|utilization|load|info(?:rmation)?|details?|metrics?|specs?|model))\b', re.IGNORECASE),
+                re.compile(r'\b(?:(?:tell\s+me\s+(?:about\s+)?(?:my\s+)?|give\s+me\s+(?:detailed\s+)?|show\s+(?:my\s+)?|check\s+(?:my\s+)?|what\s+is\s+(?:my\s+)?|what\s+)?(?:cpu|processor)\s+(?:usage|utilization|load|info(?:rmation)?|details?|metrics?|specs?|model|status|state))\b', re.IGNORECASE),
                 re.compile(r'\b(?:what\s+(?:cpu|processor)\s+am\s+i\s+running|tell\s+me\s+about\s+my\s+(?:cpu|processor)|what\s+processor\s+am\s+i\s+running)\b', re.IGNORECASE),
-                re.compile(r'\b(?:what\s+(?:cpu|processor)\s+(?:do\s+i\s+have|am\s+i\s+using|am\s+i\s+running|is\s+in\s+this\s+(?:pc|system|computer))|what(?:\'s|\s+is)\s+my\s+(?:cpu|processor)|which\s+(?:cpu|processor)\s+do\s+i\s+have)\b', re.IGNORECASE),
-                re.compile(r'\b(?:(?:can\s+i\s+)?check\s+(?:my\s+)?(?:cpu|processor)|how\s+much\s+(?:cpu|processor)\s+(?:am\s+i\s+using|is\s+used|is\s+being\s+used))\b', re.IGNORECASE),
+                re.compile(r'\b(?:what\s+(?:cpu|processor)\s+(?:do\s+i\s+have|am\s+i\s+using|am\s+i\s+running|is\s+in\s+this\s+(?:pc|system|computer|laptop)|is\s+this\s+(?:computer|pc|system|laptop)\s+using)|what(?:\'s|\s+is)\s+my\s+(?:cpu|processor)|which\s+(?:cpu|processor)\s+do\s+i\s+have)\b', re.IGNORECASE),
+                re.compile(r'\b(?:(?:can\s+i\s+)?check\s+(?:my\s+)?(?:cpu|proce?ss?or)|how\s+much\s+(?:cpu|proce?ss?or)\s+(?:am\s+i\s+using|is\s+(?:in\s+use|used|being\s+used))(?:\s+right\s+now)?|what(?:\x27s|\s+is)\s+(?:my\s+)?cpu\s+usage(?:\s+right\s+now)?|(?:current\s+)?cpu\s+(?:usage|utilization|metrics?)(?:\s+right\s+now)?)\b', re.IGNORECASE),
+                # "What is the CPU status?" / "current status of the CPU" variant
+                re.compile(r'\b(?:what\s+is\s+the\s+(?:current\s+)?(?:status|state)\s+of\s+the\s+(?:cpu|processor|ram|memory|gpu|graphics\s+card)|(?:cpu|processor|ram|memory|gpu|graphics\s+card)\s+(?:status|state)\b)', re.IGNORECASE),
+                # "Tell me my current CPU and RAM usage" — explicit combined telemetry
+                re.compile(r'\btell\s+me\s+(?:my\s+)?(?:current\s+)?(?:cpu|processor|ram|memory|gpu|disk|storage|battery|uptime|telemetry|hardware|system)\b', re.IGNORECASE),
                 # RAM / Memory diagnostics
-                re.compile(r'\b(?:(?:tell\s+me\s+(?:my\s+)?|give\s+me\s+(?:detailed\s+)?|show\s+(?:my\s+)?|check\s+(?:my\s+)?|what\s+is\s+(?:my\s+)?|what\s+)?(?:ram|memory)\s+(?:usage|utilization|info(?:rmation)?|details?|metrics?|specs?))\b', re.IGNORECASE),
-                re.compile(r'\b(?:how\s+much\s+(?:ram|memory)\s+(?:am\s+i\s+using|is\s+free|is\s+used|is\s+available|do\s+i\s+have|is\s+installed))\b', re.IGNORECASE),
+                re.compile(r'\b(?:(?:tell\s+me\s+(?:my\s+)?|give\s+me\s+(?:detailed\s+)?|show\s+(?:my\s+)?|check\s+(?:my\s+)?|what\s+is\s+(?:my\s+)?|what\s+)?(?:ram|memory)\s+(?:usage|utilization|info(?:rmation)?|details?|metrics?|specs?|status|state))\b', re.IGNORECASE),
+                re.compile(r'\b(?:how\s+much\s+(?:ram|memm?ory)\s+(?:am\s+i\s+using|is\s+(?:in\s+use|used|being\s+used|free|avai?la?ble)|do\s+i\s+have|is\s+installed)|(?:what(?:\x27s|\s+is)\s+my\s+(?:ram|memm?ory)\s+usage|(?:current\s+)?(?:ram|memm?ory)\s+usage(?:\s+right\s+now)?))\b', re.IGNORECASE),
                 re.compile(r'\b(?:what(?:\'s|\s+is)\s+my\s+(?:ram|memory)|how\s+much\s+ram\s+do\s+i\s+have)\b', re.IGNORECASE),
                 re.compile(r'\b(?:memory\s+usage\s+of\s+(?:the\s+)?(?:computer|pc|system|machine)|(?:available|used)\s+(?:ram|memory))\b', re.IGNORECASE),
                 re.compile(r'\b(?:(?:can\s+i\s+)?check\s+(?:my\s+)?(?:ram|memory))\b', re.IGNORECASE),
                 # GPU / Graphics diagnostics
-                re.compile(r'\b(?:(?:tell\s+me\s+(?:my\s+)?|give\s+me\s+(?:detailed\s+)?|show\s+(?:my\s+)?|check\s+(?:my\s+)?|what\s+is\s+(?:my\s+)?|what\s+)?(?:gpu|graphics\s+card|vram)\s*(?:usage|utilization|info(?:rmation)?|details?|metrics?|specs?|telemetry|stats?|temperature|temp|memory(?:\s+usage)?))\b', re.IGNORECASE),
+                re.compile(r'\b(?:(?:tell\s+me\s+(?:my\s+)?|give\s+me\s+(?:detailed\s+)?|show\s+(?:my\s+)?|check\s+(?:my\s+)?|what\s+is\s+(?:my\s+)?|what\x27s\s+(?:my\s+)?|what\s+)?(?:gpu|graphics\s+card|vram)\s*(?:usage|utilization|load|info(?:rmation)?|details?|metrics?|specs?|telemetry|stat(?:us|s)?|staus|stats|temperature|temp|memory(?:\s+usage)?))\b', re.IGNORECASE),
                 re.compile(r'\b(?:what\s+(?:gpu|graphics\s+card)\s+do\s+i\s+have|what\s+graphics\s+card\s+does\s+this\s+pc\s+have|graphics\s+card\s+info(?:rmation)?|tell\s+me\s+about\s+(?:my\s+)?(?:gpu|graphics\s+card))\b', re.IGNORECASE),
-                re.compile(r'\b(?:what\s+(?:gpu|graphics\s+card)\s+(?:am\s+i\s+using|is\s+in\s+this\s+(?:pc|system|computer))|what(?:\'s|\s+is)\s+my\s+(?:gpu|graphics\s+card))\b', re.IGNORECASE),
+                re.compile(r'\b(?:what\s+(?:gpu|graphics\s+card)\s+(?:am\s+i\s+using|is\s+in\s+this\s+(?:pc|system|computer)|is\s+this\s+(?:computer|pc|system|laptop)\s+(?:using|running)|does\s+this\s+(?:computer|pc|system|laptop)\s+have)|what(?:\'s|\s+is)\s+(?:my\s+|the\s+)?(?:gpu|graphics\s+card)|which\s+(?:gpu|graphics\s+card)\s+(?:do\s+i\s+have|does\s+this\s+(?:pc|computer|system)\s+have|is\s+(?:installed|running)))\b', re.IGNORECASE),
                 re.compile(r'\b(?:how\s+much\s+(?:gpu\s+memory|vram|gpu|graphics\s+card)\s+(?:am\s+i\s+using|is\s+(?:being\s+)?used))\b', re.IGNORECASE),
                 re.compile(r'\b(?:(?:can\s+i\s+)?check\s+(?:my\s+)?(?:gpu|graphics\s+card)|gpu\s+telemetry)\b', re.IGNORECASE),
+                # GPU identity — "What GPU is this computer currently using?" style
+                re.compile(r'\b(?:what|which)\s+(?:gpu|graphics\s+card|processor|cpu)\s+(?:is\s+)?(?:this|my|the)\s+(?:computer|pc|system|laptop|machine)\s+(?:currently\s+)?(?:using|running|has|have|equipped\s+with)\b', re.IGNORECASE),
                 # Composite telemetry
                 re.compile(r'\b(?:check\s+(?:my\s+)?cpu(?:\s*,\s*|\s+and\s+|\s+)ram(?:\s*,\s*|\s+and\s+|\s+)gpu(?:\s+usage|\s+telemetry)?)\b', re.IGNORECASE),
                 re.compile(r'\b(?:check\s+(?:my\s+)?(?:system|hardware)\s+(?:usage|telemetry|metrics?|stats?)|show\s+(?:my\s+)?system\s+usage)\b', re.IGNORECASE),
-                # Running processes & applications
+                # Running processes & top resource consuming applications
+                re.compile(r'\b(?:which|what)\s+(?:ap{1,2}l(?:ication)?|apps?|proce?ss|program)\s+(?:is\s+)?(?:using|taking|consuming)\s+(?:the\s+)?most\s+(?:of\s+the\s+)?(?:cpu|proce?ss?or|ram|memm?ory)\b', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\x27s|\s+is)\s+using|which\s+(?:ap{1,2}l(?:ication)?|apps?|proce?ss|program)\s+uses)\s+(?:the\s+)?most\s+(?:of\s+the\s+)?(?:cpu|proce?ss?or|ram|memm?ory)\b', re.IGNORECASE),
+                re.compile(r'\b(?:top|highest)\s+(?:cpu|ram|memm?ory)\s+(?:proce?ss(?:es)?|apps?|app(?:lication)?s?|programs?)\b', re.IGNORECASE),
+                re.compile(r'\b(?:proce?ss|app(?:lication)?|program)\s+with\s+(?:the\s+)?highest\s+(?:cpu|ram|memm?ory)(?:\s+usage)?\b', re.IGNORECASE),
                 re.compile(r'\b(?:top\s+processes|running\s+processes|running\s+applications|running\s+programs|currently\s+running\s+(?:programs|applications|processes|apps))\b', re.IGNORECASE),
                 re.compile(r'\b(?:what\s+(?:applications|processes|programs|apps)\s+are\s+(?:currently\s+)?(?:running|open)|what\s+programs\s+are\s+open\s+right\s+now)\b', re.IGNORECASE),
                 re.compile(r'\b(?:list\s+all\s+(?:running\s+)?processes|show\s+all\s+(?:running\s+)?processes|all\s+running\s+processes)\b', re.IGNORECASE),
+                # Active foreground application / window queries
+                re.compile(r'\b(?:which|what)\s+(?:application|app|window|program)\s+(?:am\s+i\s+(?:currently\s+)?using|is\s+(?:currently\s+)?active)(?:\s+right\s+now)?\b', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\x27s|\s+is)\s+(?:the\s+)?(?:current|active)\s+(?:app|application|window)(?:\s+i\s+am\s+using)?(?:\s+right\s+now)?)\b', re.IGNORECASE),
+                re.compile(r'\b(?:active|current)\s+(?:app|application|window)(?:\s+i(?:\x27m|\s+am)\s+using)?(?:\s+right\s+now)?\b', re.IGNORECASE),
                 # Window controls
                 re.compile(r'\b(?:minimize\s+all(?:\s+windows)?|minimize\s+windows|show\s+desktop)\b', re.IGNORECASE),
                 # Clipboard
@@ -430,7 +468,7 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:enable|disable|turn\s+on|turn\s+off)\s+(?:the\s+)?bluetooth\b', re.IGNORECASE),
                 re.compile(r'\b(?:is\s+bluetooth\s+(?:enabled|on|active|available)|is\s+bluetooth|check\s+bluetooth|bluetooth\s+connected)\b', re.IGNORECASE),
                 # Environment state
-                re.compile(r'\b(?:what\s+application\s+is\s+(?:currently\s+)?active|what\s+is\s+the\s+active\s+window|active\s+window|current\s+application|what\s+is\s+my\s+screen\s+resolution)\b', re.IGNORECASE),
+                re.compile(r'\b(?:what\s+application\s+is\s+(?:currently\s+)?active|what\s+is\s+the\s+active\s+window|active\s+window|current\s+application|what\s+is\s+(?:the\s+)?current\s+app(?:\s+i\s+am\s+using)?(?:\s+right\s+now)?|what\s+app\s+am\s+i\s+using(?:\s+right\s+now)?|which\s+app\s+am\s+i\s+using|active\s+app|what\s+is\s+my\s+screen\s+resolution)\b', re.IGNORECASE),
                 # Keyboard toggle keys
                 re.compile(r'\b(?:turn\s+(?:the\s+)?caps\s+lock\s+(?:on|off)|(?:toggle|turn\s+on|turn\s+off|enable|disable)\s+caps\s+lock|caps\s+lock\s+(?:on|off))\b', re.IGNORECASE),
                 re.compile(r'\b(?:turn\s+(?:the\s+)?num\s+lock\s+(?:on|off)|(?:toggle|turn\s+on|turn\s+off|enable|disable)\s+num\s+lock)\b', re.IGNORECASE),
@@ -462,7 +500,11 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:desktop\s+(?:stats|statistics|analysis|summary)|analyze\s+(?:my\s+)?desktop)\b', re.IGNORECASE),
                 # Installed games and software inventory
                 re.compile(r'\b(?:what\s+games\s+are\s+installed\s+on\s+my\s+pc|list\s+installed\s+games|show\s+installed\s+games|installed\s+games(?:\s+on\s+my\s+pc)?)\b', re.IGNORECASE),
-                re.compile(r'\b(?:what\s+apps\s+are\s+installed|list\s+installed\s+apps|show\s+installed\s+applications|installed\s+software)\b', re.IGNORECASE),
+                re.compile(r'\b(?:what\s+(?:apps|applications)\s+are\s+installed|list\s+installed\s+(?:apps|applications)|show\s+installed\s+(?:apps|applications)|installed\s+(?:apps|applications|software))\b', re.IGNORECASE),
+                re.compile(r'\b(?:find\s+(?:my\s+)?installed\s+(?:browsers?|apps?|applications?|software|programs?)|(?:what|which)\s+browsers?\s+(?:are\s+installed|do\s+i\s+have(?:\s+installed)?|are\s+on\s+(?:my|this)\s+(?:pc|computer|system))|list\s+installed\s+browsers?|show\s+installed\s+browsers?|installed\s+browsers?)\b', re.IGNORECASE),
+                # Natural-language browser inventory without trigger words
+                re.compile(r'\b(?:the\s+)?browsers?\s+(?:that\s+(?:are\s+)?)?installed\s+(?:on\s+(?:my|this|the)\s+(?:computer|pc|system|laptop)|in\s+(?:my|this|the)\s+(?:computer|pc|system|laptop))\b', re.IGNORECASE),
+                re.compile(r'\b(?:list|show|find)\s+(?:the\s+)?browsers?\s+(?:that\s+(?:are\s+)?)?installed\b', re.IGNORECASE),
             ],
 
             # ── Priority 3.5: CLOSE APPLICATION ───────────────────────────────
@@ -474,14 +516,14 @@ class UnifiedCommandRouter:
             # ── Priority 4: OPEN APPLICATION ──────────────────────────────────
             Intent.OPEN_APPLICATION: [
                 # Browser search and result selection (explicitly placed before generic open app)
-                re.compile(r'\b(?:search\s+(?:the\s+web\s+for|google\s+for)\s+|google\s+(?!chrome\b)|search\s+(?!for\s+(?:files?|folders?|documents?|notes?|reminders?)\b)(?!(?:files?|folders?|documents?|notes?|reminders?)\b)(?:for\s+)?)(.+)', re.IGNORECASE),
+                re.compile(r'\b(?:search\s+(?:the\s+web\s+for|google\s+for)\s+|google\s+(?!chrome\b)|search\s+(?!for\s+(?:files?|folders?|documents?|notes?|reminders?|events?|calendar|meetings?)\b)(?!(?:files?|folders?|documents?|notes?|reminders?|events?|calendar|meetings?)\b)(?:for\s+)?)(.+)', re.IGNORECASE),
                 re.compile(r'\b(?:open|click|select)\s+(?:the\s+)?(first|top|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|\d+(?:st|nd|rd|th))\s+(?:result|link)\b', re.IGNORECASE),
                 re.compile(r'\b(?:search\s+(?:on\s+|in\s+)?youtube\s+for|search\s+youtube\s+for)\s+(.+)', re.IGNORECASE),
                 re.compile(r'\b(?:search\s+(?:on\s+|in\s+)?google\s+for|search\s+google\s+for)\s+(.+)', re.IGNORECASE),
                 re.compile(r'\b(open|show|display|launch)\s+((?:(?:the|my)\s+)?dashboard)\b', re.IGNORECASE),
                 re.compile(r'(?:^|\b(?:please|can\s+you|could\s+you|would\s+you|then|now|so|just|okay|ok)\s+)(open)\s+(?!(?:music|song|(?:the\s+|this\s+|that\s+)?(?:email|emails|mail|mails)|video|.*?\b(?:folder|directory)\b|file\s+(?!explorer)|windows?\b|open\s+windows?\b|result\b|link\b|(?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+(?:result|link)))(.+)', re.IGNORECASE),
                 re.compile(r'\b(?:bring\s+up|bring|switch\s+to|switch\s+back\s+to)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:back|to\s+(?:the\s+)?front|on\s+the\s+first\s+page|on\s+(?:the\s+)?screen))?$', re.IGNORECASE),
-                re.compile(r'\b(launch|start|run)\s+(?!(?:in\s+this\s+(?:system|pc)|on\s+this\s+(?:system|pc)|games?\b))(.+)', re.IGNORECASE),
+                re.compile(r'\b(launch|start|run)\s+(?!(?:service\b|in\s+this\s+(?:system|pc)|on\s+this\s+(?:system|pc)|games?\b|again\b|over\b|from\s+scratch\b))(.+)', re.IGNORECASE),
                 re.compile(r'\b(?:get|bring)\s+([a-zA-Z0-9_\-]+)\s+running\b', re.IGNORECASE),
                 re.compile(r'\b(?:i\s+need|i\s+want)\s+(?!(?:to\s+)?(?:unlock|lock|mute|unmute|remind|remember|turn\s+off|turn\s+on|mail|email)\b)([a-zA-Z0-9_\-]+)(?:\s+(?:open|running|up))?\b', re.IGNORECASE),
                 # Browser Link & Table Extraction & Follow-ups
@@ -620,12 +662,18 @@ class UnifiedCommandRouter:
             # ── Priority 9: MUSIC ──────────────────────────────────────────────
             # Music playback commands with high specificity (strictly excludes games/software)
             Intent.MUSIC: [
+                # Standalone and explicit transport controls (Highest precedence in MUSIC)
+                re.compile(r'\b(pause|resume|stop|next|previous|skip)\s+(?:the\s+)?(?:music|songs?|tracks?|playback|audio)\b', re.IGNORECASE),
+                re.compile(r'\b(?:stop|pause|resume)\s+playing\s+(?:the\s+)?(?:music|songs?|audio|tracks?)\b', re.IGNORECASE),
+                re.compile(r'\b(?:stop|pause)\s+(?:singing|playing)(?:\s+(?:the\s+)?(?:songs?|music|audio|tracks?))?\b', re.IGNORECASE),
+                re.compile(r'\b(stop\s+singing|stop\s+playing\s+songs|stop\s+the\s+music|stop\s+everything|stop\s+all)\b', re.IGNORECASE),
+                re.compile(r'\b(play\s+next(?:\s+song|\s+track)?|play\s+previous(?:\s+song|\s+track)?|next\s+track|previous\s+track|next\s+song|previous\s+song|toggle\s+playback|play\s*\/\s*pause)\b', re.IGNORECASE),
+                re.compile(r'^\s*(?:can\s+you\s+|could\s+you\s+|please\s+)?(pause|resume|stop|next|previous|skip)\s+(?:the\s+)?(?:tracks?|songs?|audio|music|playback|singing)\s*$', re.IGNORECASE),
+                # Play commands (strictly excludes transport 'next' / 'previous')
                 re.compile(r'\b(play|start|begin)\s+(?:(?:some\s+)?(?:music|songs|tracks?)|(?:a\s+)?song)\b', re.IGNORECASE),
-                re.compile(r'\bplay\s+(?!(?:audio\s+)?(?:sound|sound\s+effect|chime|ping|click|beep|whoosh|chirp|notification(?:\s+sound)?|alert|(?:some\s+)?(?:games?|gaming|online\s+games?|pc\s+games?)|steam|download|which|in\s+this\s+system|online\s+game|fun|multiplayer|rpg|fps)\b)(.+?)(?:\s+song|\s+track|\s+audio|$)', re.IGNORECASE),
-                re.compile(r'\b(pause|resume|stop|next|previous|skip)\s+(?:the\s+)?(?:music|song|track|playback|audio)\b', re.IGNORECASE),
-                # Standalone media playback controls with explicit media target
-                re.compile(r'^\s*(?:can\s+you\s+|could\s+you\s+|please\s+)?(pause|resume|stop|next|previous|skip)\s+(?:the\s+)?(?:track|song|audio|music|playback)\s*$', re.IGNORECASE),
-                re.compile(r'\b(toggle\s+playback|play\s*\/\s*pause|next\s+track|previous\s+track|next\s+song|previous\s+song)\b', re.IGNORECASE),
+                re.compile(r'\bplay\s+(?!(?:audio\s+)?(?:sound|sound\s+effect|chime|ping|click|beep|whoosh|chirp|notification(?:\s+sound)?|alert|(?:some\s+)?(?:games?|gaming|online\s+games?|pc\s+games?)|steam|download|which|in\s+this\s+system|online\s+game|fun|multiplayer|rpg|fps|next|previous)\b)(.+?)(?:\s+song|\s+track|\s+audio|$)', re.IGNORECASE),
+                # Video song requests
+                re.compile(r'\b(?:play\s+video\s+song|show\s+(?:the\s+)?(?:music\s+)?video|play\s+music\s+video)\b', re.IGNORECASE),
                 # YouTube video summary
                 re.compile(r'\b(?:summarize|summary\s+of)\s+(?:this\s+)?(?:youtube\s+video|video)\b', re.IGNORECASE),
             ],
@@ -753,6 +801,7 @@ class UnifiedCommandRouter:
                 re.compile(r'\bwhat(?:\'s|\s+is)\s+(?:on\s+my\s+schedule|scheduled|planned)(?:\s+(?:for\s+)?(?:today|tomorrow))?\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+do\s+i\s+(?:need|have)\s+to\s+do(?:\s+(?:today|tomorrow))?\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+(?:meetings?|appointments?)\s+do\s+i\s+have(?:\s+(?:today|tomorrow))?\b', re.IGNORECASE),
+                re.compile(r'\b(?:do\s+i\s+have|are\s+there)\s+(?:any\s+)?(?:events?|meetings?|appointments?|plans?|anything\s+scheduled)(?:\s+(?:today|tomorrow|for\s+today|for\s+tomorrow|scheduled))?\b', re.IGNORECASE),
                 re.compile(r'\b(?:show|check|view|what(?:\'s|\s+is)\s+on|what)\s+(?:my\s+|today\'?s?\s+)?calendar\b', re.IGNORECASE),
                 re.compile(r'\b(?:show|check|view|what)\s+(?:today\'?s?\s+|my\s+)?events\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+events\s+do\s+i\s+have\b', re.IGNORECASE),
@@ -773,6 +822,18 @@ class UnifiedCommandRouter:
                 # ── Holiday queries ──
                 re.compile(r'\b(?:how\s+many\s+)?(?:holidays|special\s+days|festivals)\b', re.IGNORECASE),
                 re.compile(r'\bwhen\s+is\s+(?:the\s+)?(?:holiday|festival|diwali|christmas|eid|thanksgiving|halloween|new\s+year)\b', re.IGNORECASE),
+                re.compile(r'\b(?:what|which)\s+(?:is\s+the\s+|is\s+)?(?:holiday|special\s+day|festival)\s+(?:is\s+)?(?:it\s+)?today\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+(?:public\s+)?holiday\s+is\s+today\b', re.IGNORECASE),
+                re.compile(r'\bwhy\s+is\s+(?:it|today|this\s+day)\s+observed\b', re.IGNORECASE),
+                re.compile(r'\b(?:significance|meaning|history|importance)\s+of\s+(?:today|today\'?s?\s+holiday|this\s+holiday)\b', re.IGNORECASE),
+                re.compile(r'\b(?:what\s+are\s+the\s+)?(?:public\s+)?holidays\s+(?:this\s+month|in\s+\w+|this\s+week|next\s+week|in\s+the\s+next\s+\d+\s+days)\b', re.IGNORECASE),
+                re.compile(r'\b(?:which\s+holidays|what\s+holidays)\s+are\s+(?:in\s+the\s+next|coming\s+up|upcoming)\b', re.IGNORECASE),
+                re.compile(r'\b(?:how\s+many\s+)?(?:public\s+)?holidays\s+are\s+(?:left|remaining)\b', re.IGNORECASE),
+                re.compile(r'\b(?:is\s+)?(?:today|tomorrow|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2})\s+(?:a\s+)?(?:public\s+)?holiday\b', re.IGNORECASE),
+                re.compile(r'\b(?:is\s+)?(?:it\s+)?(?:a\s+)?(?:public\s+)?holiday\s+(?:today|tomorrow|yesterday|on\s+\w+|\d{4}-\d{2}-\d{2})\b', re.IGNORECASE),
+                re.compile(r'\b(?:is\s+)?(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:a\s+)?(?:working\s+day|workday|working\s+or\s+holiday|holiday\s+or\s+(?:a\s+)?working\s+day)\b', re.IGNORECASE),
+                re.compile(r'\b(?:any|upcoming|next)\s+(?:public\s+)?holidays?\b', re.IGNORECASE),
+                re.compile(r'\bholiday\s+or\s+not\b', re.IGNORECASE),
                 # ── Free Time / Busy Time / Open Slots ──
                 re.compile(r'\b(?:when\s+am\s+i\s+(?:free|busy)|am\s+i\s+(?:free|busy)|find\s+(?:a\s+)?free\s+slot|free\s+time|open\s+slots?|busy\s+(?:time|periods?)|suggest\s+(?:a\s+)?time)\b', re.IGNORECASE),
                 # ── Meeting Artifacts (Notes, Agendas, Checklists) ──
@@ -818,13 +879,24 @@ class UnifiedCommandRouter:
                 # World Clock & Timezones
                 re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?time\s+(?:in|at|for|of)|current\s+time\s+(?:in|at|for)|time\s+in)\s+([a-zA-Z\s]+)', re.IGNORECASE),
                 re.compile(r'\bwhat\s+time\s+is\s+it\s+in\s+([a-zA-Z\s]+)', re.IGNORECASE),
-                # Standard Local Clock
-                re.compile(r'\b(?:what(?:s|\'s|\s+is)\s+(?:the\s+)?time|what\s+time(?:\s+is\s+it)?|(?:can\s+you\s+)?tell\s+me\s+the\s+time|current\s+time|time\s+is\s+it)\b', re.IGNORECASE)
+                # Standard Local Clock & Multilingual Clock
+                re.compile(r'\b(?:what(?:s|\'s|\s+is)\s+(?:the\s+)?time|what\s+time(?:\s+is\s+it)?|(?:can\s+you\s+)?tell\s+me\s+the\s+time|current\s+time|time\s+is\s+it)\b', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\'s|\s+is)\s+(?:the\s+)?(?:current\s+)?(?:date\s+and\s+time|time\s+and\s+date)|tell\s+me\s+(?:the\s+)?(?:date\s+and\s+time|time\s+and\s+date))\b', re.IGNORECASE),
+                # Indic / Multilingual Local Clock Patterns
+                re.compile(r'(?:సమయం|టైమ్|టైం|గంటలు?)\s*(?:ఎంత|ఏమిటి|చెప్పు)?|(?:ఎంత|ఏమిటి)\s*(?:సమయం|టైమ్|టైం)|(?:టైమ్|టైం|సమయం)\s+ఎంత|ఫ్రైడే\s+(?:టైమ్|సమయం)|(?:తేదీ\s*మరియు\s*సమయం|సమయం\s*మరియు\s*తేదీ)', re.IGNORECASE),
+                re.compile(r'(?:समय|टाइम|वक्त)\s*(?:क्या|कितना|बताओ)?|कितने\s+बजे|टाइम\s+क्या\s+है|समय\s+क्या\s+है|तारीख\s+और\s+समय|समय\s+और\s+तारीख', re.IGNORECASE),
+                re.compile(r'(?:நேரம்|மணி|டைம்)\s*(?:என்ன|எவ்வளவு|சொல்லு)?', re.IGNORECASE),
+                re.compile(r'\b(?:que\s+hora\s+es|dime\s+la\s+hora|quelle\s+heure\s+est-il)\b', re.IGNORECASE)
             ],
 
             # ── Priority 14: DATE QUERY (Local System Clock — Bypasses RAG/LLM) ─
             Intent.DATE_QUERY: [
-                re.compile(r'\b(?:what(?:s|\'s|\s+is)\s+(?:the\s+)?(?:current\s+)?date|what\s+date(?:\s+is\s+it)?|today(?:s|\'s|\s+is)\s+date|what\s+day\s+is\s+(?:it|today)|tell\s+me\s+the\s+date|current\s+date)\b', re.IGNORECASE)
+                re.compile(r'\b(?:what(?:s|\'s|\s+is)\s+(?:the\s+)?(?:current\s+)?date|what\s+date(?:\s+is\s+it)?|what\s+date(?:\s+is|\s+will\s+it\s+be)?\s+(?:today|tomorrow|yesterday)|(?:today|tomorrow|yesterday)(?:s|\'s|\s+is)\s+date|what\s+(?:is\s+)?(?:tomorrow|yesterday)(?:\'s)?\s+date|what\s+day\s+is\s+(?:it|today|tomorrow|yesterday)|which\s+day\s+is\s+(?:it|today|tomorrow|yesterday)|which\s+date\s+is\s+(?:it|today|tomorrow|yesterday)|tell\s+me\s+(?:the\s+)?(?:date|today\'?s?\s+date|tomorrow\'?s?\s+date)|current\s+date|date\s+today|date\s+tomorrow)\b', re.IGNORECASE),
+                # Indic / Multilingual Local Date Patterns
+                re.compile(r'(?:ఈరోజు|ఈ\s*రోజు|రేపు|నిన్న)?\s*(?:తేదీ|దినం|వారం)\s*(?:ఏమిటి|ఎంత|చెప్పు)?|ఈరోజు\s+ఏ\s*రోజు|రేపు\s+ఏ\s*రోజు|తేదీ\s+ఎంత|ఈరోజు\s+తేదీ', re.IGNORECASE),
+                re.compile(r'(?:आज|कल|कल\s+की)?\s*(?:की\s+)?(?:तारीख|दिनांक|दिन)\s*(?:क्या\s+है|बताओ)?|आज\s+कौन\s+सा\s+दिन\s+है', re.IGNORECASE),
+                re.compile(r'(?:இன்று|நாளை)?\s*(?:தேதி|நாள்)\s*(?:என்ன|சொல்லு)?', re.IGNORECASE),
+                re.compile(r'\b(?:que\s+fecha\s+es|qual\s+e\s+a\s+data|quelle\s+est\s+la\s+date)\b', re.IGNORECASE)
             ],
 
             # ── Priority 15: WEATHER QUERY ─────────────────────────────────────
@@ -850,10 +922,11 @@ class UnifiedCommandRouter:
                 re.compile(r'\bwhat(?:\'s|\s+is)\s+my\s+height\b', re.IGNORECASE),
                 re.compile(r'\bhow\s+tall\s+am\s+i\b', re.IGNORECASE),
                 re.compile(r'\b(do\s+you\s+remember|can\s+you\s+remember|do\s+you\s+know|do\s+you\s+recall)\s+(?:what\s+)?my\b', re.IGNORECASE),
-                re.compile(r'\bwhat\s+(did\s+i|did\s+we|were\s+we|was\s+i|is\s+my|are\s+my|was\s+my)\b(?!\s+(?:task|project|website|background\s+task)\b)', re.IGNORECASE),
+                re.compile(r'\bwhat\s+(did\s+i|did\s+we|were\s+we|was\s+i|is\s+my|are\s+my|was\s+my)\b(?!\s+(?:task|project(?!\s+(?:name|title|secret|id|code|description))|website|background\s+task|(?:next\s+|upcoming\s+)?(?:appointment|appointments|meeting|meetings|event|events|calendar|schedule))\b)', re.IGNORECASE),
                 re.compile(r'\bwhat\s+(?:project\s+)?were\s+we\s+(?:working\s+on|doing|discussing|talking\s+about)\b', re.IGNORECASE),
-                re.compile(r'\bwhat(\'s|\s+is)\s+my\b(?!\s+(?:next\s+|upcoming\s+)?(?:appointment|meeting|event|calendar|schedule|task|tasks|project|website|background\s+task)\b)', re.IGNORECASE),
-                re.compile(r'\btell\s+me\s+my\b', re.IGNORECASE),
+                re.compile(r'\bwhat(\'s|\s+is)\s+my\b(?!\s+(?:next\s+|upcoming\s+)?(?:appointment|meeting|event|calendar|schedule|task|tasks|project(?!\s+(?:name|title|secret|id|code|description))|website|background\s+task)\b)', re.IGNORECASE),
+                # "tell me my" — exclude hardware/telemetry follow-ups (those go to DEVICE_CONTROL)
+                re.compile(r'\btell\s+me\s+my\b(?!\s*(?:current\s+)?(?:cpu|processor|gpu|graphics|ram|memory|disk|storage|battery|uptime|telemetry|hardware|system|volume|brightness)\b)', re.IGNORECASE),
                 re.compile(r'\bwhich\s+([a-zA-Z\s]+)\s+do\s+i\s+(like|love|prefer)\b', re.IGNORECASE),
                 re.compile(r'\b(?:remember\s+my\b(?!\s+[a-zA-Z0-9_\s]+?\s+(?:is|was|=))|recall\s+my\b)', re.IGNORECASE),
                 re.compile(r'\bwhat\s+do\s+i\s+like\b', re.IGNORECASE),
@@ -861,12 +934,19 @@ class UnifiedCommandRouter:
                 re.compile(r'\bwhat\s+do\s+you\s+(know|remember)\s+about\s+me\b', re.IGNORECASE),
                 re.compile(r'\bshow\s+(?:my\s+)?memory\b', re.IGNORECASE),
                 re.compile(r'\b(?:project\s+secret|my\s+project\s+secret)\b', re.IGNORECASE),
-                re.compile(r'\b(?:what(?:\'s|\s+is)|tell\s+me|show\s+me|get)\b.*?\bmy\s+(?!(?:next\s+|upcoming\s+)?(?:appointment|meeting|event|calendar|schedule|task|tasks|project|website|background\s+task)\b)([a-zA-Z0-9_\s]+)', re.IGNORECASE),
+                re.compile(r'\b(?:what(?:\'s|\s+is)|tell\s+me|show\s+me|get)\b.*?\bmy\s+(?!(?:next\s+|upcoming\s+)?(?:appointment|meeting|event|calendar|schedule|task|tasks|project(?!\s+(?:name|title|secret|id|code|description))|website|background\s+task)\b)([a-zA-Z0-9_\s]+)', re.IGNORECASE),
                 re.compile(r'\b(?:which|what)\s+database\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+(?:backend|technology|tech\s+stack)\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+name\s+did\s+i\s+choose\b', re.IGNORECASE),
-                re.compile(r'\bwhat\s+did\s+i\s+(?:ask|tell)\s+you\s+to\s+remember\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+(?:did\s+i\s+(?:ask|tell)\s+you\s+to\s+remember|was\s+the\s+(?:test\s+)?phrase\s+i\s+asked\s+you\s+to\s+remember|was\s+the\s+(?:phrase|fact|secret)\s+i\s+asked\s+you\s+to\s+remember)\b', re.IGNORECASE),
+                re.compile(r'\bwhat\s+was\s+(?:the\s+)?(?:test\s+phrase|phrase|fact|secret)\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+(?:response\s+style|style\s+of\s+response)\b', re.IGNORECASE),
+                re.compile(r'\b(?:which|what)\s+(?:university|college|school|institution)\s+do\s+i\s+(?:attend|go\s+to)\b', re.IGNORECASE),
+                re.compile(r'\bwhere\s+do\s+i\s+(?:study|go\s+to\s+(?:school|college|university))\b', re.IGNORECASE),
+                re.compile(r'\bwhat(?:\'s|\s+is)\s+my\s+(?:university|college|institution|education|major|student\s+status|degree|activity|role|cell|goal|preferred\s+name)\b', re.IGNORECASE),
+                re.compile(r'\b(?:what\s+(?:cell|committee|club)(?:\s+or\s+(?:cell|committee|club))?\s+am\s+i\s+(?:in|part\s+of)|am\s+i\s+(?:in|part\s+of)\s+(?:any\s+|the\s+)?(?:placement\s+cell|cell|club|committee))\b', re.IGNORECASE),
+                re.compile(r'\b(?:what\s+is|what\'s)\s+my\s+(?:preferred\s+)?name\b', re.IGNORECASE),
+                re.compile(r'\bwhen\s+is\s+my\s+(?:interview|exam|meeting|test|presentation)\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+happened\s+when\s+you\s+tried\s+that\s+command\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+did\s+you\s+change\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+error\s+did\s+we\s+fix\b', re.IGNORECASE),
@@ -1034,6 +1114,20 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:suggest|recommend|find|show|list)\s+(?:some\s+)?(?:online\s+games?|pc\s+games?|games?\s+i\s+can\s+download|games?\s+to\s+download)\b', re.IGNORECASE),
                 re.compile(r'\b(?:can\s+(?:we|i)\s+play|let\'?s?\s+play)\s+(?:some\s+)?(?:games?|online\s+games?|pc\s+games?)\b', re.IGNORECASE),
                 re.compile(r'\b(?:suggest\s+some\s+games|recommend\s+(?:some\s+)?games)\b', re.IGNORECASE),
+            ],
+
+            # ── Priority 33: VOICE CONFIGURATION & LANGUAGE PREFERENCE ─────────
+            Intent.VOICE_CONFIGURATION: [
+                re.compile(r'\b(?:speak|talk|reply|respond)\s+(?:to\s+me\s+)?in\s+(telugu|hindi|tamil|kannada|malayalam|spanish|french|german|english)\b', re.IGNORECASE),
+                re.compile(r'\b(?:can\s+you\s+)?(?:speak|talk)\s+(?:in\s+)?(telugu|hindi|tamil|kannada|malayalam|spanish|french|german|english)\b', re.IGNORECASE),
+                re.compile(r'\b(?:switch|change)\s+(?:language|voice\s+language)\s+to\s+(telugu|hindi|tamil|kannada|malayalam|spanish|french|german|english)\b', re.IGNORECASE),
+                re.compile(r'\b(?:telugu|hindi|tamil|kannada|malayalam|spanish|french|german)\s+(?:lo\s+matladu|lo\s+matladandi|lo\s+cheppu|me\s+bolo|me\s+boliye)\b', re.IGNORECASE),
+                re.compile(r'(?:తెలుగులో\s*మాట్లాడు|తెలుగులో\s*మాట్లాడండి|తెలుగు\s*మాట్లాడగలవా|హిందీలో\s*మాట్లాడు)', re.IGNORECASE),
+                re.compile(r'(?:हिंदी\s*में\s*बोलो|हिंदी\s*में\s*बात\s*करो|तमिल\s*में\s*बोलो)', re.IGNORECASE),
+                re.compile(r'\b(?:speak|talk)\s+(?:a\s+little\s+|a\s+bit\s+)?(?:slower|more\s+slowly)\b', re.IGNORECASE),
+                re.compile(r'\b(?:speak|talk)\s+(?:a\s+little\s+|a\s+bit\s+)?(?:faster|more\s+quickly)\b', re.IGNORECASE),
+                re.compile(r'\b(?:slow\s+down|speed\s+up)\s+(?:your\s+)?(?:voice|speech|talking)\b', re.IGNORECASE),
+                re.compile(r'\breset\s+(?:speaking\s+|voice\s+)?rate\b', re.IGNORECASE),
             ],
             # Priority 25: GENERAL_CONVERSATION — fallback, no pattern needed
         }
@@ -1356,6 +1450,16 @@ class UnifiedCommandRouter:
                 self.logger.debug(f"[DETERMINISTIC] '{user_input[:60]}' -> AUDIO_DEVICES")
                 return _cache_and_return(Intent.AUDIO_DEVICES, params)
 
+        # Fast path: Local system telemetry, hardware diagnostics, and administrator elevation testing
+        # Local operations (CPU, RAM, uptime, disk, GPU discovery, volume, app enumeration, elevation)
+        # must execute deterministically without cloud LLM or RAG latency/fallback.
+        for pattern in self.patterns.get(Intent.DEVICE_CONTROL, []):
+            match = pattern.search(input_lower) or pattern.search(clean_input) or pattern.search(clean_no_polite)
+            if match:
+                params = self._extract_params(Intent.DEVICE_CONTROL, match, user_input)
+                self.logger.debug(f"[DETERMINISTIC] '{user_input[:60]}' -> DEVICE_CONTROL")
+                return _cache_and_return(Intent.DEVICE_CONTROL, params)
+
         # ── Step 0: Canonical Semantic Understanding Pipeline ─────────────
         # Semantically interprets user intention before pattern matching.
         # Derives user goal, entities, target, desired state, and arbitrated capability.
@@ -1377,6 +1481,9 @@ class UnifiedCommandRouter:
                     if getattr(sem_cmd, "action", "") == "inspect_system" or getattr(sem_cmd, "target_type", "") == "SYSTEM" or getattr(sem_cmd, "sub_intent", "") == "SYSTEM_STATE":
                         target_intent_name = "DEVICE_CONTROL"
                         sem_params["action"] = "system_info"
+                    elif getattr(sem_cmd, "action", "") == "inspect_storage" or getattr(sem_cmd, "target_type", "") == "FILESYSTEM" or getattr(sem_cmd, "sub_intent", "") == "FILESYSTEM_STATE":
+                        target_intent_name = "DEVICE_CONTROL"
+                        sem_params["action"] = "disk"
                     else:
                         target_intent_name = "WINDOW_CONTEXT"
                 elif target_intent_name == "CONTENT_INSERTION":
@@ -1390,6 +1497,18 @@ class UnifiedCommandRouter:
                     else:
                         target_intent_name = "DEVICE_CONTROL"
                         sem_params["action"] = "type_text"
+                elif target_intent_name == "MUSIC":
+                    try:
+                        from modules.music.music_controller import MusicCommandParser
+                        _p = MusicCommandParser().parse(user_input)
+                        if _p.is_transport:
+                            sem_params["action"] = _p.transport_action
+                        elif _p.is_video_requested:
+                            sem_params["action"] = "play_video"
+                        else:
+                            sem_params["action"] = "play"
+                    except Exception:
+                        pass
                 if hasattr(Intent, target_intent_name):
                     resolved_enum = Intent[target_intent_name]
                     sem_params["raw_input"] = user_input
@@ -1523,19 +1642,78 @@ class UnifiedCommandRouter:
         except Exception:
             pass
 
-        # Contextual Control Verbs ("stop", "pause", "continue", "resume", "stop that")
-        is_stop_verb = clean_no_polite in ("stop", "halt", "hold on", "pause", "stop that", "stop it", "stop this", "stop task", "cancel task") or bool(re.match(r'^(?:stop|halt|hold on|pause)(?:\s+(?:that|it|this|task))?[.!?]?$', clean_no_polite))
+        # Contextual Control Verbs ("stop", "pause", "continue", "resume", "stop that", "start again")
+        norm_control = re.sub(r'^(?:yes|yeah|yep|sure|ok|okay|please)\s*[,]?\s*', '', clean_no_polite).strip()
+        is_stop_verb = clean_no_polite in ("stop", "halt", "hold on", "pause", "stop that", "stop it", "stop this", "stop task", "cancel task") or norm_control in ("stop", "halt", "hold on", "pause", "stop that", "stop it", "stop this", "stop task", "cancel task") or bool(re.match(r'^(?:stop|halt|hold on|pause)(?:\s+(?:that|it|this|task))?[.!?]?$', clean_no_polite))
         is_continue_verb = clean_no_polite in (
             "continue", "resume", "keep reading", "continue reading", "resume reading",
             "continue what you are saying", "continue what you were saying", "continue what you said",
             "continue saying", "keep going", "go on", "resume what you were saying"
-        ) or bool(re.match(r'^(?:continue|resume)(?:\s+(?:that|it|this|task|what\s+you\s+(?:are|were)\s+saying))?[.!?]?$', clean_no_polite))
+        ) or norm_control in (
+            "continue", "resume", "keep reading", "continue reading", "resume reading",
+            "continue what you are saying", "continue what you were saying", "continue what you said",
+            "continue saying", "keep going", "go on", "resume what you were saying"
+        ) or bool(re.match(r'^(?:continue|resume)(?:\s+(?:that|it|this|task|what\s+you\s+(?:are|were)\s+saying))?[.!?]?$', clean_no_polite)) or bool(re.match(r'^(?:continue|resume)(?:\s+(?:that|it|this|task|what\s+you\s+(?:are|were)\s+saying))?[.!?]?$', norm_control))
 
-        if is_stop_verb:
+        is_restart_verb = clean_no_polite in (
+            "start again", "start over", "start from scratch", "let's start again", "lets start again",
+            "begin again", "try again", "start it again", "do that again"
+        ) or norm_control in (
+            "start again", "start over", "start from scratch", "let's start again", "lets start again",
+            "begin again", "try again", "start it again", "do that again"
+        ) or bool(re.match(r'^(?:start\s+(?:again|over|from\s+scratch)|let\'?s?\s+start\s+(?:again|over))[.!?]?$', clean_no_polite))
+
+        if is_restart_verb:
+            try:
+                from extensions.dialogue_state_manager import get_dialogue_manager
+                dm = get_dialogue_manager(user_id)
+                if dm:
+                    # If user asks to start again referring to previous answer, repeat it or reset conversation
+                    if dm.current_state.turns:
+                        last_turn = dm.current_state.turns[-1]
+                        last_ans = last_turn.assistant_response
+                        if last_ans and not any(k in last_ans.lower() for k in ["goodbye", "have a nice day"]):
+                            return _cache_and_return(Intent.GENERAL_CONVERSATION, {"response": last_ans, "raw_input": user_input})
+            except Exception:
+                pass
+            return _cache_and_return(Intent.GENERAL_CONVERSATION, {"response": "Sure, let's start again. How can I help you?", "raw_input": user_input})
+
+        target_uid = 1
+        if user_id is not None:
+            try:
+                target_uid = int(user_id)
+            except Exception:
+                target_uid = 1
+
+        is_explicit_speech_stop = clean_no_polite in (
+            "stop speaking", "stop talking", "be quiet", "shut up", "hush", "mute yourself", "stop voice"
+        ) or bool(re.search(r'\b(?:stop\s+(?:talking|speaking)|be\s+quiet|shut\s+up|mute\s+yourself)\b', clean_no_polite))
+
+        is_explicit_music_stop = clean_no_polite in (
+            "stop music", "pause music", "stop song", "pause song", "stop songs",
+            "stop playing songs", "stop playing music", "stop the music", "stop singing",
+            "stop singing songs", "stop audio", "stop playback", "stop the playback",
+            "stop the song", "stop the songs", "stop the audio", "stop the track", "stop track"
+        ) or bool(re.search(r'\b(?:stop|pause)\s+(?:playing\s+)?(?:the\s+)?(?:songs?|music|audio|tracks?|playback|singing)\b', clean_no_polite)) or bool(re.search(r'\bstop\s+singing\b', clean_no_polite))
+
+        is_stop_everything = clean_no_polite in (
+            "stop everything", "stop all", "halt everything", "stop all playback", "stop speech and music"
+        ) or bool(re.search(r'\b(?:stop\s+everything|stop\s+all|halt\s+everything)\b', clean_no_polite))
+
+        if is_explicit_speech_stop:
+            return _cache_and_return(Intent.DEVICE_CONTROL, {"action": "stop_speech", "raw_input": user_input})
+
+        elif is_explicit_music_stop:
+            return _cache_and_return(Intent.MUSIC, {"action": "stop", "raw_input": user_input})
+
+        elif is_stop_everything:
+            return _cache_and_return(Intent.MUSIC, {"action": "stop_all", "raw_input": user_input})
+
+        elif is_stop_verb:
             # 1. Check if Assistant TTS is currently speaking
             try:
                 from legacy.tts import is_speaking
-                if is_speaking() or clean_no_polite in ("stop speaking", "stop talking", "be quiet", "shut up", "hush"):
+                if is_speaking():
                     return _cache_and_return(Intent.DEVICE_CONTROL, {"action": "stop_speech", "raw_input": user_input})
             except Exception:
                 pass
@@ -1543,7 +1721,7 @@ class UnifiedCommandRouter:
             # 2. Check if a Document is actively being read aloud
             try:
                 from core.artifact_reader import get_artifact_reading_controller
-                if get_artifact_reading_controller().is_reading(1) or clean_no_polite in ("stop reading", "pause reading"):
+                if get_artifact_reading_controller().is_reading(target_uid) or clean_no_polite in ("stop reading", "pause reading"):
                     return _cache_and_return(Intent.DOCUMENT_GENERATION, {"action": "stop_reading", "raw_input": user_input})
             except Exception:
                 pass
@@ -1553,7 +1731,7 @@ class UnifiedCommandRouter:
                 from modules.music.music_controller import get_controller
                 m_ctrl = get_controller()
                 is_p = m_ctrl.is_playing() if callable(getattr(m_ctrl, "is_playing", None)) else getattr(m_ctrl, "is_playing", False)
-                if is_p or clean_no_polite in ("stop music", "pause music", "stop song", "pause song"):
+                if is_p:
                     return _cache_and_return(Intent.MUSIC, {"action": "stop", "raw_input": user_input})
             except Exception:
                 pass
@@ -1562,7 +1740,7 @@ class UnifiedCommandRouter:
             try:
                 from core.task_execution_manager import get_task_execution_manager
                 tem = get_task_execution_manager()
-                active_tasks = tem.list_tasks(1, active_only=True)
+                active_tasks = tem.list_tasks(target_uid, active_only=True)
                 if active_tasks:
                     target_task = active_tasks[0]
                     return _cache_and_return(Intent.TASK_MANAGEMENT, {"action": "cancel_task", "task_id": target_task.task_id, "raw_input": user_input})
@@ -1576,18 +1754,28 @@ class UnifiedCommandRouter:
             # 0. Check dialogue continuation state if assistant was speaking or has more to say
             try:
                 from extensions.dialogue_state_manager import get_dialogue_manager
-                dm = get_dialogue_manager(user_id)
-                if dm and (dm.current_state.interrupted_speech_text or dm.current_state.remaining_response_segments or dm.current_state.current_recommendation_list):
-                    cont_resp = dm.get_continue_response()
-                    if cont_resp:
-                        return _cache_and_return(Intent.GENERAL_CONVERSATION, {"response": cont_resp, "raw_input": user_input})
+                dm = get_dialogue_manager(target_uid)
+                if dm:
+                    if (dm.current_state.interrupted_speech_text or dm.current_state.remaining_response_segments or dm.current_state.current_recommendation_list):
+                        cont_resp = dm.get_continue_response()
+                        if cont_resp:
+                            return _cache_and_return(Intent.GENERAL_CONVERSATION, {"response": cont_resp, "raw_input": user_input})
+                    if getattr(dm.current_state, "pending_goal_continuation", None) or getattr(dm.current_state, "goal_status", "") in ("RUNNING", "PARTIALLY_COMPLETED", "PAUSED"):
+                        cont_plan = dm.current_state.pending_goal_continuation or dm.current_state.current_plan
+                        if cont_plan:
+                            return _cache_and_return(Intent.GENERAL_CONVERSATION, {
+                                "action": "continue_goal",
+                                "response": "Continuing with your previous task.",
+                                "plan": cont_plan,
+                                "raw_input": user_input
+                            })
             except Exception:
                 pass
 
             # 1. Check if document reading was paused and user says continue
             try:
                 from core.artifact_reader import get_artifact_reading_controller
-                if get_artifact_reading_controller().load_latest_paused_session(1):
+                if get_artifact_reading_controller().load_latest_paused_session(target_uid):
                     return _cache_and_return(Intent.DOCUMENT_GENERATION, {"action": "continue_reading", "raw_input": user_input})
             except Exception:
                 pass
@@ -1596,7 +1784,7 @@ class UnifiedCommandRouter:
             try:
                 from core.task_execution_manager import get_task_execution_manager, TaskStatus
                 tem = get_task_execution_manager()
-                waiting_tasks = [t for t in tem.list_tasks(1) if getattr(t, 'status', None) in (TaskStatus.WAITING, TaskStatus.PAUSED)]
+                waiting_tasks = [t for t in tem.list_tasks(target_uid) if getattr(t, 'status', None) in (TaskStatus.WAITING, TaskStatus.PAUSED)]
                 if waiting_tasks:
                     return _cache_and_return(Intent.TASK_MANAGEMENT, {"action": "resume_task", "task_id": waiting_tasks[0].task_id, "raw_input": user_input})
             except Exception:
@@ -1733,6 +1921,13 @@ class UnifiedCommandRouter:
                     re.IGNORECASE
                 )
                 if any(_PRONOUN_ONLY_RE.match(t) for t in [clean_input, clean_no_polite, input_lower]):
+                    continue
+                # Conversational restart phrases ("start again", "start over") must NOT be routed to OPEN_APPLICATION
+                _RESTART_CONV_RE = re.compile(
+                    r'^(?:(?:start|run|launch|begin)\s+)?(?:again|over|from\s+scratch)[.!?]?$',
+                    re.IGNORECASE
+                )
+                if any(_RESTART_CONV_RE.match(t) for t in [clean_input, clean_no_polite, input_lower]):
                     continue
                 # Historical reference questions or environment context queries (e.g., "what was I using before Brave",
                 # "what was open before Chrome") must NOT be routed to OPEN_APPLICATION
@@ -1958,6 +2153,8 @@ class UnifiedCommandRouter:
 
         if self._semantic_enabled:
             sem_intent, sem_params = self._semantic_fallback(user_input)
+            if sem_params and sem_params.get("_needs_clarification"):
+                return _cache_and_return(sem_intent, sem_params)
             if sem_intent != Intent.GENERAL_CONVERSATION:
                 arb_intent, arb_params = self._arbitrate_intent(user_input, sem_intent, sem_params, source="semantic")
                 return _cache_and_return(arb_intent, arb_params)
@@ -1989,6 +2186,7 @@ class UnifiedCommandRouter:
         has_compat = bool(re.search(r'\b(?:compatible|run\s+on\s+(?:this|my)|can\s+run\s+on|system\s+requirements|hardware\s+requirements|compare\s+(?:those\s+)?game\s+requirements)\b', t))
         has_recommend = bool(re.search(r'\b(?:suggest|recommend|ideas\s+for|what\s+should\s+i|can\s+u\s+suggest|can\s+you\s+suggest)\b', t))
         has_music_noun = bool(re.search(r'\b(?:music|song|songs|track|tracks|spotify|playlist|arijit\s+singh|album|artist)\b', t))
+        is_transport_music = bool(re.search(r'\b(?:play\s+next|play\s+previous|next\s+song|previous\s+song|next\s+track|previous\s+track|stop\s+music|stop\s+playing|stop\s+singing|pause\s+music|resume\s+music)\b', t))
         has_hardware_spec = bool(re.search(r'\b(?:what\s+(?:cpu|gpu|processor|graphics\s+card)|how\s+much\s+ram)\b', t))
 
         final_intent = initial_intent
@@ -1998,7 +2196,7 @@ class UnifiedCommandRouter:
 
         # 1. False MUSIC classifications:
         # A request must NEVER become MUSIC merely because it contains 'play' when referring to games
-        if initial_intent == Intent.MUSIC and (has_game or not has_music_noun):
+        if initial_intent == Intent.MUSIC and not is_transport_music and (has_game or not has_music_noun):
             if has_compat:
                 final_intent = Intent.SYSTEM_COMPATIBILITY
                 final_params = {"query": user_input, "action": "compatibility_check"}
@@ -2027,7 +2225,7 @@ class UnifiedCommandRouter:
                 reason = "Matched game suggestion/play request"
 
         # 4. RECOMMENDATION bias
-        elif has_recommend and not has_game and (not has_music_noun or not has_play) and final_intent in (Intent.GENERAL_CONVERSATION, Intent.MUSIC):
+        elif has_recommend and not has_game and not is_transport_music and (not has_music_noun or not has_play) and final_intent in (Intent.GENERAL_CONVERSATION, Intent.MUSIC):
             final_intent = Intent.RECOMMENDATION
             final_params = {"query": user_input}
             decision = "RECOMMENDATION"
@@ -2097,9 +2295,9 @@ class UnifiedCommandRouter:
         )
         return final_intent, final_params
 
-    def route(self, user_input: str) -> Tuple[Intent, Dict[str, Any]]:
+    def route(self, user_input: str, user_id: Optional[Any] = None) -> Tuple[Intent, Dict[str, Any]]:
         """Alias for route_command."""
-        return self.route_command(user_input)
+        return self.route_command(user_input, user_id=user_id)
 
     def _extract_params(self, intent: Intent, match: re.Match, user_input: str) -> Dict[str, Any]:
         params = {"raw_input": user_input}
@@ -2278,6 +2476,9 @@ class UnifiedCommandRouter:
                     action = "open"
                     target = match.group(1).strip() if match.lastindex else ""
 
+                if any(clean_text_no_polite.startswith(p) for p in ("switch to ", "switch back to ", "switch ", "bring up ", "bring ", "focus ")):
+                    action = "switch"
+
                 # Terminate application target at conjunction/action boundary
                 m_act_bound = re.search(r'^(.*?)\s+and\s+(?:search(?:\s+google)?(?:\s+(?:for|on|in))?|type|write|calculate|compute|open|look\s+up|find)\s+(.+)$', target, re.IGNORECASE)
                 if m_act_bound:
@@ -2454,7 +2655,42 @@ class UnifiedCommandRouter:
                 params["action"] = normalised or raw_action
             elif intent == Intent.DEVICE_CONTROL:
                 text_low = user_input.lower()
-                if re.search(r'\b(?:close|shut)\s+(?:this\s+|the\s+|current\s+|browser\s+)?tab(?:s)?\b', text_low):
+                if re.search(r'\b(?:install\s+software|install\s+app|install\s+package|install)\s+([a-zA-Z0-9_\-\.]+)\b', text_low):
+                    m = re.search(r'\b(?:install\s+software|install\s+app|install\s+package|install)\s+([a-zA-Z0-9_\-\.]+)\b', text_low)
+                    params["action"] = "install_software"
+                    pkg = m.group(1).strip()
+                    params["package_name"] = pkg
+                    params["name"] = pkg
+                    params["target"] = pkg
+                elif re.search(r'\b(?:uninstall\s+software|uninstall\s+app|remove\s+software|remove\s+app|uninstall)\s+([a-zA-Z0-9_\-\.]+)\b', text_low):
+                    m = re.search(r'\b(?:uninstall\s+software|uninstall\s+app|remove\s+software|remove\s+app|uninstall)\s+([a-zA-Z0-9_\-\.]+)\b', text_low)
+                    params["action"] = "uninstall_software"
+                    pkg = m.group(1).strip()
+                    params["package_name"] = pkg
+                    params["name"] = pkg
+                    params["target"] = pkg
+                elif re.search(r'\b(?:start|stop|restart)\s+service\s+([a-zA-Z0-9_\-\.]+)\b', text_low) or re.search(r'\bservice\s+([a-zA-Z0-9_\-\.]+)\s+(start|stop|restart)\b', text_low):
+                    m1 = re.search(r'\b(start|stop|restart)\s+service\s+([a-zA-Z0-9_\-\.]+)\b', text_low)
+                    m2 = re.search(r'\bservice\s+([a-zA-Z0-9_\-\.]+)\s+(start|stop|restart)\b', text_low)
+                    params["action"] = "service_control"
+                    if m1:
+                        params["sub_action"] = m1.group(1).lower()
+                        params["service_name"] = m1.group(2).strip()
+                        params["name"] = m1.group(2).strip()
+                        params["target"] = m1.group(2).strip()
+                    elif m2:
+                        params["sub_action"] = m2.group(2).lower()
+                        params["service_name"] = m2.group(1).strip()
+                        params["name"] = m2.group(1).strip()
+                        params["target"] = m2.group(1).strip()
+                elif re.search(r'\b(?:test|request|check|trigger|verify|prompt)\s+(?:for\s+)?(?:admin(?:istrator)?\s+)?(?:uac\s+)?elevation\b', text_low) \
+                     or re.search(r'\b(?:test|request)\s+(?:admin(?:istrator)?|uac)\s+permissions?\b', text_low) \
+                     or re.search(r'\b(?:elevate|request)\s+(?:to\s+)?(?:admin(?:istrator)?|administrator\s+privileges?|admin\s+privileges?)\b', text_low) \
+                     or "elevation" in text_low:
+                    params["action"] = "test_elevation"
+                    params["name"] = "elevation_test"
+                    params["target"] = "elevation_test"
+                elif re.search(r'\b(?:close|shut)\s+(?:this\s+|the\s+|current\s+|browser\s+)?tab(?:s)?\b', text_low):
                     params["action"] = "close_tab"
                 elif "screenshot" in text_low or "capture" in text_low:
                     params["action"] = "screenshot"
@@ -2550,14 +2786,28 @@ class UnifiedCommandRouter:
                     params["action"] = "get_brightness"
 
                 # ── Volume controls ──
+                # 0. Volume by N percentage points (e.g. "decrease volume by 12 percentage points")
+                elif re.search(r'\b(increase|raise)\s+(?:the\s+)?(?:system\s+|master\s+)?volume\s+(?:by\s+)?(\d+)\s+percentage\s+points?\b', text_low):
+                    m_vpp = re.search(r'\b(?:increase|raise)\s+(?:the\s+)?(?:system\s+|master\s+)?volume\s+(?:by\s+)?(\d+)\s+percentage\s+points?\b', text_low)
+                    params["action"] = "increase_volume"
+                    params["amount"] = int(m_vpp.group(1)) if m_vpp else 10
+                elif re.search(r'\b(decrease|lower|reduce)\s+(?:the\s+)?(?:system\s+|master\s+)?volume\s+(?:by\s+)?(\d+)\s+percentage\s+points?\b', text_low):
+                    m_vpp = re.search(r'\b(?:decrease|lower|reduce)\s+(?:the\s+)?(?:system\s+|master\s+)?volume\s+(?:by\s+)?(\d+)\s+percentage\s+points?\b', text_low)
+                    params["action"] = "decrease_volume"
+                    params["amount"] = int(m_vpp.group(1)) if m_vpp else 10
+                # Ambiguous transcription: "[name] is the volume by N%" — ask for clarification
+                elif re.search(r'\b(?:friday|trevon|nova|jarvis|assistant)\s+(?:is|boost|up|down)\s+(?:the\s+)?volume\b', text_low):
+                    params["action"] = "clarify_volume"
+                    params["clarification_needed"] = "volume_direction"
+                    params["ambiguous_input"] = user_input
                 # 1. Relative INCREASE with numeric amount: "increase volume by 20%", "turn up volume by 20%", etc.
-                elif re.search(r'\b(?:increase|raise|turn\s+up|boost)\s+(?:the\s+)?volume\s+(?:by\s+)?(\d+)\s*%?\b', text_low) or re.search(r'\bvolume\s+up\s+(?:by\s+)?(\d+)\s*%?\b', text_low):
-                    m_vi = re.search(r'\b(?:increase|raise|turn\s+up|boost)\s+(?:the\s+)?volume\s+(?:by\s+)?(\d+)\s*%?\b', text_low) or re.search(r'\bvolume\s+up\s+(?:by\s+)?(\d+)\s*%?\b', text_low)
+                elif re.search(r'\b(?:increase|raise|turn\s+up|boost)\s+(?:the\s+)?(?:system\s+)?volume\s+(?:by\s+)?(\d+)\s*%?\b', text_low) or re.search(r'\bvolume\s+up\s+(?:by\s+)?(\d+)\s*%?\b', text_low):
+                    m_vi = re.search(r'\b(?:increase|raise|turn\s+up|boost)\s+(?:the\s+)?(?:system\s+)?volume\s+(?:by\s+)?(\d+)\s*%?\b', text_low) or re.search(r'\bvolume\s+up\s+(?:by\s+)?(\d+)\s*%?\b', text_low)
                     params["action"] = "increase_volume"
                     params["amount"] = int(m_vi.group(1)) if m_vi else 10
                 # 2. Relative DECREASE with numeric amount: "decrease volume by 30%", "turn down volume by 30%", etc.
-                elif re.search(r'\b(?:decrease|lower|reduce|turn\s+down|drop)\s+(?:the\s+)?volume\s+(?:by\s+)?(\d+)\s*%?\b', text_low) or re.search(r'\bvolume\s+down\s+(?:by\s+)?(\d+)\s*%?\b', text_low):
-                    m_vd = re.search(r'\b(?:decrease|lower|reduce|turn\s+down|drop)\s+(?:the\s+)?volume\s+(?:by\s+)?(\d+)\s*%?\b', text_low) or re.search(r'\bvolume\s+down\s+(?:by\s+)?(\d+)\s*%?\b', text_low)
+                elif re.search(r'\b(?:decrease|lower|reduce|turn\s+down|drop)\s+(?:the\s+)?(?:system\s+)?volume\s+(?:by\s+)?(\d+)\s*%?\b', text_low) or re.search(r'\bvolume\s+down\s+(?:by\s+)?(\d+)\s*%?\b', text_low):
+                    m_vd = re.search(r'\b(?:decrease|lower|reduce|turn\s+down|drop)\s+(?:the\s+)?(?:system\s+)?volume\s+(?:by\s+)?(\d+)\s*%?\b', text_low) or re.search(r'\bvolume\s+down\s+(?:by\s+)?(\d+)\s*%?\b', text_low)
                     params["action"] = "decrease_volume"
                     params["amount"] = int(m_vd.group(1)) if m_vd else 10
                 # 3. Absolute SET: "set volume to 50%", "change volume to 50%", "volume to 50%", "volume 50%"
@@ -2566,7 +2816,12 @@ class UnifiedCommandRouter:
                     params["action"] = "set_volume"
                     params["level"] = max(0, min(100, int(m_vol.group(1)))) if m_vol else 50
                 # 4. Read volume
-                elif any(k in text_low for k in ["what is the current volume", "what is the volume", "current volume", "check volume", "volume level"]):
+                elif any(k in text_low for k in [
+                    "what is the current volume", "what is the volume", "what's the volume",
+                    "what is my current volume", "what is my volume", "what's my current volume", "what's my volume",
+                    "current volume", "check volume", "check my volume", "check current volume", "check the volume",
+                    "volume level", "get volume", "my current volume", "current volum"
+                ]) or re.search(r'\b(?:what(?:\x27s|\s+is)\s+(?:my\s+|the\s+)?(?:current\s+)?volum?e?|check\s+(?:my\s+|the\s+)?(?:current\s+)?volum?e?)\b', text_low):
                     params["action"] = "get_volume"
                 # 5. Relative INCREASE default step (no number)
                 elif any(k in text_low for k in ["increase the volume", "increase volume", "raise volume", "turn up the volume", "turn up volume", "volume up"]):
@@ -2582,21 +2837,42 @@ class UnifiedCommandRouter:
                 # ── Battery diagnostics ──
                 elif any(k in text_low for k in ["battery", "charging status"]):
                     params["action"] = "battery"
+                # ── System Uptime / Computer running time ──
+                elif re.search(r'\bhow\s+long\s+(?:has|is)\s+(?:my|the|this)?\s*(?:comput[er]{1,2}|pc|system|mach[in]{1,3}e?|device|laptop|workstation)\s+(?:been\s+|being\s+)?(?:run[in]{1,3}g|on|up)\b', text_low) \
+                     or re.search(r'\b(?:what(?:\x27s|\s+is)\s+(?:my|the)?\s*(?:system\s+)?uptime|(?:system\s+)?uptime|check\s+(?:my|the)?\s*uptime|how\s+long\s+(?:has\s+it|have\s+you|is\s+it)\s+(?:been\s+|being\s+)?(?:run[in]{1,3}g|on|up))\b', text_low) \
+                     or text_low in ("system uptime", "uptime", "check uptime", "what is uptime", "how long is the system running", "how long is the system being running"):
+                    params["action"] = "uptime"
+                # ── Voice Listening Controls ──
+                elif any(k in text_low for k in ["toggle voice listening", "toggle listening", "toggle mic", "toggle microphone"]):
+                    params["action"] = "toggle_listening"
+                elif any(k in text_low for k in ["start listening", "resume listening", "unmute mic", "unmute microphone", "start voice listening"]):
+                    params["action"] = "start_listening"
+                elif any(k in text_low for k in ["stop listening", "pause listening", "mute mic", "mute microphone", "stop voice listening"]):
+                    params["action"] = "stop_listening"
                 # ── Disk / Storage diagnostics ──
                 elif any(k in text_low for k in ["all disks", "all drives"]):
                     params["action"] = "all_disks"
-                elif any(k in text_low for k in ["disk", "storage", "free space", "drive info"]):
+                elif any(k in text_low for k in ["disk", "storage", "free space", "drive info", "how much disk space is available", "available disk space", "free disk space", "storage left", "space left"]) or re.search(r'\b(?:storage|disk\s+space|space)\s+(?:left|remaining|free)\b', text_low):
                     params["action"] = "disk"
-                    m_dr = re.search(r'\b([a-zA-Z]):|\b(?:drive|on|in)\s+([a-zA-Z])\b', user_input, re.IGNORECASE)
+                    m_dr = re.search(r'\b([a-zA-Z]):|\b(?:drive|on|in)\s+(?:the\s+)?([a-zA-Z])(?:\s+drive)?\b', user_input, re.IGNORECASE)
                     if m_dr:
                         params["drive"] = (m_dr.group(1) or m_dr.group(2)).upper() + ":"
-                # ── Running processes / applications ──
+                    else:
+                        params["drive"] = "C:"
+                # ── Running processes / applications & Top resource consumers ──
+                elif re.search(r'\b(?:which|what)\s+(?:ap{1,2}l(?:ication)?|apps?|proce?ss|program)\s+(?:is\s+)?(?:using|taking|consuming)\s+(?:the\s+)?most\s+(?:of\s+the\s+)?(?:cpu|proce?ss?or|ram|memm?ory)\b', text_low) \
+                     or re.search(r'\b(?:what(?:\x27s|\s+is)\s+using|which\s+(?:ap{1,2}l(?:ication)?|apps?|proce?ss|program)\s+uses)\s+(?:the\s+)?most\s+(?:of\s+the\s+)?(?:cpu|proce?ss?or|ram|memm?ory)\b', text_low) \
+                     or re.search(r'\b(?:proce?ss|app(?:lication)?|program)\s+with\s+(?:the\s+)?highest\s+(?:cpu|ram|memm?ory)(?:\s+usage)?\b', text_low):
+                    params["action"] = "top_processes"
+                    params["sort_by"] = "cpu" if any(c in text_low for c in ["cpu", "processor"]) else "memory"
+                    params["n"] = 1
                 elif any(k in text_low for k in ["what applications are currently running", "what applications are open", "what processes are running", "show me currently running programs", "currently running programs", "currently running applications", "what apps are currently running", "what programs are open right now", "list all processes", "show all processes", "all running processes"]):
                     params["action"] = "list_processes"
                     params["sort_by"] = "cpu" if "cpu" in text_low else "memory"
-                elif any(k in text_low for k in ["top processes", "running processes"]):
+                elif any(k in text_low for k in ["top processes", "running processes", "top cpu processes", "top memory processes"]):
                     params["action"] = "top_processes"
                     params["sort_by"] = "cpu" if "cpu" in text_low else "memory"
+                    params["n"] = 5
                 # ── Wallpaper ──────────────────────────────────────────────────
                 elif re.search(r'\b(?:set|change)\s+(?:my\s+)?wallpaper\s+(?:to\s+)?(.+)\b', text_low):
                     m_wp = re.search(r'\b(?:set|change)\s+(?:my\s+)?wallpaper\s+(?:to\s+)?(.+)\b', user_input, re.IGNORECASE)
@@ -2608,6 +2884,8 @@ class UnifiedCommandRouter:
                 elif ("cpu" in text_low and "ram" in text_low and "gpu" in text_low) or any(k in text_low for k in ["system usage", "system telemetry", "hardware telemetry", "show system usage", "check system usage"]):
                     params["action"] = "system_telemetry_summary"
                 elif any(k in text_low for k in [
+                    "gpu status", "gpu staus", "graphics card status", "check gpu status", "what is my gpu status",
+                    "what is the gpu status", "what's my gpu status", "check my gpu status",
                     "gpu memory am i using", "how much gpu memory", "gpu memory am i", "how much gpu",
                     "gpu usage", "gpu telemetry", "check gpu", "check my gpu",
                     "graphics card usage", "graphics card telemetry"
@@ -2625,9 +2903,13 @@ class UnifiedCommandRouter:
                     params["action"] = "detailed_cpu"
                 elif any(k in text_low for k in ["cpu", "processor"]) and not any(k in text_low for k in ["ram", "gpu", "top processes", "wallpaper"]):
                     params["action"] = "cpu_metrics"
-                elif any(k in text_low for k in ["check my ram", "check ram", "ram metrics", "what is my ram usage", "how much ram is free"]):
+                elif any(k in text_low for k in [
+                    "check my ram", "check ram", "ram metrics", "what is my ram usage", "how much ram is free",
+                    "how much ram is being used", "how much ram is in use", "how much ram is used",
+                    "how much memory is being used", "how much memory is in use", "how much memory is used"
+                ]):
                     params["action"] = "ram_metrics"
-                elif any(k in text_low for k in ["detailed ram", "ram details", "detailed memory", "how much ram", "ram do i have", "what is my ram"]):
+                elif any(k in text_low for k in ["detailed ram", "ram details", "detailed memory", "how much ram do i have", "ram do i have", "what is my ram", "total ram"]):
                     params["action"] = "detailed_ram"
                 elif (re.search(r'\bram\b', text_low) or any(k in text_low for k in ["memory usage of the computer", "available ram", "used ram", "how much ram", "ram usage"])) and not any(k in text_low for k in ["cpu", "gpu", "top processes", "vram", "wallpaper"]):
                     params["action"] = "ram_metrics"
@@ -2714,7 +2996,7 @@ class UnifiedCommandRouter:
                     params["resolved_action"] = "BLUETOOTH_QUERY"
                     params["executor_action"] = "bluetooth_status"
                 # ── Environment local state ────────────────────────────────────
-                elif any(k in text_low for k in ["what application is currently active", "what application is active", "what is the active application", "what's the active application", "active application", "current application", "which application is active", "what app is active", "what app is currently active"]):
+                elif any(k in text_low for k in ["what application is currently active", "what application is active", "what is the active application", "what's the active application", "active application", "current application", "which application is active", "what app is active", "what app is currently active", "what is the current app i am using right now", "what is the current app i am using", "what app am i using right now", "what app am i using", "which app am i using", "which application am i using right now", "which application am i using", "what application am i using right now", "what application am i using", "active app", "current app"]) or re.search(r'\b(?:which|what)\s+(?:application|app)\s+am\s+i\s+(?:currently\s+)?(?:using|in|on)\b', text_low):
                     params["action"] = "active_application"
                     params["requested_device_target"] = "application"
                     params["requested_action"] = "ACTIVE_APP_QUERY"
@@ -2818,34 +3100,84 @@ class UnifiedCommandRouter:
                     params["action"] = "desktop_stats"
 
                 # ── Type text ──────────────────────────────────────────────────
-                elif re.search(r'\b(?:type|write)\s+(?!(?:to\b|(?:an?\s+)?(?:note|code|python|script|report|document|email|mail|record|reminder)\b))(.+)', text_low):
-                    # Guard: verify this is not a contextual artifact insertion request
-                    is_artifact_insertion = False
-                    try:
-                        from core.artifact_resolver import get_artifact_reference_resolver
-                        art_res = get_artifact_reference_resolver().resolve(user_input=user_input)
-                        if art_res.is_success or art_res.is_ambiguous:
-                            is_artifact_insertion = True
-                    except Exception:
-                        pass
-                    if not is_artifact_insertion:
-                        m_type = re.search(r'\b(?:type|write)\s+(?!(?:to\b|(?:an?\s+)?(?:note|code|python|script|report|document|email|mail|record|reminder)\b))(.+)', user_input, re.IGNORECASE)
-                        if not m_type:
-                            m_type = re.search(r'\bput\s+(?!(?:an?\s+)?(?:file|folder|document)\b)(.+?)\s+(?:in|into|inside|there)(?:\s+it)?[.!?]?$', user_input, re.IGNORECASE)
-                        text_to_type = m_type.group(1).strip(' "\'') if m_type else ""
-                        params["action"] = "type_text"
-                        params["text"] = text_to_type
-                        params["entity_type"] = "TEXT"
+                elif re.search(r'\b(?:type|write)[:\s]+\s*(?!(?:to\b|are\s+you|(?:an?\s+)?(?:note|code|python|script|report|document|email|mail|record|reminder)\b))(.+)', text_low):
+                    # Guard 1: reject negation-prefixed commands ("no", "don't", "I said you don't")
+                    _t_raw_low = user_input.lower().strip()
+                    is_negation = bool(re.match(
+                        r'^\s*(?:no[,\s]|don\'t|i\s+said|wait|actually|stop|cancel|never\s+mind|not)',
+                        _t_raw_low
+                    ))
+                    # Guard 2: reject conversational inquiries ("are you able to see...", "can you see...")
+                    is_conversational_type_inquiry = bool(re.search(
+                        r'\b(?:are\s+you|can\s+you|do\s+you|will\s+you)\b',
+                        _t_raw_low
+                    ))
+                    # Guard 3: reject implicit corrections about typing ("I said you don't type", "you don't type")
+                    is_correction = bool(re.search(
+                        r"\b(?:i\s+said|you\s+don'?t|don'?t\s+type|don'?t\s+write|i\s+didn't\s+say|i\s+never\s+said)\b",
+                        _t_raw_low
+                    ))
+                    # Guard 4: reject conversational mentions ("why did you type", "did you type", "stop typing", "what did you type")
+                    is_conversational_mention = bool(re.search(
+                        r"\b(?:why\s+did\s+you|did\s+you\s+type|stop\s+typing|what\s+did\s+you|what\s+are\s+you\s+typing|you\s+typed|didn't\s+ask\s+you\s+to\s+type)\b",
+                        _t_raw_low
+                    ))
+                    if not is_negation and not is_conversational_type_inquiry and not is_correction and not is_conversational_mention:
+                        # Guard artifact insertion
+                        is_artifact_insertion = False
+                        try:
+                            from core.artifact_resolver import get_artifact_reference_resolver
+                            art_res = get_artifact_reference_resolver().resolve(user_input=user_input)
+                            if art_res.is_success or art_res.is_ambiguous:
+                                is_artifact_insertion = True
+                        except Exception:
+                            pass
+                        if not is_artifact_insertion:
+                            m_type = re.search(r'\b(?:type|write|enter)[:\s]+\s*(?:exactly\s*[:\s]*)?(?!(?:to\b|(?:an?\s+)?(?:note|code|python|script|report|document|email|mail|record|reminder)\b))(.+)', user_input, re.IGNORECASE)
+                            if not m_type:
+                                m_type = re.search(r'\bput\s+(?!(?:an?\s+)?(?:file|folder|document)\b)(.+?)\s+(?:in|into|inside|there)(?:\s+it)?[.!?]?$', user_input, re.IGNORECASE)
+                            raw_typed = m_type.group(1).strip(' "\'') if m_type else ""
+                            m_into = re.search(r'^(.*?)\s+(?:in|into|on)\s+(?:notepad|word|wordpad|editor|document|file)\s*$', raw_typed, re.IGNORECASE)
+                            if m_into:
+                                raw_typed = m_into.group(1).strip(' "\'')
+                            params["action"] = "type_text"
+                            params["text"] = raw_typed
+                            params["entity_type"] = "TEXT"
 
                 # ── Installed games & software ─────────────────────────────────
-                elif any(k in text_low for k in ["games are installed", "installed games", "list games"]):
+                elif any(k in text_low for k in ["games are installed", "installed games", "list games", "list installed games", "show installed games"]):
                     params["action"] = "list_installed_games"
-                elif any(k in text_low for k in ["apps are installed", "installed apps", "installed applications", "installed software"]):
+                elif any(k in text_low for k in ["browser", "browsers"]) and any(k in text_low for k in ["installed", "list", "show", "find", "what", "which"]):
+                    params["action"] = "list_installed_browsers"
+                elif any(k in text_low for k in ["apps are installed", "applications are installed", "installed apps", "installed applications", "installed software", "list installed apps", "list installed applications", "show installed applications", "find my installed", "find installed"]):
                     params["action"] = "list_installed_applications"
 
                 else:
-                    g = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group(0)
-                    params["action"] = g.strip().lower()
+                    # Fallback: infer action from natural-language telemetry queries not caught above
+                    _t = text_low
+                    if any(k in _t for k in ["gpu", "graphics card", "graphics"]):
+                        # Prefer hardware_info for identity queries, gpu_telemetry for usage/status
+                        if any(k in _t for k in ["using", "running", "have", "installed", "does this", "is this", "identify"]):
+                            params["action"] = "gpu_telemetry"
+                        else:
+                            params["action"] = "gpu_telemetry"
+                    elif any(k in _t for k in ["cpu", "processor"]):
+                        params["action"] = "cpu_metrics"
+                    elif any(k in _t for k in ["ram", "memory"]):
+                        params["action"] = "ram_metrics"
+                    elif any(k in _t for k in ["disk", "storage"]):
+                        params["action"] = "disk"
+                    elif "battery" in _t:
+                        params["action"] = "battery"
+                    elif "uptime" in _t:
+                        params["action"] = "uptime"
+                    elif any(k in _t for k in ["browser", "browsers"]):
+                        params["action"] = "list_installed_browsers"
+                    elif any(k in _t for k in ["volume", "sound"]):
+                        params["action"] = "get_volume"
+                    else:
+                        g = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group(0)
+                        params["action"] = g.strip().lower()
             elif intent == Intent.FILE_OPERATIONS:
                 text_low = user_input.lower()
                 clean_f_low = re.sub(r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|nova|trevon|jarvis|assistant|computer)[,\s:]*', '', text_low).strip()
@@ -3081,22 +3413,27 @@ class UnifiedCommandRouter:
                     params["target"] = m.group(1).strip(' "\'') if m else ""
             elif intent == Intent.MUSIC:
                 text_low = user_input.lower().strip()
-                if any(k in text_low for k in ["toggle playback", "play/pause", "play pause"]):
+                clean_cmd = re.sub(r'^(?:please\s+|can\s+you\s+|could\s+you\s+)', '', text_low).strip()
+                clean_cmd = re.sub(r'^(?:(?:hey|ok|hi)\s+)?(?:friday|trevon|assistant|nova)[,\s]*', '', clean_cmd).strip()
+
+                if any(k in clean_cmd for k in ["toggle playback", "play/pause", "play pause"]):
                     params["action"] = "toggle"
-                elif any(k in text_low for k in ["summarize", "summary"]):
+                elif any(k in clean_cmd for k in ["summarize", "summary"]):
                     params["action"] = "summarize_video"
-                elif any(k in text_low for k in ["queue", "playlist", "what's playing", "now playing"]):
+                elif any(k in clean_cmd for k in ["queue", "playlist", "what's playing", "now playing", "what song is playing"]):
                     params["action"] = "queue_status"
-                elif re.search(r'\b(pause|hold)\b', text_low) and not text_low.startswith("play"):
-                    params["action"] = "pause"
-                elif re.search(r'\b(resume|unpause)\b', text_low):
-                    params["action"] = "resume"
-                elif re.search(r'\b(stop)\b', text_low) and not text_low.startswith("play"):
-                    params["action"] = "stop"
-                elif re.search(r'\b(next|skip)\b', text_low) and not text_low.startswith("play"):
+                elif re.search(r'\b(?:play\s+)?next\s+(?:song|track)\b|\bskip\b', clean_cmd):
                     params["action"] = "next"
-                elif re.search(r'\b(previous|prev)\b', text_low) and not text_low.startswith("play"):
+                elif re.search(r'\b(?:play\s+)?(?:previous|prev)\s+(?:song|track)\b|\bgo\s+back\b', clean_cmd):
                     params["action"] = "previous"
+                elif re.search(r'\b(?:stop\s+(?:playing\s+)?(?:the\s+)?(?:music|songs?|audio|playback)|stop\s+playing)\b|^stop$', clean_cmd):
+                    params["action"] = "stop"
+                elif re.search(r'\b(?:pause\s+(?:the\s+)?(?:music|songs?|audio|playback)|pause)\b', clean_cmd):
+                    params["action"] = "pause"
+                elif re.search(r'\b(?:resume\s+(?:the\s+)?(?:music|songs?|audio|playback)|unpause|resume)\b', clean_cmd):
+                    params["action"] = "resume"
+                elif re.search(r'\b(?:video\s+song|music\s+video|watch\s+video|show\s+video)\b', clean_cmd):
+                    params["action"] = "play_video"
                 else:
                     params["action"] = "play"
             elif intent == Intent.DOCUMENT_GENERATION:
@@ -3164,32 +3501,22 @@ class UnifiedCommandRouter:
                     params["action"] = "generate_code"
             elif intent == Intent.DAILY_BRIEFING:
                 text_low = user_input.lower()
+                _briefing_keywords = [
+                    "daily briefing", "morning briefing", "morning update", "give me my briefing",
+                    "brief me", "daily update", "morning report", "daily report"
+                ]
                 _sched_keywords = [
                     "what do i have", "what's on my schedule", "whats on my schedule",
                     "what is on my schedule", "what's planned", "whats planned", "what is planned",
-                    "what do i need to do", "what do i have to do", "schedule today", "schedule tomorrow"
+                    "what do i need to do", "what do i have to do", "schedule today", "schedule tomorrow",
+                    "do i have any events", "my events today", "any events today", "any meetings today"
                 ]
-                if any(k in text_low for k in _sched_keywords):
+                if any(k in text_low for k in _briefing_keywords):
+                    params["action"] = "daily_briefing"
+                elif any(k in text_low for k in _sched_keywords) and not any(h in text_low for h in ["holiday", "festival", "special day", "working day", "observed"]):
                     params["action"] = "personal_schedule"
                 else:
-                    # Route to calendar_query when creation/event/meeting/appointment keywords present.
-                    # This ensures "add a meeting tomorrow" reaches process_calendar_query,
-                    # not the daily-briefing summary handler.
-                    _calendar_keywords = [
-                        "calendar", "event", "events", "meeting", "appointment",
-                        "schedule", "create", "add", "move", "rename", "reschedule",
-                        "cancel", "next appointment", "upcoming appointment", "next meeting",
-                        "plan my week", "weekly plan", "holiday", "holidays", "festival",
-                        "time of", "change the time", "update the time",
-                        "free", "busy", "slot", "slots", "agenda", "note", "notes",
-                        "analytics", "utilization", "ics", "sync", "snooze", "huddle", "standup"
-                    ]
-                    _creation_verbs = ("create", "schedule", "add", "put", "book", "set up", "move", "rename", "reschedule", "cancel")
-                    _is_creation = any(text_low.startswith(v) or (" " + v + " ") in text_low for v in _creation_verbs)
-                    if any(k in text_low for k in _calendar_keywords) or _is_creation:
-                        params["action"] = "calendar_query"
-                    else:
-                        params["action"] = "daily_briefing"
+                    params["action"] = "calendar_query"
             elif intent == Intent.WEATHER_QUERY:
                 from extensions.weather_engine import _default_weather_engine
                 extracted_loc = _default_weather_engine.extract_location(user_input)
@@ -3357,6 +3684,29 @@ class UnifiedCommandRouter:
             elif intent == Intent.GAME_DISCOVERY:
                 params["action"] = "game_discovery"
                 params["query"] = user_input
+            elif intent == Intent.VOICE_CONFIGURATION:
+                text_low = user_input.lower().strip()
+                if any(w in text_low for w in ["slower", "more slowly", "slow down"]):
+                    params["action"] = "decrease_rate"
+                elif any(w in text_low for w in ["faster", "more quickly", "speed up"]):
+                    params["action"] = "increase_rate"
+                elif any(w in text_low for w in ["reset", "normal speed", "natural speed"]):
+                    params["action"] = "reset_rate"
+                elif any(w in text_low for w in ["restore", "previous voice"]):
+                    params["action"] = "restore_voice"
+                else:
+                    params["action"] = "change_language"
+                    for lang in ["telugu", "hindi", "tamil", "kannada", "malayalam", "spanish", "french", "german", "english"]:
+                        if lang in text_low:
+                            params["language"] = lang
+                            break
+                    if "language" not in params:
+                        if any(w in text_low for w in ["తెలుగు", "matladu", "matladandi", "cheppu"]):
+                            params["language"] = "telugu"
+                        elif any(w in text_low for w in ["हिंदी", "bolo", "boliye", "baat karo"]):
+                            params["language"] = "hindi"
+                        elif any(w in text_low for w in ["தமிழ்", "pesu"]):
+                            params["language"] = "tamil"
         except IndexError:
             params["action"] = match.group(0).strip().lower() if match.lastindex else ""
         return params
@@ -3679,11 +4029,21 @@ class UnifiedCommandRouter:
 
         # ── MUSIC ───────────────────────────────────────────────────────────
         elif intent == Intent.MUSIC:
-            music_map = {
-                "play": "play", "pause": "pause", "resume": "resume",
-                "stop": "stop", "next": "next", "previous": "previous", "skip": "next",
-            }
-            params["action"] = music_map.get(action_raw, "play")
+            try:
+                from modules.music.music_controller import MusicCommandParser
+                _p = MusicCommandParser().parse(user_input)
+                if _p.is_transport:
+                    params["action"] = _p.transport_action
+                elif _p.is_video_requested:
+                    params["action"] = "play_video"
+                else:
+                    params["action"] = "play"
+            except Exception:
+                music_map = {
+                    "play": "play", "pause": "pause", "resume": "resume",
+                    "stop": "stop", "next": "next", "previous": "previous", "skip": "next",
+                }
+                params["action"] = music_map.get(action_raw, "play")
 
         # ── WEATHER QUERY ───────────────────────────────────────────────────
         elif intent == Intent.WEATHER_QUERY:
@@ -3735,6 +4095,7 @@ class UnifiedCommandRouter:
         params_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute a single action based on intent routing. Enforces one input -> one action."""
+        from datetime import datetime, timedelta
         try:
             # Check if assistant name is present (addressing signal, not mandatory)
             has_assistant_name = contains_assistant_name(user_input)
@@ -3747,6 +4108,7 @@ class UnifiedCommandRouter:
                 cmd_id = getattr(s_cmd, "command_id", "cmd_canonical")
                 self.logger.info(f"[TYPED_SEMANTIC_PROPAGATION] TraceID={cmd_id} Step={params.get('step_sequence', 0)} Intent={intent.name} Action={params.get('action', '')}")
             self.logger.info(f"Command routed: {intent.name} (assistant_name_present: {has_assistant_name})")
+            self.logger.info(f"[ROUTER_DISPATCH] uid={user_id} intent={intent.name} action={params.get('action')} target={params.get('target', params.get('name', ''))}")
 
             # P0: Validate Device Action Agreement before execution
             req_dev_target = params.get("requested_device_target")
@@ -3772,6 +4134,7 @@ class UnifiedCommandRouter:
                     "_clarification_reason",
                     "I'm not sure what you mean. Could you clarify?"
                 )
+                return self._clarification_response(reason, user_input)
             # ── Contextual Resolution Gates (Phase 4.1 & Level 5) ──────────
             if user_input.startswith(("clarify_close_app", "clarify_other_app")):
                 apps_match = re.search(r'(?:clarify_close_app|clarify_other_app)\s+(.+)', user_input)
@@ -3833,6 +4196,14 @@ class UnifiedCommandRouter:
                     "status": "clarification_needed",
                     "intent": "FILE_OPERATIONS",
                     "response": "I don't have an active file in context. Please specify which file you want to delete.",
+                    "handled": True
+                }
+
+            if params and params.get("_needs_clarification"):
+                return {
+                    "status": "clarification_needed",
+                    "intent": intent.name,
+                    "response": params.get("_clarification_reason", "I'm not sure exactly what you'd like to do. Could you clarify?"),
                     "handled": True
                 }
 
@@ -4040,17 +4411,17 @@ class UnifiedCommandRouter:
                             result["response"] = "Could not capture screenshot."
                     elif action == "increase_volume":
                         from modules.system_controller import volume_up
-                        amt = params.get("amount", 10)
+                        amt = params.get("amount") or params.get("step") or 10
                         v_res = volume_up(steps=amt)
                         result["status"] = "success" if v_res.get("success") else "error"
-                        result["response"] = v_res.get("message", "Volume increased.")
+                        result["response"] = v_res.get("message", f"Volume increased to {v_res.get('level')}%.")
                         result.update(v_res)
                     elif action == "decrease_volume":
                         from modules.system_controller import volume_down
-                        amt = params.get("amount", 10)
+                        amt = params.get("amount") or params.get("step") or 10
                         v_res = volume_down(steps=amt)
                         result["status"] = "success" if v_res.get("success") else "error"
-                        result["response"] = v_res.get("message", "Volume decreased.")
+                        result["response"] = v_res.get("message", f"Volume decreased to {v_res.get('level')}%.")
                         result.update(v_res)
                     elif action == "set_volume":
                         from modules.system_controller import set_volume
@@ -4067,6 +4438,19 @@ class UnifiedCommandRouter:
                         result["status"] = "success" if v_res.get("success") else "error"
                         result["response"] = v_res.get("message", "Volume checked.")
                         result.update(v_res)
+                    elif action == "clarify_volume":
+                        # Ambiguous transcription — e.g. "Friday is the volume by 12%"
+                        ambiguous_input = params.get("ambiguous_input", user_input)
+                        result["status"] = "clarification_needed"
+                        result["action"] = "clarify_volume"
+                        result["clarification_needed"] = "volume_direction"
+                        result["response"] = (
+                            f"I heard \"{ambiguous_input}\", but I'm not sure whether you want to "
+                            "increase or decrease the volume. Could you say 'increase volume by 12%' "
+                            "or 'decrease volume by 12%'?"
+                        )
+                        result["handled"] = True
+                        return result
                     elif action in ["mute", "unmute"]:
                         from modules.system_controller import set_mute
                         is_mute = (action == "mute")
@@ -4107,6 +4491,47 @@ class UnifiedCommandRouter:
                         result["status"] = "success" if bat.get("success") else "error"
                         result["response"] = bat.get("message", "Battery status checked.")
                         result.update(bat)
+                    elif action == "uptime":
+                        from modules.system_controller import get_uptime
+                        u_res = get_uptime()
+                        result["status"] = "success" if u_res.get("success") else "error"
+                        result["action"] = "uptime"
+                        result["response"] = u_res.get("message", "Uptime checked.")
+                        result.update(u_res)
+                        result["telemetry_type"] = "uptime"
+                    elif action in ("toggle_listening", "toggle_voice_listening"):
+                        from legacy.sst import is_continuous_audio_running, start_continuous_audio_stream, stop_continuous_audio_stream
+                        from core.voice_lifecycle import VoiceLifecycleManager
+                        vlm = VoiceLifecycleManager()
+                        if is_continuous_audio_running():
+                            stop_continuous_audio_stream()
+                            vlm.on_mic_closed()
+                            msg = "Continuous voice listening paused."
+                        else:
+                            start_continuous_audio_stream()
+                            vlm.on_vad_listening()
+                            msg = "Continuous voice listening active."
+                        result["status"] = "success"
+                        result["action"] = action
+                        result["response"] = msg
+                    elif action in ("start_listening", "resume_listening", "unmute_mic", "unmute_microphone"):
+                        from legacy.sst import is_continuous_audio_running, start_continuous_audio_stream
+                        from core.voice_lifecycle import VoiceLifecycleManager
+                        if not is_continuous_audio_running():
+                            start_continuous_audio_stream()
+                        VoiceLifecycleManager().on_vad_listening()
+                        result["status"] = "success"
+                        result["action"] = action
+                        result["response"] = "Continuous voice listening active."
+                    elif action in ("stop_listening", "pause_listening", "mute_mic", "mute_microphone"):
+                        from legacy.sst import is_continuous_audio_running, stop_continuous_audio_stream
+                        from core.voice_lifecycle import VoiceLifecycleManager
+                        if is_continuous_audio_running():
+                            stop_continuous_audio_stream()
+                        VoiceLifecycleManager().on_mic_closed()
+                        result["status"] = "success"
+                        result["action"] = action
+                        result["response"] = "Continuous voice listening paused."
                     elif action == "disk":
                         from modules.system_controller import get_disk_space
                         _drive = params.get("drive", "C:")
@@ -4116,8 +4541,9 @@ class UnifiedCommandRouter:
                         result.update(disk)
                     elif action == "top_processes":
                         from modules.system_controller import get_top_processes
-                        sort_by = params.get("sort_by", "memory")
-                        procs = get_top_processes(n=5, sort_by=sort_by)
+                        sort_by = params.get("sort_by", "cpu" if any(c in user_input.lower() for c in ["cpu", "processor"]) else "memory")
+                        n_proc = params.get("n", 1 if any(w in user_input.lower() for w in ["which", "what", "most", "highest"]) else 5)
+                        procs = get_top_processes(n=n_proc, sort_by=sort_by)
                         result["status"] = "success" if procs.get("success") else "error"
                         result["response"] = procs.get("message", "Top processes checked.")
                         result.update(procs)
@@ -4257,6 +4683,49 @@ class UnifiedCommandRouter:
                         result["status"] = "success" if clip_res.get("success") else "error"
                         result["response"] = clip_res.get("message", "Clipboard analyzed.")
                         result.update(clip_res)
+                    # ── Software Management & Privileged Service Control ──
+                    elif action in ("install_software", "uninstall_software"):
+                        from modules.system_controller import execute_action
+                        effective_uid = user_id or 1
+                        pkg = params.get("package_name") or params.get("name")
+                        act_res = execute_action({
+                            "action": action,
+                            "name": pkg,
+                            "package": pkg
+                        }, confirm=True, user_id=effective_uid)
+                        is_ok = act_res.get("success", False)
+                        result["status"] = "success" if is_ok else act_res.get("status", "error")
+                        result["response"] = act_res.get("message") or f"Software {action} completed."
+                        result.update(act_res)
+                    elif action == "service_control":
+                        from modules.system_controller import execute_action
+                        effective_uid = user_id or 1
+                        svc = params.get("service_name") or params.get("name")
+                        sub_act = params.get("sub_action", "restart")
+                        act_res = execute_action({
+                            "action": "service_control",
+                            "name": svc,
+                            "command": sub_act,
+                            "service": svc
+                        }, confirm=True, user_id=effective_uid)
+                        is_ok = act_res.get("success", False)
+                        result["status"] = "success" if is_ok else act_res.get("status", "error")
+                        result["response"] = act_res.get("message") or f"Service {sub_act} completed."
+                        result.update(act_res)
+                    elif action in ("test_elevation", "elevation", "request_elevation"):
+                        from modules.system_controller import execute_action
+                        effective_uid = user_id or 1
+                        act_res = execute_action({
+                            "action": "test_elevation",
+                            "name": "elevation_test"
+                        }, confirm=True, user_id=effective_uid)
+                        is_ok = bool(act_res.get("success", False) and act_res.get("verified", False))
+                        result.update(act_res)
+                        status = "verified" if is_ok else act_res.get("status", "error")
+                        result["status"] = status
+                        result["verified"] = is_ok
+                        result["success"] = is_ok
+                        result["response"] = act_res.get("message") or ("Administrator elevation verified successfully." if is_ok else "Elevation request failed.")
                     # ── Wi-Fi ────────────────────────────────────────────────
                     elif action == "wifi_status":
                         from modules.system_controller import get_wifi_status
@@ -4461,26 +4930,59 @@ class UnifiedCommandRouter:
                         result["entity_type"] = "TEXT"
                         result["text"] = text_to_type
                         result["response"] = f"Typed: {text_to_type}"
-                    elif action in ("list_installed_games", "list_installed_applications"):
+                    elif action in ("list_installed_games", "list_installed_applications", "list_installed_browsers"):
                         try:
                             from modules.system_controller.universal_computer_access import universal_computer_access
-                            apps = universal_computer_access.enumerate_installed_applications()
+                            raw_apps = universal_computer_access.enumerate_installed_applications()
+                            app_names = []
+                            for a in raw_apps:
+                                if isinstance(a, dict):
+                                    n = a.get("name") or a.get("display_name")
+                                    if n:
+                                        app_names.append(str(n))
+                                elif a:
+                                    app_names.append(str(a))
+
                             if action == "list_installed_games":
                                 game_keywords = ["game", "steam", "epic", "riot", "blizzard", "ubisoft", "ea", "minecraft", "roblox", "witcher", "cyberpunk", "gta", "halo", "duty", "fifa", "forza"]
-                                games = [a for a in apps if any(k in a.lower() for k in game_keywords)]
+                                games = [name for name in app_names if any(k in name.lower() for k in game_keywords)]
                                 if games:
                                     msg = f"Found {len(games)} game(s) or gaming platforms installed: {', '.join(games[:8])}."
-                                elif apps:
-                                    msg = f"No dedicated standalone games detected, but found {len(apps)} installed applications on your PC."
+                                elif app_names:
+                                    msg = f"No dedicated standalone games detected, but found {len(app_names)} installed applications on your PC."
                                 else:
                                     msg = "No installed games detected on this system."
                                 result["status"] = "success"
                                 result["response"] = msg
                                 result["games"] = games
+                            elif action == "list_installed_browsers":
+                                detected_browsers = universal_computer_access.detect_available_browsers()
+                                name_map = {
+                                    "chrome": "Google Chrome",
+                                    "edge": "Microsoft Edge",
+                                    "brave": "Brave Browser",
+                                    "firefox": "Mozilla Firefox",
+                                    "opera": "Opera",
+                                    "vivaldi": "Vivaldi",
+                                    "tor": "Tor Browser",
+                                }
+                                browser_names = [name_map.get(b.lower(), b.capitalize()) for b in detected_browsers]
+                                for app in app_names:
+                                    low_app = app.lower()
+                                    for b_key, b_disp in name_map.items():
+                                        if b_key in low_app and b_disp not in browser_names and not any(bad in low_app for bad in ["webview", "driver", "crashpad", "update"]):
+                                            browser_names.append(b_disp)
+                                if browser_names:
+                                    msg = f"Found {len(browser_names)} installed browser(s) on your PC: {', '.join(browser_names)}."
+                                else:
+                                    msg = "No standalone web browsers were detected on your PC."
+                                result["status"] = "success"
+                                result["response"] = msg
+                                result["browsers"] = browser_names
                             else:
                                 result["status"] = "success"
-                                result["response"] = f"Found {len(apps)} installed application(s) on your PC: {', '.join(apps[:10])}."
-                                result["applications"] = apps
+                                result["response"] = f"Found {len(app_names)} installed application(s) on your PC: {', '.join(app_names[:10])}."
+                                result["applications"] = app_names
                         except Exception as e:
                             result["status"] = "error"
                             result["response"] = f"Could not inspect installed applications: {e}"
@@ -4885,18 +5387,44 @@ class UnifiedCommandRouter:
                         except Exception:
                             pass
                         return result
+                    if action in ("switch", "switch_application", "focus") or any(user_input.lower().startswith(p) for p in ("switch to ", "switch back to ", "switch ", "bring up ", "bring ", "focus ")):
+                        # WINDOW SWITCHING / BRING TO FRONT
+                        from extensions.system.smart_opener import smart_opener
+                        app_state = smart_opener.get_app_state(target)
+                        display = app_state.get("display_name") or target
+                        result["action"] = "switch"
+                        if app_state.get("running"):
+                            if app_state.get("foreground"):
+                                result["status"] = "success"
+                                result["already_satisfied"] = True
+                                result["target"] = target
+                                result["app_name"] = display
+                                result["response"] = f"{display} is already open and active."
+                                return result
+                            else:
+                                focused = smart_opener.focus_app(target)
+                                result["status"] = "success"
+                                result["target"] = target
+                                result["app_name"] = display
+                                result["response"] = f"Switched to {display}." if focused else f"{display} is running, but could not bring its window to the front."
+                                return result
+                        else:
+                            result["status"] = "error"
+                            result["target"] = target
+                            result["app_name"] = display
+                            result["response"] = f"{display} is not currently running."
+                            return result
+
                     if action == "open":
                         clean_target = target.lower().strip().rstrip('.?!')
                         # Check for generic browser
                         if clean_target in ("browser", "the browser", "web browser", "internet", "default browser"):
                             from extensions.system.smart_opener import smart_opener
-                            from legacy.tts import speak
                             open_dict = smart_opener.smart_open("browser")
                             result["status"] = "success" if open_dict.get("success") else "error"
                             result["target"] = "browser"
                             result["app_name"] = "Browser"
                             result["response"] = open_dict.get("message", "Opened your browser.")
-                            speak("Opening your browser.")
                             try:
                                 from extensions.dialogue_state_manager import get_dialogue_manager
                                 dm = get_dialogue_manager(str(effective_uid))
@@ -4926,21 +5454,17 @@ class UnifiedCommandRouter:
                                     pass
                             if flight_url:
                                 from modules.browser.browser_controller import open_url
-                                from legacy.tts import speak
                                 open_url(flight_url)
                                 result["status"] = "success"
                                 result["url"] = flight_url
                                 result["response"] = f"Opened flight search: {flight_url}"
-                                speak("Opened your flight search.")
                                 return result
 
                         if clean_target in ["dashboard", "my dashboard", "the dashboard", "assistant dashboard", "ui dashboard"] or "dashboard" in clean_target:
                             from core.assistant_core import assistant_core
-                            from legacy.tts import speak
                             assistant_core.trigger_ui_action("open_dashboard")
                             result["status"] = "success"
                             result["response"] = "Opening your Dashboard."
-                            speak("Opening your Dashboard.")
                             return result
                         if any(w in clean_target for w in ["first result", "top result", "1st result", "first search result", "second result", "2nd result", "second search result", "2nd search result", "third result", "3rd result", "third search result", "3rd search result", "previous result", "previous search result"]):
                             ord_found = "first"
@@ -4986,8 +5510,6 @@ class UnifiedCommandRouter:
                         elif target.lower() in ["camera", "webcam"]:
                             # smart_opener handles camera via microsoft.windows.camera: URI
                             from extensions.system.smart_opener import smart_opener
-                            from legacy.tts import speak
-                            speak("Opening camera.")
                             open_dict = smart_opener.smart_open("camera")
                             if isinstance(open_dict, dict) and open_dict.get("success"):
                                 result["status"] = "success"
@@ -4996,7 +5518,6 @@ class UnifiedCommandRouter:
                                 msg = "Could not open camera."
                                 result["status"] = "error"
                                 result["response"] = msg
-                                speak(msg)
                         else:
                             # Check if target is a direct file path, 'file <path>', or conversational artifact reference (Section 4, 5, 11, 12)
                             from extensions.dialogue_state_manager import get_dialogue_manager
@@ -5182,7 +5703,6 @@ class UnifiedCommandRouter:
 
                             if os.path.exists(clean_path) and os.path.isfile(clean_path):
                                 from modules.system_controller.file_manager import open_file
-                                from legacy.tts import speak
                                 open_file(clean_path)
                                 f_name = os.path.basename(clean_path)
                                 result["status"] = "success"
@@ -5195,7 +5715,6 @@ class UnifiedCommandRouter:
                                     if dm and dm.current_state:
                                         dm.current_state.active_artifact = resolved_art
                                 result["response"] = f"Opened {f_name}."
-                                speak(result["response"])
                                 return result
 
                             # Check for typo correction or low-confidence / unknown target safety guard
@@ -5296,7 +5815,6 @@ class UnifiedCommandRouter:
                                         return result
 
                             # Universal path: smart_opener handles .exe, .lnk, Store, URI
-                            from legacy.tts import speak
                             open_dict = smart_opener.smart_open(target, new_instance=(instance_mode == "NEW"))
                             if isinstance(open_dict, dict) and open_dict.get("success"):
                                 display = open_dict.get("display_name") or target
@@ -5306,8 +5824,6 @@ class UnifiedCommandRouter:
                                 result["instance_mode"] = instance_mode
                                 resp_msg = open_dict.get("message") or (f"Opened another instance of {display}." if instance_mode == "NEW" else f"Opened {display}.")
                                 result["response"] = resp_msg
-                                speak_text = f"Opening another {display}." if instance_mode == "NEW" else f"Opening {display}."
-                                speak(speak_text)
                                 try:
                                     from extensions.dialogue_state_manager import get_dialogue_manager
                                     dm = get_dialogue_manager(str(effective_uid))
@@ -5371,7 +5887,6 @@ class UnifiedCommandRouter:
                                             result["files"] = [{"name": art_name, "path": art_path}]
                                             open_file(art_path)
                                             result["response"] = f"Opened presentation '{art_name}'."
-                                            speak(result["response"])
                                             return result
                                     except Exception:
                                         pass
@@ -5387,7 +5902,6 @@ class UnifiedCommandRouter:
                                             result["files"] = [{"name": f0_name, "path": exact_file}]
                                             open_file(exact_file)
                                             result["response"] = f"Opened presentation '{f0_name}'."
-                                            speak(result["response"])
                                             return result
 
                                     found_files = []
@@ -5412,7 +5926,6 @@ class UnifiedCommandRouter:
                                             result["status"] = "success"
                                             open_file(f0_path)
                                             result["response"] = f"Opened presentation '{f0_name}'."
-                                            speak(result["response"])
                                         else:
                                             f1_name = found_files[1].get("name")
                                             result["status"] = "waiting_for_user"
@@ -5426,7 +5939,6 @@ class UnifiedCommandRouter:
                                                 dm.current_state.goal_status = "WAITING_FOR_USER"
                                             except Exception:
                                                 pass
-                                            speak(result["response"])
                                         return result
 
                                 from modules.system_controller.app_launcher import launch_game
@@ -5435,14 +5947,12 @@ class UnifiedCommandRouter:
                                     result["status"] = "success"
                                     result["target"] = target
                                     result["response"] = g_res.get("message", f"Launching '{target}'.")
-                                    speak(result["response"])
                                     return result
 
                                 msg = (open_dict.get("message") if isinstance(open_dict, dict) else None) \
                                       or f"Could not find '{target}' on your system."
                                 result["status"] = "error"
                                 result["response"] = msg
-                                speak(msg)
                     else:
                         # Close application or terminate process
                         if params.get("action") == "terminate_process" or any(k in user_input.lower() for k in ["kill", "terminate", "process"]):
@@ -6314,20 +6824,26 @@ class UnifiedCommandRouter:
                             )
                             
                             if reminder_id:
-                                # Also register with in-memory scheduler
-                                due_datetime = datetime.strptime(parse_result["due_at"], "%Y-%m-%d %H:%M:%S")
-                                scheduler.add_reminder_at_time(parse_result["task_text"], due_datetime, str(reminder_id), user_id)
-                                
-                                # Format response
-                                due_time = datetime.strptime(parse_result["due_at"], "%Y-%m-%d %H:%M:%S")
-                                time_str = due_time.strftime("%I:%M %p") if due_time.date() == datetime.now().date() else due_time.strftime("%B %d at %I:%M %p")
-                                
-                                response = f"Reminder set: {parse_result['task_text']} at {time_str}"
-                                if parse_result.get("recurrence"):
-                                    response += f" (recurring {parse_result['recurrence']['frequency']})"
-                                
-                                result["status"] = "success"
-                                result["response"] = response
+                                try:
+                                    # Also register with in-memory scheduler
+                                    due_datetime = datetime.strptime(parse_result["due_at"], "%Y-%m-%d %H:%M:%S")
+                                    scheduler.add_reminder_at_time(parse_result["task_text"], due_datetime, str(reminder_id), user_id, recurrence=parse_result.get("recurrence"))
+                                    
+                                    # Format response
+                                    due_time = datetime.strptime(parse_result["due_at"], "%Y-%m-%d %H:%M:%S")
+                                    time_str = due_time.strftime("%I:%M %p") if due_time.date() == datetime.now().date() else due_time.strftime("%B %d at %I:%M %p")
+                                    
+                                    response = f"Reminder set: {parse_result['task_text']} at {time_str}"
+                                    if parse_result.get("recurrence"):
+                                        response += f" (recurring {parse_result['recurrence']['frequency']})"
+                                    
+                                    result["status"] = "success"
+                                    result["response"] = response
+                                except Exception as sched_err:
+                                    self.logger.error(f"Scheduler registration failed for reminder {reminder_id}: {sched_err}")
+                                    db_manager.delete_reminder(user_id, reminder_id)
+                                    result["status"] = "error"
+                                    result["response"] = "Failed to schedule reminder."
                             else:
                                 result["status"] = "error"
                                 result["response"] = "Failed to create reminder."
@@ -6431,7 +6947,12 @@ class UnifiedCommandRouter:
                     
                     if action == "play":
                         success = controller.play_music(user_input)
-                        result["response"] = "Music playback started." if success else "Failed to start music playback."
+                        msg = getattr(controller, "last_status_message", None)
+                        result["response"] = msg if msg else ("Music playback started." if success else "Failed to start music playback.")
+                    elif action == "play_video":
+                        success = controller.play_video(user_input) if hasattr(controller, "play_video") else False
+                        msg = getattr(controller, "last_status_message", None)
+                        result["response"] = msg if msg else ("Video opened." if success else "Failed to open video.")
                     elif action == "pause":
                         msg = controller.toggle_play_pause()
                         result["response"] = "Paused media playback." if "Toggled" in str(msg) else msg
@@ -6441,8 +6962,24 @@ class UnifiedCommandRouter:
                     elif action == "toggle":
                         msg = controller.toggle_play_pause()
                         result["response"] = msg
-                    elif action == "stop":
+                    elif action in ("stop", "stop_music"):
                         result["response"] = controller.media_stop()
+                    elif action == "stop_all":
+                        try:
+                            from legacy.tts import is_speaking, stop_speaking
+                            if is_speaking():
+                                stop_speaking(interrupted=True)
+                        except Exception:
+                            pass
+                        try:
+                            from core.artifact_reader import get_artifact_reading_controller
+                            _r_ctrl = get_artifact_reading_controller()
+                            if _r_ctrl.is_reading(effective_uid):
+                                _r_ctrl.stop_reading(user_id=effective_uid)
+                        except Exception:
+                            pass
+                        controller.media_stop()
+                        result["response"] = "Stopped all active speech and playback."
                     elif action == "queue_status":
                         result["response"] = controller.get_queue_status().get("message")
                     elif action in ["next", "skip"]:
@@ -6924,7 +7461,9 @@ class UnifiedCommandRouter:
                     effective_uid = user_id or getattr(settings, 'CURRENT_USER_ID', None) or 1
                     effective_uname = getattr(settings, 'CURRENT_USERNAME', 'User')
 
-                    if action == "personal_schedule" or (action != "calendar_query" and any(k in user_input.lower() for k in ["what do i have", "what's on my schedule", "whats on my schedule", "what is on my schedule", "planned", "need to do", "have to do"])):
+                    is_holiday_query = any(k in user_input.lower() for k in ["holiday", "special day", "festival", "working day"])
+                    is_personal_schedule = not is_holiday_query and (action == "personal_schedule" or (action != "calendar_query" and any(k in user_input.lower() for k in ["what do i have", "do i have", "any events", "my events", "what's on my schedule", "whats on my schedule", "what is on my schedule", "planned", "need to do", "have to do"])))
+                    if is_personal_schedule:
                         now = datetime.now()
                         is_tomorrow = "tomorrow" in user_input.lower()
                         target_date = now.date() + timedelta(days=1) if is_tomorrow else now.date()
@@ -6996,7 +7535,7 @@ class UnifiedCommandRouter:
                         from modules.calendar_manager import calendar_controller
                         cal_res = calendar_controller.process_calendar_query(user_input, user_id=effective_uid)
                         result["status"] = "success" if cal_res.get("success", True) else "error"
-                        result["response"] = cal_res.get("speech_response") or "Calendar query processed."
+                        result["response"] = cal_res.get("speech_response") or "I processed your calendar query, but no matching details were found."
                         result["calendar_data"] = cal_res
                     else:
                         from modules.calendar_manager import get_daily_briefing
@@ -7032,14 +7571,16 @@ class UnifiedCommandRouter:
                 try:
                     from skills.clock_manager import get_clock_controller
                     ctrl = get_clock_controller()
-                    clock_res = ctrl.get_local_date()
+                    clock_res = ctrl.get_local_date(user_input)
                     result["status"] = "success"
                     result["response"] = clock_res.get("message") or clock_res.get("response") or "Today's date."
                     result.update(clock_res)
                     result["handled"] = True
                 except Exception as e:
                     from legacy.skills_utilities import tell_date
+                    result["status"] = "success"
                     result["response"] = tell_date()
+                    result["handled"] = True
 
             # 15. WEATHER QUERY
             elif intent == Intent.WEATHER_QUERY:
@@ -7094,29 +7635,6 @@ class UnifiedCommandRouter:
                         except Exception:
                             pass
 
-                    # Check if query references an active or stored artifact
-                    try:
-                        from core.artifact_resolver import get_artifact_reference_resolver
-                        art_res = get_artifact_reference_resolver().resolve(
-                            user_input=user_input,
-                            user_id=int(effective_uid) if str(effective_uid).isdigit() else 1
-                        )
-                        if art_res.is_success and art_res.artifact:
-                            art = art_res.artifact
-                            result["status"] = "success"
-                            result["response"] = f"Here is the information I found about '{art.topic}':\n\n{art.content}"
-                            result["artifact"] = art.to_dict()
-                            result["handled"] = True
-                            try:
-                                from extensions.dialogue_state_manager import get_dialogue_manager
-                                dm = get_dialogue_manager(str(effective_uid))
-                                dm.current_state.active_artifact = art.to_dict()
-                            except Exception:
-                                pass
-                            return result
-                    except Exception as _art_err:
-                        self.logger.debug(f"[MEMORY_QUERY] Artifact check: {_art_err}")
-
                     u_low = user_input.lower().rstrip('.?!,').strip()
                     norm_u_low = re.sub(r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|trevon|nova|jarvis|assistant)[,\s:]*', '', u_low, flags=re.IGNORECASE).strip()
                     is_user_cmd = bool(
@@ -7147,8 +7665,34 @@ class UnifiedCommandRouter:
                     ans = query_memory_first(effective_uid, user_input)
                     if ans:
                         result["response"] = ans
+                        result["status"] = "success"
                         result["handled"] = True
-                    elif any(w in user_input.lower() for w in ("project secret", "my secret", "my password", "my pin", "my credentials", "my credit card")):
+                        return result
+
+                    # Check if query references an active or stored artifact
+                    try:
+                        from core.artifact_resolver import get_artifact_reference_resolver
+                        art_res = get_artifact_reference_resolver().resolve(
+                            user_input=user_input,
+                            user_id=int(effective_uid) if str(effective_uid).isdigit() else 1
+                        )
+                        if art_res.is_success and art_res.artifact:
+                            art = art_res.artifact
+                            result["status"] = "success"
+                            result["response"] = f"Here is the information I found about '{art.topic}':\n\n{art.content}"
+                            result["artifact"] = art.to_dict()
+                            result["handled"] = True
+                            try:
+                                from extensions.dialogue_state_manager import get_dialogue_manager
+                                dm = get_dialogue_manager(str(effective_uid))
+                                dm.current_state.active_artifact = art.to_dict()
+                            except Exception:
+                                pass
+                            return result
+                    except Exception as _art_err:
+                        self.logger.debug(f"[MEMORY_QUERY] Artifact check: {_art_err}")
+
+                    if any(w in user_input.lower() for w in ("project secret", "my secret", "my password", "my pin", "my credentials", "my credit card")):
                         result["response"] = "I don't have any record of that secret in your memory."
                         result["handled"] = True
                     else:
@@ -7408,25 +7952,48 @@ class UnifiedCommandRouter:
                             result["goal_deadline"] = deadline
                     return result
 
+                eff_uid = int(effective_uid) if ('effective_uid' in locals() and str(effective_uid).isdigit()) else 1
+
                 try:
                     from instance.config import settings
                     from legacy.skills import detect_and_store_fact
                     effective_uid = user_id or getattr(settings, 'CURRENT_USER_ID', None) or settings.get_last_user()
-                    stored, msg = detect_and_store_fact(effective_uid, user_input)
-                    if stored:
-                        result["response"] = msg
-                        result["handled"] = True
-                        return result
+                    eff_uid = int(effective_uid) if (effective_uid and str(effective_uid).isdigit()) else 1
+
+                    # Check if this is an explicit memory directive:
+                    u_low_strip = user_input.lower().strip()
+                    is_explicit_store = u_low_strip.startswith(("remember", "please remember", "note that", "save this")) or (
+                        u_low_strip.startswith("my ") and " is " in u_low_strip and not u_low_strip.startswith((
+                            "my name is", "my university is", "my college is", "my institution is",
+                            "my interview is", "my exam is", "my meeting is", "my presentation is"
+                        ))
+                    )
+                    if is_explicit_store:
+                        stored, msg = detect_and_store_fact(effective_uid, user_input)
+                        if stored:
+                            result["response"] = msg
+                            result["handled"] = True
+                            return result
+                    else:
+                        # Extract facts automatically from natural conversation without robotic interruption
+                        from core.chatgpt_memory import get_chatgpt_memory
+                        get_chatgpt_memory().extract_and_persist_facts(eff_uid, user_input)
                 except Exception:
                     pass
 
-                # Fast handling for assistant capability queries (concise voice response)
+                # Fast handling for assistant capability queries (concise voice response or full list)
                 if is_capability_query(user_input):
-                    result["response"] = (
-                        "I can control your computer, open and manage applications, work with files, "
-                        "search for information, control system settings, remember your ongoing tasks, "
-                        "and help you with coding and other work. If you want, I can show you the full list."
-                    )
+                    u_low = user_input.lower().strip().rstrip('.?!')
+                    if any(k in u_low for k in ("full list", "all capabilities", "list all")):
+                        from core.capability_registry import get_capability_registry
+                        cap_reg = get_capability_registry()
+                        result["response"] = cap_reg.format_capabilities_overview()
+                    else:
+                        result["response"] = (
+                            "I can control your computer, open and manage applications, work with files, "
+                            "search for information, control system settings, remember your ongoing tasks, "
+                            "and help you with coding and other work. If you want, I can show you the full list."
+                        )
                     result["handled"] = True
                     return result
 
@@ -7483,10 +8050,19 @@ class UnifiedCommandRouter:
                     except Exception:
                         pass
 
+                    # Retrieve relevant memories and prompt context
+                    mem_block = ""
+                    try:
+                        from core.chatgpt_memory import get_chatgpt_memory
+                        mem_block = get_chatgpt_memory().build_prompt_context(eff_uid, user_input)
+                    except Exception:
+                        pass
+
                     llm_resp = engine.get_completion(
                         prompt=user_input,
                         context=mem_ctx,
-                        user_id=effective_uid if 'effective_uid' in locals() else user_id,
+                        memory=mem_block,
+                        user_id=eff_uid,
                         timeout_budget=7.0,
                         task_type="conversational",
                     )
@@ -7494,6 +8070,55 @@ class UnifiedCommandRouter:
                         result["response"] = llm_resp.strip()
                         result["handled"] = True
                     else:
+                        # Offline fallback: check direct factual recall or personalized conversational response
+                        try:
+                            from core.chatgpt_memory import get_chatgpt_memory
+                            chatgpt_mem = get_chatgpt_memory()
+                            direct_ans = chatgpt_mem.answer_historical_fact_query(eff_uid, user_input)
+                            if direct_ans:
+                                result["response"] = direct_ans
+                                result["handled"] = True
+                                return result
+                        except Exception:
+                            pass
+
+                        # Natural introduction response if user shared identity/background
+                        try:
+                            from core.chatgpt_memory import get_chatgpt_memory
+                            user_facts = get_chatgpt_memory().get_user_facts(eff_uid)
+                            u_name = user_facts.get("preferred_name") or user_facts.get("name")
+                            u_inst = user_facts.get("institution") or user_facts.get("university")
+                            u_cell = user_facts.get("activity") or user_facts.get("role")
+
+                            if any(k in clean_u for k in ("i'm", "i am", "my name is", "placement cell", "srm ap", "final-year", "final year")):
+                                if u_name and u_inst and u_cell:
+                                    result["response"] = f"Nice to meet you, {u_name}! Great to know you're in the placement cell at {u_inst}. How can I assist you today?"
+                                    result["handled"] = True
+                                    return result
+                                elif u_name and u_inst:
+                                    result["response"] = f"Nice to meet you, {u_name}! Great to know you're at {u_inst}. How can I assist you today?"
+                                    result["handled"] = True
+                                    return result
+                                elif u_name:
+                                    result["response"] = f"Nice to meet you, {u_name}! How can I help you today?"
+                                    result["handled"] = True
+                                    return result
+
+                            # Personalized assistance (e.g., "Help me prepare for placements")
+                            if any(p in clean_u for p in ("prepare for placements", "prepare for placement", "placement preparation", "placements")):
+                                greeting_target = f", {u_name}" if u_name else ""
+                                inst_target = f" at {u_inst}" if u_inst else ""
+                                cell_context = " Given your involvement with the placement cell, you'll have good perspective." if u_cell else ""
+                                result["response"] = (
+                                    f"I'd be glad to help you prepare for placements{greeting_target}!{cell_context} "
+                                    f"We can work through technical interview topics, coding challenges, core computer science concepts, and resume preparation. "
+                                    "Where would you like to begin?"
+                                )
+                                result["handled"] = True
+                                return result
+                        except Exception:
+                            pass
+
                         if any(k in clean_u for k in ("what did i ask you earlier", "what did i ask earlier", "what did i ask before", "what was my last question")):
                             if 'last_items' in locals() and last_items:
                                 result["response"] = f"Earlier, you asked: '{last_items[-1].get('user_command')}'."
@@ -7505,11 +8130,17 @@ class UnifiedCommandRouter:
                             else:
                                 result["response"] = "There is no previous response to continue."
                         else:
-                            err_diag = getattr(engine, 'last_error_summary', '')
-                            if err_diag:
-                                result["response"] = f"I understood your request, but all language model providers failed: {err_diag}."
-                            else:
-                                result["response"] = "I understood your request, but I was temporarily unable to reach any language model within the deadline. Please ensure your provider is configured or check your connection."
+                            classified = engine.get_classified_failure() if hasattr(engine, 'get_classified_failure') else {}
+                            user_msg = classified.get("user_message")
+                            if not user_msg:
+                                err_diag = getattr(engine, 'last_error_summary', '')
+                                if err_diag:
+                                    user_msg = f"Unable to reach the language model service: {err_diag}."
+                                else:
+                                    user_msg = "Unable to reach the language model service right now. Please check your network connection or try again shortly."
+                            result["response"] = user_msg
+                            result["failure_category"] = classified.get("category", "provider_failure")
+                            result["failure_reason"] = classified.get("reason", getattr(engine, 'last_error_summary', ''))
                         result["handled"] = True
                 except Exception as e:
                     result["status"] = "error"
@@ -7559,6 +8190,28 @@ class UnifiedCommandRouter:
                             resp_text = "I've restored your previously configured voice profile."
                         else:
                             resp_text = "Your voice settings are active at natural conversational speed."
+                    elif action == "change_language" or "language" in params:
+                        target_lang = params.get("language", "english").lower()
+                        cfg.set_preference(effective_uid, "language", target_lang)
+                        cfg.set_preference(effective_uid, "assistant_language", target_lang)
+                        if target_lang == "telugu":
+                            resp_text = "ఖచ్చితంగా! నేను ఇకపై మీతో తెలుగులో మాట్లాడతాను. నేను మీకు ఎలా సహాయపడగలను?"
+                        elif target_lang == "hindi":
+                            resp_text = "बिल्कुल! मैं अब आपसे हिंदी में बात करूँगा। मैं आपकी क्या मदद कर सकता हूँ?"
+                        elif target_lang == "tamil":
+                            resp_text = "நிச்சயமாக! நான் உங்களுடன் தமிழில் பேசுவேன். நான் உங்களுக்கு எவ்வாறு உதவ முடியும்?"
+                        elif target_lang == "kannada":
+                            resp_text = "ಖಂಡಿತ! ನಾನು ಇನ್ನು ಮುಂದೆ ನಿಮ್ಮೊಂದಿಗೆ ಕನ್ನಡದಲ್ಲಿ ಮಾತನಾಡುತ್ತೇನೆ."
+                        elif target_lang == "malayalam":
+                            resp_text = "തീർച്ചയായും! ഞാൻ ഇനി മുതൽ നിങ്ങളോട് മലയാളത്തിൽ സംസാരിക്കാം."
+                        elif target_lang == "spanish":
+                            resp_text = "¡Claro! A partir de ahora te hablaré en español. ¿En qué te puedo ayudar?"
+                        elif target_lang == "french":
+                            resp_text = "Bien sûr ! À partir de maintenant, je vous parlerai en français."
+                        elif target_lang == "german":
+                            resp_text = "Gerne! Ab jetzt spreche ich mit Ihnen auf Deutsch."
+                        else:
+                            resp_text = f"I will now speak with you in {target_lang.capitalize()}."
                     else:
                         resp_text = "Voice configuration updated."
 

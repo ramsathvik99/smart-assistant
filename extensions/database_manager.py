@@ -281,20 +281,56 @@ class DatabaseManager:
     # =========================================================================
 
     def add_reminder(self, user_id, task_text, due_at):
-        """Add a new reminder to the database."""
+        """Add a new reminder to the database atomically and concurrency-safely."""
         if not self.pool or not user_id:
             return None
+        clean_text = str(task_text).strip()
         try:
             with self._get_cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO reminders (user_id, task_text, due_at, is_notified)
-                    VALUES (%s, %s, %s, FALSE)
-                    RETURNING id
-                    """,
-                    (user_id, task_text, due_at)
-                )
-                return cur.fetchone()[0]
+                try:
+                    cur.execute("SAVEPOINT sp_reminder")
+                    cur.execute(
+                        """
+                        INSERT INTO reminders (user_id, task_text, due_at, is_notified)
+                        VALUES (%s, %s, %s, FALSE)
+                        ON CONFLICT (user_id, LOWER(TRIM(task_text)), due_at) WHERE (is_notified = FALSE)
+                        DO UPDATE SET is_notified = FALSE
+                        RETURNING id
+                        """,
+                        (user_id, clean_text, due_at)
+                    )
+                    row = cur.fetchone()
+                    cur.execute("RELEASE SAVEPOINT sp_reminder")
+                    if row:
+                        return row[0]
+                except Exception:
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_reminder")
+                    except Exception:
+                        pass
+                    # Fallback for environments without partial unique index
+                    cur.execute(
+                        """
+                        SELECT id FROM reminders
+                        WHERE user_id = %s AND LOWER(TRIM(task_text)) = LOWER(TRIM(%s)) AND due_at = %s AND is_notified = FALSE
+                        LIMIT 1
+                        """,
+                        (user_id, clean_text, due_at)
+                    )
+                    existing = cur.fetchone()
+                    if existing:
+                        return existing[0]
+
+                    cur.execute(
+                        """
+                        INSERT INTO reminders (user_id, task_text, due_at, is_notified)
+                        VALUES (%s, %s, %s, FALSE)
+                        RETURNING id
+                        """,
+                        (user_id, clean_text, due_at)
+                    )
+                    row = cur.fetchone()
+                    return row[0] if row else None
         except Exception as e:
             print(f"[DB REMINDER ERROR] add_reminder: {e}")
             return None
@@ -379,7 +415,7 @@ class DatabaseManager:
                     cur.execute(
                         """
                         UPDATE reminders
-                        SET task_text = %s, due_at = %s
+                        SET task_text = %s, due_at = %s, is_notified = FALSE
                         WHERE user_id = %s AND id = %s
                         """,
                         (task_text, due_at, user_id, reminder_id)
@@ -397,7 +433,7 @@ class DatabaseManager:
                     cur.execute(
                         """
                         UPDATE reminders
-                        SET due_at = %s
+                        SET due_at = %s, is_notified = FALSE
                         WHERE user_id = %s AND id = %s
                         """,
                         (due_at, user_id, reminder_id)

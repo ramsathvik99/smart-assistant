@@ -443,14 +443,38 @@ def process_input(text, user_id=None):
                 spoken_response = response
                 meta = {"ui_text": response}
 
-            # Multilingual response generation: reply in the same language as input
-            if detected_lang != "en":
-                final_ui_text = ml_engine.translate_from_english(final_ui_text, target_lang=detected_lang)
-                spoken_response = ml_engine.translate_from_english(spoken_response, target_lang=detected_lang)
+            # Determine response language: explicit requested instruction > user preference > detected input language
+            user_pref_lang = None
+            try:
+                from core.configuration_service import ConfigurationService
+                cfg_svc = ConfigurationService.get_instance()
+                user_pref_lang = cfg_svc.get_preference(effective_uid, "assistant_language") or cfg_svc.get_preference(effective_uid, "language")
+            except Exception:
+                pass
+
+            target_resp_lang = (
+                ml_engine.get_requested_response_language(effective_uid)
+                or user_pref_lang
+                or detected_lang
+                or "en"
+            )
+            target_resp_lang = str(target_resp_lang).strip().lower()[:2]
+            if target_resp_lang not in ml_engine.LOCALE_MAP:
+                target_resp_lang = detected_lang if detected_lang in ml_engine.LOCALE_MAP else "en"
+
+            resp_script = ml_engine.detect_script(final_ui_text)
+            already_in_target = resp_script and resp_script[0] == target_resp_lang
+
+            if target_resp_lang != "en" and not already_in_target:
+                final_ui_text = ml_engine.translate_from_english(final_ui_text, target_lang=target_resp_lang)
+                spoken_response = ml_engine.translate_from_english(spoken_response, target_lang=target_resp_lang)
                 response = final_ui_text
-                meta["lang_hint"] = detected_lang
-                meta["language"] = detected_lang
-                meta["locale"] = lang_res.locale
+
+            if target_resp_lang != "en" or already_in_target:
+                eff_lang_code = resp_script[0] if already_in_target else target_resp_lang
+                meta["lang_hint"] = eff_lang_code
+                meta["language"] = eff_lang_code
+                meta["locale"] = ml_engine.LOCALE_MAP.get(eff_lang_code, f"{eff_lang_code}-IN")
                 meta["ui_text"] = final_ui_text
 
             try:

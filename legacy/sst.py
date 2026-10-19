@@ -1120,6 +1120,20 @@ def _process_utterance(audio_data: np.ndarray):
         
         if text and text.strip():
             clean_cmd = text.strip()
+
+            # Alexa-Style Voice Interaction: Filter incidental speech during active music playback
+            try:
+                from modules.music.music_controller import get_controller
+                mc = get_controller()
+                if mc and mc.is_active():
+                    if not mc.is_addressed_to_assistant(clean_cmd):
+                        print(f"[MUSIC] Incidental speech filtered during playback: '{clean_cmd}' — restoring volume without assistant response.")
+                        if vl:
+                            vl.reset_to_idle()
+                        return
+            except Exception as _mc_err:
+                print(f"[MUSIC] Error checking incidental speech: {_mc_err}")
+
             if vl:
                 vl.on_transcription_completed(clean_cmd)
                 vl.on_assistant_executing(clean_cmd)

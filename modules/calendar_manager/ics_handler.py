@@ -60,10 +60,16 @@ class ICSHandler:
         events_map = self.storage.get_events_range(user_id, start_date, end_date)
         all_events = [ev for ev_list in events_map.values() for ev in ev_list]
 
+        try:
+            from instance.config import get_assistant_name
+            asst_name = get_assistant_name() or "Assistant"
+        except Exception:
+            asst_name = "Assistant"
+
         lines = [
             "BEGIN:VCALENDAR",
             "VERSION:2.0",
-            "PRODID:-//Nova Assistant//Calendar Manager//EN",
+            f"PRODID:-//{asst_name}//Calendar Manager//EN",
             "CALSCALE:GREGORIAN",
             "METHOD:PUBLISH"
         ]

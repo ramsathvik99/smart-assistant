@@ -118,7 +118,14 @@ class CalendarIntentHandler:
         if m:
             month = cls.MONTHS[m.group(1).lower()]
             day = int(m.group(2))
-            year = int(m.group(3)) if m.group(3) else (fallback_year or now.year)
+            has_explicit_year = bool(m.group(3))
+            year = int(m.group(3)) if has_explicit_year else (fallback_year or now.year)
+            if not has_explicit_year and not fallback_year:
+                try:
+                    if (month, day) < (now.month, now.day):
+                        year += 1
+                except Exception:
+                    pass
             return f"{year:04d}-{month:02d}-{day:02d}"
 
         pattern_rev = r'\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(' + '|'.join(cls.MONTHS.keys()) + r')(?:,?\s+(\d{4}))?\b'
@@ -126,22 +133,32 @@ class CalendarIntentHandler:
         if m_rev:
             day = int(m_rev.group(1))
             month = cls.MONTHS[m_rev.group(2).lower()]
-            year = int(m_rev.group(3)) if m_rev.group(3) else (fallback_year or now.year)
+            has_explicit_year = bool(m_rev.group(3))
+            year = int(m_rev.group(3)) if has_explicit_year else (fallback_year or now.year)
+            if not has_explicit_year and not fallback_year:
+                try:
+                    if (month, day) < (now.month, now.day):
+                        year += 1
+                except Exception:
+                    pass
             return f"{year:04d}-{month:02d}-{day:02d}"
 
-        # Check weekday reference e.g. "this friday", "next monday", "on wednesday"
-        # Require explicit preposition or standalone weekday to prevent wake-word collision
+        # Check weekday reference e.g. "this friday", "next monday", "on wednesday", "is monday", "is monday a holiday"
+        # Require explicit preposition, query frame, or standalone weekday to prevent wake-word collision
         for w_name, w_code in cls.WEEKDAYS.items():
-            m_wd = re.search(r'\b(?:this\s+|next\s+|on\s+)' + w_name + r'\b', s)
-            if not m_wd and (s == w_name or re.fullmatch(r'(?:this\s+|next\s+|on\s+)?' + w_name, s)):
+            m_wd = re.search(r'\b(?:is\s+|this\s+|next\s+|on\s+|for\s+|coming\s+)?' + w_name + r'(?:\s+(?:a\s+)?(?:public\s+)?holiday|\s+(?:a\s+)?working\s+day)?\b', s, re.IGNORECASE)
+            # Avoid wake-word false positives on standalone assistant name unless framed
+            if w_name == "friday" and not re.search(r'\b(?:is|this|next|on|for|coming)\s+friday\b|\bfriday\s+(?:a\s+)?(?:holiday|working\s+day|calendar|event)\b', s, re.IGNORECASE):
+                continue
+            if not m_wd and (s.strip().lower() == w_name or re.fullmatch(r'(?:this\s+|next\s+|on\s+)?' + w_name, s.strip(), re.IGNORECASE)):
                 m_wd = True
             if m_wd:
                 target_wd = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}[w_code]
                 cur_wd = now.weekday()
                 days_ahead = (target_wd - cur_wd) % 7
-                if days_ahead == 0 and "next" in s:
+                if days_ahead == 0 and "next" in s.lower():
                     days_ahead = 7
-                elif days_ahead == 0 and not ("today" in s or "this" in s):
+                elif days_ahead == 0 and not ("today" in s.lower() or "this" in s.lower()):
                     days_ahead = 7
                 return (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
 
@@ -150,16 +167,32 @@ class CalendarIntentHandler:
     @classmethod
     def _parse_time_str(cls, s: str) -> Optional[str]:
         if not s: return None
-        # Handle formats like 3:00 p.m., 3:00pm, 3pm, 3:00
+        # Handle formats like 3:00 p.m., 3:00pm, 3pm, 3:00, at 3
         m_time = re.search(r'\b(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\b', s, re.IGNORECASE)
         if m_time:
             t_str = m_time.group(1).strip().upper()
             t_str = re.sub(r'P\.?M\.?', 'PM', t_str)
             t_str = re.sub(r'A\.?M\.?', 'AM', t_str)
+            t_str = re.sub(r'\s+', ' ', t_str).strip()
             return t_str
         m_time_num = re.search(r'\bat\s+(\d{1,2}(?::\d{2})?)\b', s, re.IGNORECASE)
         if m_time_num:
-            return m_time_num.group(1).strip().upper()
+            val = m_time_num.group(1).strip()
+            if ":" in val:
+                h, m = val.split(":")
+                h_int = int(h)
+                if 1 <= h_int <= 6:
+                    return f"{h_int}:{m} PM"
+                return val
+            else:
+                h_int = int(val)
+                if 1 <= h_int <= 6:
+                    return f"{h_int}:00 PM"
+                elif 7 <= h_int <= 11:
+                    return f"{h_int}:00 AM"
+                elif h_int == 12:
+                    return "12:00 PM"
+                return f"{h_int}:00"
         return None
 
     @classmethod
@@ -276,7 +309,7 @@ class CalendarIntentHandler:
                 }
 
         # Cancel request as resolution
-        if re.search(r'^(?:cancel(?:\s+the\s+new\s+request|\s+the\s+request|\s+the\s+change|\s+change|\s+it)?|never\s+mind|don\'?t\s+schedule(?:\s+it)?|drop\s+it)$', text_lower):
+        if re.search(r'^(?:cancel\s+(?:the\s+new\s+request|the\s+request|the\s+change|change)|never\s*mind|don\'?t\s+schedule(?:\s+it)?)$', text_lower):
             return {
                 "action": "conflict_resolution",
                 "subject": "personal_event",
@@ -442,7 +475,7 @@ class CalendarIntentHandler:
                 "temporal_context": {"relative_date": "week"}
             }
 
-        # 11. Holiday count query ("How many public holidays are there in Russia in 2027?")
+        # 11. Holiday count query ("How many public holidays are there in Russia in 2027?", "How many public holidays are left this year?")
         m_count = re.search(r'\b(?:how\s+many\s+(?:public\s+)?holidays|count\s+(?:the\s+)?(?:public\s+)?holidays|number\s+of\s+(?:public\s+)?holidays)\b', text_lower)
         if m_count:
             country = None
@@ -452,11 +485,12 @@ class CalendarIntentHandler:
 
             m_yr = re.search(r'\b(20\d{2})\b', text_lower)
             target_yr = int(m_yr.group(1)) if m_yr else now.year
+            is_remaining = any(w in text_lower for w in ["left", "remaining", "from now", "from today", "left this year"])
 
             return {
                 "action": "count",
                 "subject": "holiday",
-                "entities": {"location": country, "year": target_yr},
+                "entities": {"location": country, "year": target_yr, "is_remaining": is_remaining},
                 "temporal_context": {"normalized_date": f"{target_yr}-01-01", "end_date": f"{target_yr}-12-31"}
             }
 
@@ -491,9 +525,17 @@ class CalendarIntentHandler:
                     "temporal_context": {}
                 }
 
-        # 12. Holiday explanation
+        # 12. Holiday explanation & "Why is today observed?"
+        if re.search(r'\b(?:why\s+is\s+(?:it|today|this\s+day)\s+observed|significance\s+of\s+today|meaning\s+of\s+today|explain\s+today\'?s?\s+holiday)\b', text_lower):
+            return {
+                "action": "explain",
+                "subject": "holiday",
+                "entities": {"holiday_name": None, "target_date": "today"},
+                "temporal_context": {"normalized_date": now.strftime("%Y-%m-%d")}
+            }
+
         m_exp = re.search(r'\b(?:explain|tell\s+me\s+about)\s+(?:the\s+holiday\s+|holiday\s+)?([a-zA-Z\s]+?)(?:\s+holiday|\s+festival|\s+significance|\s+history|$)', text_lower)
-        if m_exp and any(k in text_lower for k in ["holiday", "festival", "diwali", "christmas", "easter", "thanksgiving"]):
+        if m_exp and any(k in text_lower for k in ["holiday", "festival", "diwali", "christmas", "easter", "thanksgiving", "durga", "navratri"]):
             h_name = m_exp.group(1).strip()
             return {
                 "action": "explain",
@@ -542,12 +584,14 @@ class CalendarIntentHandler:
             title = m_time_chg.group(1).strip(" '\". ")
             title = re.sub(r'^(?:the\s+|my\s+)?(?:calendar\s+)?', '', title, flags=re.IGNORECASE).strip(" '\". ")
             new_time = cls._parse_time_str(m_time_chg.group(2)) or m_time_chg.group(2).strip(" '\". ").upper()
+            scope = "occurrence" if any(w in text_lower for w in ["this occurrence", "only this", "just this", "single occurrence"]) else ("series" if any(w in text_lower for w in ["all occurrences", "series", "entire series"]) else None)
             return {
                 "action": "update",
                 "subject": "personal_event",
                 "entities": {
                     "event_title": title,
-                    "start_time": new_time
+                    "start_time": new_time,
+                    "scope": scope
                 },
                 "temporal_context": {}
             }
@@ -557,9 +601,11 @@ class CalendarIntentHandler:
         if m_move and not any(k in text_lower for k in ["file", "folder", "directory"]):
             title = m_move.group(1).strip(" '\". ")
             title = re.sub(r'^(?:the\s+|my\s+)?(?:calendar\s+)?', '', title, flags=re.IGNORECASE).strip(" '\". ")
+            title = re.sub(r'\b(?:all\s+occurrences\s+of|every\s+occurrence\s+of|this\s+occurrence\s+of|the\s+series\s+of|entire\s+series\s+of|series\s+of)\b', '', title, flags=re.IGNORECASE).strip(" '\". ")
             dest_str = m_move.group(2).strip(" '\". ")
             dest_time = cls._parse_time_str(dest_str)
             dest_date = cls._parse_date_str(dest_str)
+            scope = "occurrence" if any(w in text_lower for w in ["this occurrence", "only this", "just this", "single occurrence"]) else ("series" if any(w in text_lower for w in ["all occurrences", "series", "entire series"]) else None)
             if dest_date or dest_time:
                 return {
                     "action": "update",
@@ -567,7 +613,8 @@ class CalendarIntentHandler:
                     "entities": {
                         "event_title": title,
                         "start_time": dest_time,
-                        "new_date": dest_date
+                        "new_date": dest_date,
+                        "scope": scope
                     },
                     "temporal_context": {
                         "normalized_date": dest_date,
@@ -760,6 +807,23 @@ class CalendarIntentHandler:
             location = cls._parse_location(text_clean)
             category = cls._parse_category(text_clean)
 
+            # All-day status parsing
+            is_all_day = bool(re.search(r'\b(?:all[- ]day|full\s+day)\b', text_clean, re.IGNORECASE))
+
+            # Attendees parsing
+            m_att = re.search(r'\b(?:with\s+attendees?|with)\s+([a-zA-Z0-9_,\s]+?)(?:\s+(?:on|at|for|in|every|tomorrow|today|duration|with\s+description)|$)', text_clean, re.IGNORECASE)
+            attendees = []
+            if m_att:
+                cand_att = m_att.group(1).strip()
+                if not any(k in cand_att.lower() for k in ["description", "notes", "agenda", "room", "title", "reminder", "recurrence", "calendar", "a reminder"]):
+                    parts = [p.strip().title() for p in re.split(r'[,;]|\band\b', cand_att) if p.strip()]
+                    if parts:
+                        attendees = parts
+
+            # Explicit description parsing
+            m_desc = re.search(r'\b(?:with\s+description|description(?:\s+is|:)?)\s+([^\.]+)', text_clean, re.IGNORECASE)
+            description_text = m_desc.group(1).strip(" '\". ") if m_desc else None
+
             # Reminder offset parsing
             reminder_minutes = None
             m_rem = re.search(r'\b(?:with\s+(?:a\s+)?reminder|remind(?:er)?)\s+(\d+)\s*(minutes?|mins?|hours?|hrs?)\s*(?:before)?\b', text_clean, re.IGNORECASE)
@@ -790,10 +854,10 @@ class CalendarIntentHandler:
             m_quote = re.search(r'["\']([^"\']+)["\']', text_clean)
             if m_quote:
                 title = m_quote.group(1).strip()
-            elif re.search(r'\b(?:called|call|named|name|titled|title|with\s+title)\s+(.+?)(?:\s+(?:on|at|for|every|tomorrow|today|\d{4}-\d{2}-\d{2})\b|$)', text_clean, re.IGNORECASE):
-                m_c = re.search(r'\b(?:called|call|named|name|titled|title|with\s+title)\s+(.+?)(?:\s+(?:on|at|for|every|tomorrow|today|\d{4}-\d{2}-\d{2})\b|$)', text_clean, re.IGNORECASE)
+            elif re.search(r'\b(?:called|call|named|name|titled|title|with\s+title)\s+(.+?)(?:\s+(?:on|at|for|every|recurring)\b|$)', text_clean, re.IGNORECASE):
+                m_c = re.search(r'\b(?:called|call|named|name|titled|title|with\s+title)\s+(.+?)(?:\s+(?:on|at|for|every|recurring)\b|$)', text_clean, re.IGNORECASE)
                 cand = m_c.group(1).strip(" '\". ")
-                if cand.lower() not in title_stopwords:
+                if cand:
                     title = cand
             elif re.search(r'\badd\s+(.+?)\s+to\s+(?:my\s+)?calendar\b', text_clean, re.IGNORECASE):
                 m_a = re.search(r'\badd\s+(.+?)\s+to\s+(?:my\s+)?calendar\b', text_clean, re.IGNORECASE)
@@ -809,6 +873,14 @@ class CalendarIntentHandler:
                 cand = re.sub(r'\b(?:at\s+the\s+same\s+time\s+as|same\s+time\s+as).*$', '', cand, flags=re.IGNORECASE).strip(" '\". ")
                 if cand and cand.lower() not in title_stopwords:
                     title = cand
+
+            if title:
+                # Clean all-day, attendees, and description phrases from extracted title
+                title = re.sub(r'^(?:an?\s+)?all[- ]day\s+(?:event|meeting|session)?\s*', '', title, flags=re.IGNORECASE).strip()
+                if attendees:
+                    title = re.sub(r'\b(?:with\s+attendees?|with)\s+.*$', '', title, flags=re.IGNORECASE).strip()
+                if description_text:
+                    title = re.sub(r'\b(?:with\s+description|description).*$', '', title, flags=re.IGNORECASE).strip()
 
             if not title:
                 if "meeting" in text_lower:
@@ -828,7 +900,7 @@ class CalendarIntentHandler:
                     "message": f"The event title '{title}' appears incomplete or ambiguous. Did you mean 'Team Sync', or please clarify the exact title."
                 }
 
-            if not has_date and not has_time and not recurrence and not reference_event:
+            if not has_date and not has_time and not recurrence and not reference_event and not is_all_day:
                 return {
                     "action": "clarification",
                     "subject": "personal_event",
@@ -842,17 +914,129 @@ class CalendarIntentHandler:
                     "event_title": title.title() if len(title) > 3 else title,
                     "start_time": m_time,
                     "duration_minutes": duration_minutes,
+                    "is_all_day": is_all_day,
                     "location": location,
                     "category": category,
                     "recurrence": recurrence,
                     "reminder_minutes": reminder_minutes,
-                    "reference_event": reference_event
+                    "reference_event": reference_event,
+                    "attendees": attendees if attendees else None,
+                    "description": description_text
                 },
                 "temporal_context": {
                     "relative_date": rel_date if has_date else None,
                     "normalized_date": norm_date if has_date else None,
                     "duration_days": 1,
                     "has_explicit_date": has_date
+                }
+            }
+
+        # 18b. Public Holiday & Working Day Status Inquiries vs Range Listing
+        is_holiday_query = (
+            bool(re.search(r'\b(?:holiday|holidays|public\s+holiday|public\s+holidays|working\s+day|workday|working\s+or\s+holiday|holiday\s+or\s+working)\b', text_lower))
+            or bool(re.search(r'\b(?:special\s+day|special\s+days|festival|festivals)\b', text_lower))
+        )
+        if is_holiday_query:
+            is_pub = "public" in text_lower
+            check_work = any(w in text_lower for w in ("working", "workday", "work day"))
+            inquire_name = any(w in text_lower for w in ("what holiday", "which holiday", "what is the holiday", "which is the holiday", "what festival"))
+
+            # Check if this is a range query for holidays: e.g. "this month", "next 7 days", "next week", "upcoming"
+            m_next_days = re.search(r'\b(?:in\s+the\s+)?next\s+(\d+|seven|three|four|five|six|ten|14|thirty)\s+days\b', text_lower)
+            is_month_holidays = bool(re.search(r'\b(?:this\s+month|in\s+(?:january|february|march|april|may|june|july|august|september|october|november|december))\b', text_lower))
+            is_week_holidays = bool(re.search(r'\b(?:this\s+week|next\s+week)\b', text_lower))
+
+            # Check explicit country in query
+            loc = None
+            if re.search(r'\b(?:in\s+(?:the\s+)?(?:us|usa|united\s+states|america))\b', text_lower):
+                loc = "US"
+            elif re.search(r'\b(?:in\s+russia)\b', text_lower):
+                loc = "RU"
+            elif re.search(r'\b(?:in\s+india)\b', text_lower):
+                loc = "IN"
+            elif re.search(r'\b(?:in\s+(?:the\s+)?(?:uk|united\s+kingdom|britain))\b', text_lower):
+                loc = "GB"
+
+            if m_next_days or is_month_holidays or is_week_holidays or "upcoming" in text_lower:
+                start_iso = now.strftime("%Y-%m-%d")
+                end_iso = start_iso
+                duration_days = 7
+                if m_next_days:
+                    num_str = m_next_days.group(1).lower()
+                    words_to_num = {"seven": 7, "three": 3, "four": 4, "five": 5, "six": 6, "ten": 10, "thirty": 30}
+                    d_count = words_to_num.get(num_str, int(num_str) if num_str.isdigit() else 7)
+                    duration_days = d_count
+                    end_iso = (now + timedelta(days=d_count)).strftime("%Y-%m-%d")
+                elif is_month_holidays:
+                    m_match = re.search(r'\b(' + '|'.join(cls.MONTHS.keys()) + r')\b', text_lower)
+                    target_month = cls.MONTHS[m_match.group(1).lower()] if m_match else now.month
+                    target_year = now.year
+                    import calendar as _cal
+                    last_day = _cal.monthrange(target_year, target_month)[1]
+                    start_iso = f"{target_year:04d}-{target_month:02d}-01"
+                    end_iso = f"{target_year:04d}-{target_month:02d}-{last_day:02d}"
+                    duration_days = last_day
+                elif is_week_holidays:
+                    duration_days = 7
+                    end_iso = (now + timedelta(days=7)).strftime("%Y-%m-%d")
+
+                return {
+                    "action": "view_holidays",
+                    "subject": "holiday",
+                    "entities": {
+                        "is_public_holiday_query": is_pub,
+                        "check_working_day": check_work,
+                        "location": loc
+                    },
+                    "temporal_context": {
+                        "relative_date": "range",
+                        "normalized_date": start_iso,
+                        "end_date": end_iso,
+                        "normalized_end_date": end_iso,
+                        "duration_days": duration_days
+                    }
+                }
+
+            # Check for weekday ambiguity (e.g. "Is Monday a public holiday?" when today is Monday)
+            is_ambiguous = False
+            cur_wd = now.weekday()
+            for w_name, w_code in cls.WEEKDAYS.items():
+                if re.search(r'\b' + w_name + r'\b', text_lower):
+                    target_wd = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}[w_code]
+                    if cur_wd == target_wd and not any(k in text_lower for k in ["this", "next", "today", "coming"]):
+                        is_ambiguous = True
+                    break
+
+            # Single date holiday check
+            rel_date = "today"
+            norm_date = now.strftime("%Y-%m-%d")
+            duration_days = 1
+            if "tomorrow" in text_lower:
+                rel_date = "tomorrow"
+                norm_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+            elif "yesterday" in text_lower:
+                rel_date = "yesterday"
+                norm_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            else:
+                p_date = cls._parse_date_str(text_clean)
+                if p_date:
+                    norm_date = p_date
+                    rel_date = p_date
+
+            return {
+                "action": "check_holiday",
+                "subject": "holiday",
+                "entities": {
+                    "is_public_holiday_query": is_pub,
+                    "check_working_day": check_work,
+                    "inquire_name": inquire_name,
+                    "is_ambiguous_weekday": is_ambiguous,
+                    "location": loc
+                },
+                "temporal_context": {
+                    "relative_date": rel_date,
+                    "normalized_date": norm_date,
+                    "duration_days": duration_days
                 }
             }
 

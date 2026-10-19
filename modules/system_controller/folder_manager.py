@@ -53,8 +53,20 @@ def create_folder(folder_name, location="desktop"):
         str: Success message or error
     """
     try:
-        if location == "desktop":
+        loc_low = str(location or "desktop").lower().strip()
+        if loc_low == "desktop":
             base_path = get_desktop_path()
+        elif loc_low in ("download", "downloads"):
+            base_path = os.path.join(get_user_home(), "Downloads")
+            os.makedirs(base_path, exist_ok=True)
+        elif loc_low in ("document", "documents"):
+            base_path = os.path.join(get_user_home(), "Documents")
+            os.makedirs(base_path, exist_ok=True)
+        elif loc_low in ("picture", "pictures"):
+            base_path = os.path.join(get_user_home(), "Pictures")
+            os.makedirs(base_path, exist_ok=True)
+        elif os.path.isabs(str(location)) and os.path.isdir(str(location)):
+            base_path = str(location)
         else:
             base_path = get_user_home()
 
@@ -98,8 +110,17 @@ def delete_folder(folder_name, location="desktop", confirm=False):
         return "Error: Deletion requires explicit confirmation."
     
     try:
-        if location == "desktop":
+        loc_low = str(location or "desktop").lower().strip()
+        if loc_low == "desktop":
             base_path = get_desktop_path()
+        elif loc_low in ("download", "downloads"):
+            base_path = os.path.join(get_user_home(), "Downloads")
+        elif loc_low in ("document", "documents"):
+            base_path = os.path.join(get_user_home(), "Documents")
+        elif loc_low in ("picture", "pictures"):
+            base_path = os.path.join(get_user_home(), "Pictures")
+        elif os.path.isabs(str(location)) and os.path.isdir(str(location)):
+            base_path = str(location)
         else:
             base_path = get_user_home()
 
@@ -112,6 +133,8 @@ def delete_folder(folder_name, location="desktop", confirm=False):
         
         if os.path.exists(folder_path):
             shutil.rmtree(folder_path)
+            if os.path.exists(folder_path):
+                return f"Error: Folder '{folder_name}' could not be removed (it may be locked or in use)."
             logger.info(f"Folder deleted: {folder_path}")
             return f"Folder '{folder_name}' deleted."
         else:

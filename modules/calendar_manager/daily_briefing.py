@@ -67,20 +67,15 @@ def get_daily_briefing(user_id: Optional[int] = None, user_name: Optional[str] =
             for e in events:
                 loc_str = f" ({e['location']})" if e.get('location') else ""
                 dur_str = f" [{e['duration_minutes']}m]" if e.get('duration_minutes') and e.get('duration_minutes') != 60 else ""
-                ev_items.append(f"• {e.get('title', 'Event')} at {e.get('time', 'all day')}{dur_str}{loc_str}")
+                raw_t = e.get('time')
+                t_display = "all day"
+                if raw_t:
+                    t_obj = CalendarStorage._parse_time(raw_t)
+                    t_display = t_obj.strftime("%I:%M %p").lstrip("0") if t_obj else str(raw_t)
+                ev_items.append(f"• '{e.get('title', 'Event')}' at {t_display}{dur_str}{loc_str}")
             speech_parts.append(f"You have {len(events)} event{'s' if len(events) > 1 else ''} scheduled today.")
         else:
             speech_parts.append("Your calendar is clear for today.")
-
-        try:
-            from modules.calendar_manager.special_days_service import get_special_days_service
-            spec_service = get_special_days_service(region=region, user_id=uid)
-            special_day = spec_service.get_special_day(today_iso)
-            if special_day:
-                ev_items.append(f"🎉 Today is {special_day['name']} ({special_day.get('type', 'Special Day')})")
-                speech_parts.append(f"Today is {special_day['name']}.")
-        except Exception:
-            pass
 
         if ev_items:
             events_summary = "\n".join(ev_items)
@@ -88,6 +83,28 @@ def get_daily_briefing(user_id: Optional[int] = None, user_name: Optional[str] =
         logger.warning(f"[BRIEFING] Failed to load calendar events: {e}")
 
     sections.append(("Schedule", events_summary))
+
+    # 2b. Public Holidays & Cultural Observances (Strictly separated from personal schedule)
+    holiday_summary = "No public holidays today."
+    try:
+        from modules.calendar_manager.special_days_service import get_special_days_service
+        spec_service = get_special_days_service(region=region, user_id=uid)
+        special_day = spec_service.get_special_day(today_iso)
+        if special_day:
+            h_name = special_day.get('name', 'Special Day')
+            h_type = special_day.get('type', 'Observance')
+            h_type_low = str(h_type).lower()
+            is_official = any(p in h_type_low for p in ("public holiday", "gazetted national holiday", "federal holiday")) and not any(p in h_type_low for p in ("observance", "optional", "restricted"))
+            if is_official:
+                holiday_summary = f"🎉 {h_name} ({h_type}) — Official Public Holiday"
+                speech_parts.append(f"Today is an official public holiday: {h_name}.")
+            else:
+                holiday_summary = f"🎉 {h_name} ({h_type}) — Cultural Observance (regular working day)"
+                speech_parts.append(f"Today is observed as {h_name} ({h_type}), which is a cultural observance rather than an official public holiday.")
+    except Exception as e:
+        logger.debug(f"[BRIEFING] Special day check note: {e}")
+
+    sections.append(("Public Holidays & Observances", holiday_summary))
 
     # 3. Active Reminders
     reminders_summary = "No pending reminders."

@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Optional
 from dotenv import load_dotenv
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -58,48 +59,48 @@ class Settings:
 
         self.GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         
-        # Support multiple keys per provider for failover
-        self.OPENAI_API_KEYS = [key for key in [
+        # Support multiple keys per provider for failover (deduplicated)
+        self.OPENAI_API_KEYS = list(dict.fromkeys([key.strip() for key in [
             os.getenv("OPENAI_API_KEY", ""),
             os.getenv("OPENAI_API_KEY_1", ""),
             os.getenv("OPENAI_API_KEY_2", ""),
             os.getenv("OPENAI_API_KEY_3", ""),
-        ] if key]
+        ] if key and key.strip()]))
         
-        self.GROQ_API_KEYS = [key for key in [
+        self.GROQ_API_KEYS = list(dict.fromkeys([key.strip() for key in [
             os.getenv("GROQ_API_KEY", ""),
             os.getenv("GROQ_API_KEY_1", ""),
             os.getenv("GROQ_API_KEY_2", ""),
             os.getenv("GROQ_API_KEY_3", ""),
-        ] if key]
+        ] if key and key.strip()]))
         
-        self.GEMINI_API_KEYS = [key for key in [
+        self.GEMINI_API_KEYS = list(dict.fromkeys([key.strip() for key in [
             os.getenv("GEMINI_API_KEY", ""),
             os.getenv("GEMINI_API_KEY_1", ""),
             os.getenv("GEMINI_API_KEY_2", ""),
             os.getenv("GEMINI_API_KEY_3", ""),
-        ] if key]
+        ] if key and key.strip()]))
         
-        self.DEEPSEEK_API_KEYS = [key for key in [
+        self.DEEPSEEK_API_KEYS = list(dict.fromkeys([key.strip() for key in [
             os.getenv("DEEPSEEK_API_KEY", ""),
             os.getenv("DEEPSEEK_API_KEY_1", ""),
             os.getenv("DEEPSEEK_API_KEY_2", ""),
             os.getenv("DEEPSEEK_API_KEY_3", ""),
-        ] if key]
+        ] if key and key.strip()]))
         
-        self.HF_API_KEYS = [key for key in [
+        self.HF_API_KEYS = list(dict.fromkeys([key.strip() for key in [
             os.getenv("HF_API_KEY", ""),
             os.getenv("HF_API_KEY_1", ""),
             os.getenv("HF_API_KEY_2", ""),
             os.getenv("HF_API_KEY_3", ""),
-        ] if key]
+        ] if key and key.strip()]))
 
         self.ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-        self.ANTHROPIC_API_KEYS = [key for key in [
+        self.ANTHROPIC_API_KEYS = list(dict.fromkeys([key.strip() for key in [
             os.getenv("ANTHROPIC_API_KEY", ""),
             os.getenv("ANTHROPIC_API_KEY_1", ""),
             os.getenv("ANTHROPIC_API_KEY_2", ""),
-        ] if key]
+        ] if key and key.strip()]))
         self.ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
         self.ANTHROPIC_TIMEOUT = float(os.getenv("ANTHROPIC_TIMEOUT", "8.0"))
 
@@ -209,11 +210,22 @@ class Settings:
 
 
 
-        # --- AUDIO STABILIZATION ---
+        # --- AUDIO STABILIZATION & INTELLIGENT DUCKING ---
 
-        self.ENABLE_DUCKING = os.getenv("ENABLE_DUCKING", "false").lower() in ("true", "1", "yes")
+        self.ENABLE_DUCKING = os.getenv("ENABLE_DUCKING", "true").lower() in ("true", "1", "yes")
 
         self.DUCKING_INTENSITY = int(os.getenv("DUCKING_INTENSITY", "5"))
+
+        # --- MUSIC PLAYBACK & VOICE INTERACTION CONFIGURATION ---
+        self.MUSIC_AUDIO_BACKEND = os.getenv("MUSIC_AUDIO_BACKEND", "vlc")
+        self.MUSIC_AUDIO_DEVICE = os.getenv("MUSIC_AUDIO_DEVICE", "")
+        self.MUSIC_DEFAULT_VOLUME = int(os.getenv("MUSIC_DEFAULT_VOLUME", "70"))
+        self.MUSIC_DUCKING_TARGET = float(os.getenv("MUSIC_DUCKING_TARGET", "0.20"))
+        self.MUSIC_DUCK_ATTACK_MS = int(os.getenv("MUSIC_DUCK_ATTACK_MS", "250"))
+        self.MUSIC_RESTORE_DURATION_MS = int(os.getenv("MUSIC_RESTORE_DURATION_MS", "600"))
+        self.MUSIC_SPEECH_END_SILENCE_SEC = float(os.getenv("MUSIC_SPEECH_END_SILENCE_SEC", "1.2"))
+        self.MUSIC_STREAM_TIMEOUT = float(os.getenv("MUSIC_STREAM_TIMEOUT", "10.0"))
+        self.MUSIC_RESOLVE_EXPIRY_REFRESH = os.getenv("MUSIC_RESOLVE_EXPIRY_REFRESH", "true").lower() in ("true", "1", "yes")
 
         # --- HOTWORD DETECTION ---
         self.HOTWORD_WAKE_THRESHOLD = float(os.getenv("HOTWORD_WAKE_THRESHOLD", "0.35"))
@@ -273,6 +285,8 @@ class Settings:
         self.CURRENT_USER_ID = None
         self.CURRENT_USERNAME = None
         self.LAST_ASSISTANT_MSG = ""
+        self.ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Trevon")
+        self.CURRENT_ASSISTANT_NAME = None
 
 
 
@@ -430,4 +444,24 @@ class Settings:
 
 
 settings = Settings()
+CONFIG = settings
+
+
+def get_assistant_name() -> str:
+    """Returns the active assistant name for the current session."""
+    return settings.get_assistant_name()
+
+
+def get_branding_author(override: Optional[str] = None) -> str:
+    """
+    Returns the canonical assistant author name for generated documents and artifacts.
+    Replaces retired legacy project names with the canonical assistant name while
+    preserving custom user-specified authors.
+    """
+    if override and isinstance(override, str) and override.strip():
+        cleaned = override.strip()
+        if cleaned.lower() not in ("nova", "nova assistant", "nova smart assistant", "nova document intelligence"):
+            return cleaned
+    return get_assistant_name() or "Trevon"
+
 

@@ -631,6 +631,29 @@ def get_user_preference_db(user_id, key: str, default=None):
     return default
 
 
+def get_all_user_preferences_db(user_id) -> dict:
+    """Retrieve all user preferences from PostgreSQL user_preferences table."""
+    if not user_id:
+        return {}
+    res = {}
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT pref_key, pref_value FROM user_preferences WHERE user_id = %s",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        for k, v in rows:
+            if k and v is not None:
+                res[str(k).strip()] = str(v).strip()
+    except Exception as e:
+        print(f"[DB PREF ERROR] get_all_user_preferences_db: {e}")
+    return res
+
+
 def set_user_preference_db(user_id, key: str, value) -> bool:
     """
     Persist a user-specific preference into PostgreSQL user_preferences table,

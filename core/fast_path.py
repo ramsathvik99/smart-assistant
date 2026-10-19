@@ -170,6 +170,10 @@ class FastPathProcessor:
 
         concise_capability_overview = cap_reg.format_concise_capabilities()
 
+        if any(k in norm_low for k in ("full list of capabilities", "all capabilities", "list of all capabilities", "full capabilities list")) or norm_low in ("show me the full list of capabilities", "show the full list of capabilities", "tell me the full list of capabilities"):
+            resp = cap_reg.format_capabilities_overview()
+            return cls._build_result("CAPABILITY_QUERY", resp, dialogue_mgr)
+
         if norm_low in (
             "the action that you can perform", "the actions that you can perform",
             "the actions you can perform", "action that you can perform", "actions that you can perform",
@@ -178,7 +182,7 @@ class FastPathProcessor:
             "what are you capable of", "what can you do for me", "tell me what you can do",
             "help", "capabilities"
         ) or re.match(r'^(?:what\s+actions?\s+(?:can\s+you|do\s+you)\s+perform|the\s+actions?\s+(?:that\s+)?you\s+can\s+perform)$', norm_low):
-            resp = cap_reg.format_capabilities_overview()
+            resp = concise_capability_overview
             return cls._build_result("CAPABILITY_QUERY", resp, dialogue_mgr)
 
         # Check active continuation state for list queries before generic capability dump
@@ -346,7 +350,15 @@ class FastPathProcessor:
             resp = "Understood. Please go ahead, I'm listening to your full request."
             return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
 
-        if norm_low in ("no that's not what i meant", "no that is not what i meant", "that's not what i asked", "that is not what i asked"):
+        if norm_low in (
+            "no that's not what i meant", "no that is not what i meant",
+            "that's not what i asked", "that is not what i asked",
+            "that's not what i said", "that is not what i said",
+            "no that's not what i said", "no that is not what i said",
+            "thats not what i said", "thats not what i asked"
+        ):
+            if dialogue_mgr and hasattr(dialogue_mgr, "current_state") and getattr(dialogue_mgr.current_state, "turns", None):
+                return None
             resp = "Understood. Let me know what you'd like me to do instead."
             return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
 

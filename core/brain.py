@@ -518,6 +518,22 @@ def _brain_process_core(
     # ------------------------------------------------------------------
     uid_int = int(user_id) if (user_id and str(user_id).isdigit()) else 1
 
+    # ------------------------------------------------------------------
+    # Step 1.1d — AUTOMATIC CONTEXT-AWARE MEMORY EXTRACTION & INJECTION
+    # Extract candidate facts from user input synchronously to update live
+    # dialogue entities and user memory facts before planning and execution.
+    # ------------------------------------------------------------------
+    try:
+        from core.chatgpt_memory import get_chatgpt_memory
+        extracted_facts = get_chatgpt_memory().extract_and_persist_facts(uid_int, user_input)
+        if extracted_facts:
+            user_facts = get_chatgpt_memory().get_user_facts(uid_int)
+            dialogue_mgr.current_state.session_context["user_facts"] = user_facts
+            for k, v in extracted_facts:
+                dialogue_mgr.current_state.entities[k] = v
+    except Exception as _mem_sync_err:
+        pass
+
     # Ensure context manager in-memory history is seeded from PostgreSQL if empty
     try:
         from extensions.context_manager import context_manager
@@ -535,7 +551,8 @@ def _brain_process_core(
     # Step 1.1b — CANONICAL SEMANTIC INTENT UNDERSTANDING
     # ------------------------------------------------------------------
     from core.semantic_understanding import semantic_understanding_engine
-    semantic_rep = semantic_understanding_engine.analyze(user_input, dialogue_mgr.current_state, uid_int)
+    input_to_analyze = routing_input if reference_resolved else user_input
+    semantic_rep = semantic_understanding_engine.analyze(input_to_analyze, dialogue_mgr.current_state, uid_int)
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
@@ -969,7 +986,8 @@ def _brain_process_core(
         cap_reg = get_capability_registry()
         clean_q = re.sub(r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|trevon|nova|jarvis|assistant)[,\s:]*', '', clean_low).strip()
         spec_ans = cap_reg.check_capability_support(clean_q)
-        cap_resp = spec_ans if spec_ans else cap_reg.format_capabilities_overview()
+        is_full_request = any(w in clean_low for w in ("full list", "all capabilities", "full registry", "show all", "everything you can do"))
+        cap_resp = spec_ans if spec_ans else (cap_reg.format_capabilities_overview() if is_full_request else cap_reg.format_concise_capabilities())
         full_resp = (pending_prefix + cap_resp).strip()
         dialogue_mgr.record_response(full_resp)
         return {
@@ -2747,16 +2765,105 @@ def _brain_process_core(
     # ------------------------------------------------------------------
     _clean_stop_cmd = clean_low.rstrip('.?!,').strip()
 
-    # Contextual STOP: Resolves by active context (TTS -> Reading -> Music -> Task)
-    if _clean_stop_cmd in (
+    is_explicit_speech_stop = _clean_stop_cmd in (
+        "stop talking", "stop speaking", "be quiet", "shut up", "hush", "mute yourself", "stop voice"
+    ) or bool(re.search(r'\b(?:stop\s+(?:talking|speaking)|be\s+quiet|shut\s+up|mute\s+yourself)\b', _clean_stop_cmd))
+
+    is_explicit_music_stop = _clean_stop_cmd in (
+        "stop music", "pause music", "stop song", "pause song", "stop songs",
+        "stop playing songs", "stop playing music", "stop the music", "stop singing",
+        "stop singing songs", "stop audio", "stop playback", "stop the playback",
+        "stop the song", "stop the songs", "stop the audio", "stop the track", "stop track"
+    ) or bool(re.search(r'\b(?:stop|pause)\s+(?:playing\s+)?(?:the\s+)?(?:songs?|music|audio|tracks?|playback|singing)\b', _clean_stop_cmd)) or bool(re.search(r'\bstop\s+singing\b', _clean_stop_cmd))
+
+    is_stop_everything = _clean_stop_cmd in (
+        "stop everything", "stop all", "halt everything", "stop all playback", "stop speech and music"
+    ) or bool(re.search(r'\b(?:stop\s+everything|stop\s+all|halt\s+everything)\b', _clean_stop_cmd))
+
+    is_generic_stop = _clean_stop_cmd in (
         "stop", "halt", "hold on", "pause", "wait", "stop that", "stop it", "stop this",
-        "be quiet", "shut up", "hush", "stop talking", "stop speaking", "mute yourself",
-        "stop reading", "pause reading", "stop music", "pause music", "stop task", "cancel task"
-    ) or bool(re.match(r'^(?:please\s+)?(?:stop|halt|cancel)\s+(?:that|it|this|task)[.!?]?$', _clean_stop_cmd)):
+        "stop task", "cancel task"
+    ) or bool(re.match(r'^(?:please\s+)?(?:stop|halt|cancel)\s+(?:that|it|this|task)[.!?]?$', _clean_stop_cmd))
+
+    # 1. Explicit Speech Interruption (controls Friday's TTS only; does not affect music)
+    if is_explicit_speech_stop:
+        try:
+            from legacy.tts import stop_speaking
+            stop_speaking(interrupted=True)
+            msg = "Stopped speaking."
+            dialogue_mgr.record_response(msg)
+            return {
+                "status": "success",
+                "intent": "STOP_ASSISTANT_SPEECH",
+                "response": msg,
+                "handled": True,
+            }
+        except Exception:
+            pass
+
+    # 2. Explicit Music Stop (stops music controller immediately; does not interrupt speech or shutdown assistant)
+    elif is_explicit_music_stop:
+        try:
+            from modules.music.music_controller import get_controller
+            _m_ctrl = get_controller()
+            _m_ctrl.media_stop()
+            msg = "Music playback stopped."
+            dialogue_mgr.record_response(msg)
+            return {
+                "status": "success",
+                "intent": "MUSIC",
+                "response": msg,
+                "action": "stop",
+                "handled": True,
+            }
+        except Exception:
+            pass
+
+    # 3. Stop Everything (stops speech, music, reading, and running tasks without shutting down assistant)
+    elif is_stop_everything:
+        try:
+            from legacy.tts import is_speaking, stop_speaking
+            if is_speaking():
+                stop_speaking(interrupted=True)
+        except Exception:
+            pass
+        try:
+            from core.artifact_reader import get_artifact_reading_controller
+            _r_ctrl = get_artifact_reading_controller()
+            if _r_ctrl.is_reading(uid_int):
+                _r_ctrl.stop_reading(user_id=uid_int)
+        except Exception:
+            pass
+        try:
+            from modules.music.music_controller import get_controller
+            _m_ctrl = get_controller()
+            _m_ctrl.media_stop()
+        except Exception:
+            pass
+        try:
+            from core.task_execution_manager import get_task_execution_manager
+            tem = get_task_execution_manager()
+            active_tasks = tem.list_active_tasks(user_id=uid_int)
+            for t in active_tasks:
+                tem.cancel_task(t.task_id, user_id=uid_int)
+        except Exception:
+            pass
+        msg = "Stopped all active speech and playback."
+        dialogue_mgr.record_response(msg)
+        return {
+            "status": "success",
+            "intent": "MUSIC",
+            "action": "stop_all",
+            "response": msg,
+            "handled": True,
+        }
+
+    # 4. Generic Contextual Stop (resolves by active context: TTS -> Reading -> Music -> Task)
+    elif is_generic_stop:
         # 1. Check if Assistant TTS is currently speaking
         try:
             from legacy.tts import is_speaking, stop_speaking
-            if is_speaking() or _clean_stop_cmd in ("stop talking", "stop speaking", "be quiet", "shut up", "hush", "mute yourself"):
+            if is_speaking():
                 stop_speaking(interrupted=True)
                 msg = "Stopped speaking."
                 dialogue_mgr.record_response(msg)
@@ -2773,7 +2880,7 @@ def _brain_process_core(
         try:
             from core.artifact_reader import get_artifact_reading_controller
             _r_ctrl = get_artifact_reading_controller()
-            if _r_ctrl.is_reading(uid_int) or _clean_stop_cmd in ("stop reading", "pause reading"):
+            if _r_ctrl.is_reading(uid_int):
                 stop_res = _r_ctrl.stop_reading(user_id=uid_int)
                 resp_str = (pending_prefix + stop_res.get("response", "Stopped reading.")).strip()
                 dialogue_mgr.record_response(resp_str)
@@ -2791,7 +2898,7 @@ def _brain_process_core(
         try:
             from modules.music.music_controller import get_controller
             _m_ctrl = get_controller()
-            if _m_ctrl.is_playing() or _clean_stop_cmd in ("stop music", "pause music", "stop song", "pause song"):
+            if _m_ctrl.is_playing():
                 _m_ctrl.media_stop()
                 msg = "Music playback stopped."
                 dialogue_mgr.record_response(msg)
@@ -2810,7 +2917,7 @@ def _brain_process_core(
             from core.task_execution_manager import get_task_execution_manager
             tem = get_task_execution_manager()
             active_tasks = tem.list_active_tasks(user_id=uid_int)
-            if active_tasks and (_clean_stop_cmd in ("stop that", "stop it", "stop this", "stop task", "cancel task") or len(active_tasks) == 1):
+            if active_tasks:
                 tgt_task = active_tasks[0]
                 cancel_res = tem.cancel_task(tgt_task.task_id, user_id=uid_int)
                 resp_str = cancel_res.get("response", f"Cancelled task '{tgt_task.normalized_goal}'.")
@@ -3447,9 +3554,32 @@ def _brain_process_core(
             if (dialogue_mgr and dialogue_mgr.current_state.session_context.get("active_natural_goal")
                 and dialogue_mgr.current_state.current_goal
                 and isinstance(dialogue_mgr.current_state.current_goal, dict)
-                and dialogue_mgr.current_state.current_goal.get("status") not in ("COMPLETED", "CANCELLED"))
+                and dialogue_mgr.current_state.current_goal.get("status") not in ("COMPLETED", "CANCELLED", "OVERRIDDEN"))
             else None
         )
+        # Check if the new command is an independent request overriding the active natural goal
+        if active_nat_goal is not None:
+            active_intent = active_nat_goal.get("intent")
+            active_desc = str(active_nat_goal.get("description", "")).lower()
+            new_intent = analysis.primary_intent.name
+            u_low = routing_input.lower()
+            is_subtask_or_related = False
+            if any(k in u_low for k in ("continue", "next", "resume", "go on", "yes", "keep going")):
+                is_subtask_or_related = True
+            elif active_intent and active_intent == new_intent:
+                is_subtask_or_related = True
+            elif any(w in u_low for w in active_desc.split() if len(w) > 4):
+                is_subtask_or_related = True
+
+            if not is_subtask_or_related:
+                # An explicit independent new request takes precedence over the unfinished goal
+                if dialogue_mgr:
+                    if isinstance(dialogue_mgr.current_state.current_goal, dict):
+                        dialogue_mgr.current_state.current_goal["status"] = "OVERRIDDEN"
+                        dialogue_mgr.current_state.session_context["last_overridden_goal"] = dict(dialogue_mgr.current_state.current_goal)
+                    dialogue_mgr.current_state.session_context["active_natural_goal"] = None
+                active_nat_goal = None
+
         if is_natural_goal:
             final_outcome = "RUNNING"
             failure_reason = None
@@ -3889,6 +4019,14 @@ def _execute_plan_stateful(
       9. Handle ambiguity (WAITING_FOR_USER)
       10. Continue to next dependent step or halt on failure
     """
+    from dataclasses import asdict
+    if dialogue_mgr is None:
+        try:
+            from extensions.dialogue_state_manager import get_dialogue_manager
+            dialogue_mgr = get_dialogue_manager(user_id)
+        except Exception:
+            pass
+
     step_results: List[Dict[str, Any]] = []
     accumulated_context: Dict[str, Any] = {}
 
@@ -4172,12 +4310,24 @@ def _execute_plan_stateful(
         # Accumulate context for downstream steps
         accumulated_context[step.intent.name] = step_result.get("response", "")
 
-    # If all steps completed successfully, mark plan COMPLETED
+    # Explicitly distinguish COMPLETED, PARTIALLY_COMPLETED, and FAILED
     if all(s.status == "COMPLETED" for s in plan.steps):
         plan.goal_status = "COMPLETED"
         if dialogue_mgr:
             dialogue_mgr.current_state.goal_status = "COMPLETED"
             dialogue_mgr.current_state.session_context["last_completed_goal"] = original_input
+            dialogue_mgr.current_state.pending_goal_continuation = None
+    elif any(s.status == "COMPLETED" for s in plan.steps) and any(s.status in ("FAILED", "BLOCKED") for s in plan.steps):
+        plan.goal_status = "PARTIALLY_COMPLETED"
+        if dialogue_mgr:
+            dialogue_mgr.current_state.goal_status = "PARTIALLY_COMPLETED"
+            from dataclasses import asdict
+            remaining_steps = [s for s in plan.steps if s.status != "COMPLETED"]
+            dialogue_mgr.current_state.pending_goal_continuation = {
+                "original_input": original_input,
+                "plan": asdict(plan) if hasattr(plan, "__dataclass_fields__") else plan,
+                "remaining_steps": [asdict(s) if hasattr(s, "__dataclass_fields__") else s for s in remaining_steps]
+            }
     elif getattr(plan, "goal_status", None) != "WAITING_FOR_USER":
         plan.goal_status = "FAILED"
         if dialogue_mgr:
@@ -4427,14 +4577,12 @@ def _verify_action_result(
     if verification.status == OutcomeStatus.VERIFIED_SUCCESS:
         result["verified"] = True
         result["verification_source"] = verification.verification_method
-        if "status" in result and result["status"] == "error":
-            result["status"] = "success"
 
     elif verification.status == OutcomeStatus.VERIFIED_FAILURE:
         # FALSE COMPLETION PROTECTION:
         # Action reported success but outcome failed -> mark failed!
         result["verified"] = False
-        result["status"] = "failed"
+        result["status"] = result.get("status") if result.get("status") in ("declined", "unverified") else "failed"
         if verification.failure_reason:
             result["failure_reason"] = verification.failure_reason
             # Provide truthful failure response if original was falsely claiming success

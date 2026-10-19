@@ -732,8 +732,8 @@ class DialogueStateManager:
             print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (ephemeral visual surface for '{spec_target}')")
             return resolved, True
 
-        # ── 0d. Action Repetition ("Do it again", "Do that again", "Repeat that", "Once more", "Again", "Try that again") ──
-        if re.match(r'^(?:try\s+(?:that|it)?\s+again|try\s+again|do\s+(?:it|that)\s+again|do\s+again|once\s+more|again|repeat\s+(?:that|it|the\s+last\s+action))[.!?]?$', lower):
+        # ── 0d. Action Repetition ("Do it again", "Do that again", "Repeat that", "Once more", "Again", "Try that again", "Start again") ──
+        if re.match(r'^(?:start\s+(?:again|over)|let\'?s?\s+start\s+(?:again|over)|try\s+(?:that|it)?\s+again|try\s+again|do\s+(?:it|that)\s+again|do\s+again|once\s+more|again|repeat\s+(?:that|it|the\s+last\s+action))[.!?]?$', lower):
             # Check recent failed action first if user said "try that again"
             if self.current_state.recent_failed_actions:
                 last_fail = self.current_state.recent_failed_actions[-1].get("command")
@@ -897,6 +897,108 @@ class DialogueStateManager:
                     print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (web search follow-up for: '{candidate}')")
                     return resolved, True
 
+        # ── 3b. Follow-ups to telemetry or prior local commands ("so find it", "find it", "what do you mean?", "check it and tell me") ──
+        m_find_it = re.match(
+            r'^(?:(?:so|then|okay|ok)[,\s]+)?(?:find|check|get|tell\s+me\s+about|tell\s+me|show|inspect|run)\s*(?:it|that|again|them)?(?:\s+and\s+(?:tell|show|report|give)(?:\s+(?:me|it))?)?(?:\s+again)?[.!?]?$',
+            lower
+        )
+        if m_find_it:
+            last_telem = self.current_state.session_context.get("last_telemetry_action")
+            last_act = (self.current_state.last_action or {}).get("action")
+            target_telem = last_telem or last_act
+            # If not in state, inspect prior turn user input
+            if not target_telem and self.current_state.turns:
+                prev_text = self.current_state.turns[-1].user_input.lower()
+                if "most cpu" in prev_text or "highest cpu" in prev_text or "top cpu" in prev_text or "top process" in prev_text:
+                    target_telem = "top_cpu_processes"
+                elif "uptime" in prev_text or "running" in prev_text or "been on" in prev_text:
+                    target_telem = "uptime"
+                elif "cpu" in prev_text:
+                    target_telem = "cpu"
+                elif "ram" in prev_text or "memory" in prev_text:
+                    target_telem = "ram"
+                elif "disk" in prev_text or "storage" in prev_text:
+                    target_telem = "disk"
+                elif "gpu" in prev_text:
+                    target_telem = "gpu"
+                elif "battery" in prev_text:
+                    target_telem = "battery"
+                elif "volume" in prev_text:
+                    target_telem = "volume"
+
+            if target_telem in ("top_cpu_processes", "top_processes"):
+                resolved = "which application is using the most cpu"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (prior top cpu process query follow-up)")
+                return resolved, True
+            elif target_telem == "uptime":
+                resolved = "what is my system uptime"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (prior uptime query follow-up)")
+                return resolved, True
+            elif target_telem in ("cpu", "cpu_metrics", "detailed_cpu"):
+                resolved = "what is my cpu usage"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (prior cpu query follow-up)")
+                return resolved, True
+            elif target_telem in ("ram", "ram_metrics", "detailed_ram"):
+                resolved = "what is my ram usage"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (prior ram query follow-up)")
+                return resolved, True
+            elif target_telem in ("battery", "battery_status"):
+                resolved = "what is my battery status"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (prior battery query follow-up)")
+                return resolved, True
+            elif target_telem in ("disk", "all_disks"):
+                resolved = "how much disk space is available"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (prior disk query follow-up)")
+                return resolved, True
+            elif target_telem in ("gpu", "gpu_telemetry"):
+                resolved = "what is my gpu telemetry"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (prior gpu query follow-up)")
+                return resolved, True
+            elif target_telem and "volume" in target_telem:
+                resolved = "what is the current volume"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (prior volume query follow-up)")
+                return resolved, True
+
+        m_mean = re.match(r'^(?:(?:can\s+you\s+|please\s+)?(?:explain\s+(?:that|it|this)(?:\s+to\s+me)?|what\s+do\s+you\s+mean(?:\s+by\s+that)?|what\s+does\s+that\s+mean))[.!?]?$', lower)
+        if m_mean:
+            last_telem = self.current_state.session_context.get("last_telemetry_action")
+            last_act = (self.current_state.last_action or {}).get("action")
+            target_telem = last_telem or last_act
+            if not target_telem and self.current_state.turns:
+                prev_text = self.current_state.turns[-1].user_input.lower()
+                if "most cpu" in prev_text or "highest cpu" in prev_text or "top cpu" in prev_text or "top process" in prev_text:
+                    target_telem = "top_cpu_processes"
+                elif "uptime" in prev_text or "running" in prev_text or "been on" in prev_text:
+                    target_telem = "uptime"
+                elif "cpu" in prev_text:
+                    target_telem = "cpu"
+                elif "ram" in prev_text or "memory" in prev_text:
+                    target_telem = "ram"
+                elif "battery" in prev_text:
+                    target_telem = "battery"
+
+            if target_telem in ("top_cpu_processes", "cpu", "cpu_metrics", "detailed_cpu"):
+                resolved = "explain cpu usage"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (cpu explanation follow-up)")
+                return resolved, True
+            elif target_telem == "uptime":
+                resolved = "explain system uptime"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (uptime explanation follow-up)")
+                return resolved, True
+            elif target_telem in ("ram", "ram_metrics", "detailed_ram"):
+                resolved = "explain ram usage"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (ram explanation follow-up)")
+                return resolved, True
+            elif target_telem in ("battery", "battery_status"):
+                resolved = "explain battery status"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (battery explanation follow-up)")
+                return resolved, True
+            elif self._last_mentioned_entity and self._last_mentioned_entity.get("value"):
+                ent_val = self._last_mentioned_entity.get("value")
+                resolved = f"explain {ent_val}"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (entity explanation follow-up)")
+                return resolved, True
+
         # ── 4. Active browser contextual search & result interaction ──
         active_site = self.current_state.session_context.get("active_site", "")
         active_app = self.current_state.active_application or ""
@@ -1022,6 +1124,42 @@ class DialogueStateManager:
             print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (conversational simplification)")
             return resolved, True
 
+        # ── 4f2. User Correction / Disapproval & Reconsideration ──
+        # Handles: "No, that's not what I asked, is today a holiday",
+        # "That's not what I asked, is Monday a public holiday?",
+        # "No, that's not what I asked", "That's not what I was asking"
+        m_corr_clarify = re.match(
+            r'^(?:(?:oh\s+)?no[,\s]+)?(?:that\'?s|that\s+is|it\'?s|it\s+is)?\s*(?:not\s+what\s+i\s+(?:asked|was\s+asking|meant|said|was\s+saying)|you\s+misunderstood|that\'?s\s+wrong)[,.:;!\s]+(.+)$',
+            clean_text,
+            re.IGNORECASE
+        )
+        if m_corr_clarify:
+            clarified = m_corr_clarify.group(1).strip()
+            if clarified:
+                if self.current_state.recent_intents:
+                    self.current_state.recent_intents.pop()
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{clarified}' (clarified request after user correction)")
+                return clarified, True
+
+        m_pure_corr = re.match(
+            r'^(?:(?:oh\s+)?no[,\s]+)?(?:that\'?s|that\s+is|it\'?s|it\s+is)?\s*(?:not\s+what\s+i\s+(?:asked|was\s+asking|meant|said|was\s+saying)|you\s+misunderstood|that\'?s\s+wrong)[.!?]?$',
+            clean_text,
+            re.IGNORECASE
+        )
+        if m_pure_corr:
+            prev_turn = None
+            for t in reversed(self.current_state.turns):
+                inp = getattr(t, "user_input", "") or ""
+                if inp and not re.search(r'\b(?:not\s+what\s+i|that\'?s\s+wrong|misunderstood)\b', inp, re.I):
+                    prev_turn = t
+                    break
+            if prev_turn and prev_turn.user_input:
+                orig_input = prev_turn.user_input
+                if self.current_state.recent_intents:
+                    self.current_state.recent_intents.pop()
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> Reconsidering original user goal: '{orig_input}'")
+                return orig_input, True
+
         # ── 4g. Interruption Entity / Parameter Correction ──
         # Handles: "No, I meant Edge", "No, Edge", "Actually, Edge", "Actually not Chrome, Edge",
         # "No not Chrome, open Edge", "Oh no, I meant Edge", "Not that, Edge", "I meant Microsoft Edge"
@@ -1067,7 +1205,8 @@ class DialogueStateManager:
             
             # Avoid matching pure format shifts like "make it pdf", "use pdf instead"
             is_pure_fmt_param = cand_low in ("pdf", "docx", "doc", "txt", "presentation", "ppt", "pptx", "excel", "spreadsheet") or cand_low in ("desktop", "downloads")
-            if (has_action or has_framing or len(cand_low.split()) >= 4) and not is_pure_fmt_param:
+            is_rejection = bool(re.search(r'\b(?:not\s+what\s+i|that\'?s\s+wrong|you\s+misunderstood)\b', cand_low))
+            if (has_action or has_framing or len(cand_low.split()) >= 4) and not is_pure_fmt_param and not is_rejection:
                 clean_cmd = candidate
                 clean_cmd = re.sub(r'^(?:(?:i\s+)?(?:need|want)\s+you\s+to\s+|(?:can|could)\s+you\s+|(?:please\s+)?)+', '', clean_cmd, flags=re.IGNORECASE).strip()
                 clean_cmd = re.sub(r'\s+instead$', '', clean_cmd, flags=re.IGNORECASE).strip()
@@ -1823,7 +1962,26 @@ class DialogueStateManager:
                     "timestamp": iso_now,
                 }
                 return
-            # Check for hardware telemetry
+            # Check for hardware telemetry & top processes
+            elif action_name == "top_processes" or "most cpu" in raw_input_low or "top cpu" in raw_input_low or "top processes" in raw_input_low:
+                procs = execution_result.get("processes") or []
+                top_app = procs[0].get("name") if (procs and isinstance(procs[0], dict)) else None
+                if not top_app and "is " in execution_result.get("message", ""):
+                    m_app = re.search(r'is\s+([a-zA-Z0-9_\-\.]+)\s+with', execution_result.get("message", ""))
+                    if m_app:
+                        top_app = m_app.group(1).strip()
+                clean_top = (top_app[:-4] if top_app.lower().endswith(".exe") else top_app) if top_app else "processes"
+                self._last_mentioned_entity = {
+                    "value": clean_top,
+                    "name": clean_top,
+                    "intent": "OPEN_APPLICATION",
+                    "entity_type": "APPLICATION",
+                    "turn": current_t,
+                    "timestamp": iso_now,
+                }
+                if clean_top and clean_top != "processes":
+                    self.current_state.session_context["last_top_process"] = clean_top
+                return
             elif action_name in ("cpu_metrics", "detailed_cpu") or "cpu" in raw_input_low:
                 self._last_mentioned_entity = {
                     "value": "CPU",
@@ -2462,7 +2620,7 @@ class DialogueStateManager:
         # Track device control / hardware state
         if primary_intent == "DEVICE_CONTROL":
             raw_input_low = str(self.current_state.turns[-1].user_input if self.current_state.turns else "").lower()
-            action_name = execution_result.get("action", "")
+            action_name = execution_result.get("action", "") or execution_result.get("telemetry_type", "")
 
             if action_name in ("set_brightness", "adjust_brightness", "increase_brightness", "decrease_brightness", "get_brightness") or "brightness" in raw_input_low:
                 self.current_state.last_action = {
@@ -2501,24 +2659,55 @@ class DialogueStateManager:
                     "action": "connect_phone",
                     "target": "phone"
                 }
+            elif action_name == "top_processes" or "most cpu" in raw_input_low or "top cpu" in raw_input_low or "top processes" in raw_input_low:
+                self.current_state.last_action = {
+                    "intent": "DEVICE_CONTROL",
+                    "action": "top_processes",
+                    "target": "top CPU processes"
+                }
+                self.current_state.session_context["last_telemetry_action"] = "top_cpu_processes"
             elif action_name in ("cpu_metrics", "detailed_cpu") or "cpu" in raw_input_low:
                 self.current_state.last_action = {
                     "intent": "DEVICE_CONTROL",
                     "action": action_name or "cpu_metrics",
                     "target": "CPU"
                 }
+                self.current_state.session_context["last_telemetry_action"] = "cpu"
             elif action_name in ("gpu_telemetry", "detailed_gpu", "gpu_memory") or "gpu" in raw_input_low:
                 self.current_state.last_action = {
                     "intent": "DEVICE_CONTROL",
                     "action": action_name or "gpu_telemetry",
                     "target": "GPU"
                 }
+                self.current_state.session_context["last_telemetry_action"] = "gpu"
             elif action_name in ("ram_metrics", "detailed_ram") or "ram" in raw_input_low:
                 self.current_state.last_action = {
                     "intent": "DEVICE_CONTROL",
                     "action": action_name or "ram_metrics",
                     "target": "RAM"
                 }
+                self.current_state.session_context["last_telemetry_action"] = "ram"
+            elif action_name == "uptime" or "uptime" in raw_input_low or "how long" in raw_input_low:
+                self.current_state.last_action = {
+                    "intent": "DEVICE_CONTROL",
+                    "action": "uptime",
+                    "target": "system uptime"
+                }
+                self.current_state.session_context["last_telemetry_action"] = "uptime"
+            elif action_name in ("disk", "all_disks") or "disk" in raw_input_low or "storage" in raw_input_low:
+                self.current_state.last_action = {
+                    "intent": "DEVICE_CONTROL",
+                    "action": action_name or "disk",
+                    "target": "disk space"
+                }
+                self.current_state.session_context["last_telemetry_action"] = "disk"
+            elif "volume" in (action_name or "") or "volume" in raw_input_low:
+                self.current_state.last_action = {
+                    "intent": "DEVICE_CONTROL",
+                    "action": action_name or "volume",
+                    "target": "system volume"
+                }
+                self.current_state.session_context["last_telemetry_action"] = "volume"
 
         # Update entities from current turn
         if self.current_state.turns:

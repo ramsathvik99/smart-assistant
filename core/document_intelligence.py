@@ -568,11 +568,14 @@ class DocumentArtifactGenerator:
         doc_list_text = "Source files analyzed:\n" + "\n".join([f"- {name}" for name in synthesis.source_documents])
         sections_content.append({"heading": "Analyzed Documents", "body": doc_list_text})
 
+        from instance.config import get_branding_author
+        di_author = f"{get_branding_author()} Document Intelligence"
+
         res = create_pdf_document(
             title=synthesis.title,
             content=sections_content,
             filename=output_filename or f"Summary_{datetime_stamp()}.pdf",
-            author="Nova Document Intelligence",
+            author=di_author,
         )
 
         target_path = res.get("filepath")

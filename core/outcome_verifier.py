@@ -402,12 +402,18 @@ class VerificationAdapters:
         win_title = (post_obs.get("foreground_window_title") or (post_obs.get("active_window") or {}).get("title") or "").lower().strip()
 
         # If action_result reported failure, respect it
-        if action_result and (action_result.get("status") == "error" or action_result.get("success") is False):
+        resp_text = str(action_result.get("response", "") if action_result else "").lower()
+        if action_result and (
+            action_result.get("status") in ("error", "failed", "declined", "unverified", "not_found")
+            or action_result.get("success") is False
+            or "could not find or close" in resp_text
+            or "no running browser" in resp_text
+        ):
             return OutcomeVerificationResult(
                 status=OutcomeStatus.VERIFIED_FAILURE,
                 verified=False,
                 confidence=ConfidenceLevel.HIGH,
-                failure_reason=action_result.get("response", f"Failed to close '{target}'."),
+                failure_reason=action_result.get("response") or action_result.get("error") or f"Failed to close '{target}'.",
                 verification_method="action_result_check"
             )
 
@@ -420,7 +426,7 @@ class VerificationAdapters:
             target_aliases.extend(["chrome", "google"])
 
         is_foreground = any(t in active_app or t in win_title for t in target_aliases if t)
-        if not is_foreground:
+        if not is_foreground and (action_result and (action_result.get("status") == "success" or action_result.get("success") is True)):
             return OutcomeVerificationResult(
                 status=OutcomeStatus.VERIFIED_SUCCESS,
                 verified=True,
@@ -431,9 +437,10 @@ class VerificationAdapters:
             )
 
         return OutcomeVerificationResult(
-            status=OutcomeStatus.VERIFIED_SUCCESS if action_result and action_result.get("status") == "success" else OutcomeStatus.UNCERTAIN,
-            verified=True,
+            status=OutcomeStatus.VERIFIED_SUCCESS if action_result and action_result.get("status") == "success" else OutcomeStatus.VERIFIED_FAILURE,
+            verified=bool(action_result and action_result.get("status") == "success"),
             confidence=ConfidenceLevel.MEDIUM,
+            failure_reason=f"Application '{target}' is still running or foreground active." if is_foreground else None,
             verification_method="action_result_check"
         )
 
@@ -921,7 +928,19 @@ class VerificationAdapters:
                         verification_method="gpu_memory_telemetry_check"
                     )
 
-        if action_result and (action_result.get("status") == "success" or action_result.get("success") is True):
+        if action_result and (
+            action_result.get("status") in ("error", "declined", "failed", "unverified")
+            or action_result.get("success") is False
+        ):
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_FAILURE,
+                verified=False,
+                confidence=ConfidenceLevel.HIGH,
+                failure_reason=action_result.get("message") or action_result.get("error") or "Device control operation failed or was declined.",
+                verification_method="device_query_action_result"
+            )
+
+        if action_result and (action_result.get("status") in ("success", "verified") or action_result.get("success") is True):
             return OutcomeVerificationResult(
                 status=OutcomeStatus.VERIFIED_SUCCESS,
                 verified=True,
@@ -931,10 +950,9 @@ class VerificationAdapters:
                 verification_method="device_query_action_result"
             )
 
-
         return OutcomeVerificationResult(
             status=OutcomeStatus.UNCERTAIN,
-            verified=bool(action_result and action_result.get("status") != "error"),
+            verified=False,
             confidence=ConfidenceLevel.LOW,
             failure_reason="Device control target cannot be deterministically verified.",
             verification_method="device_state_inspection"
@@ -1327,19 +1345,32 @@ class VerificationAdapters:
             except (ValueError, TypeError):
                 pass
 
-        if action_result and action_result.get("success") is False:
+        if action_result and (
+            action_result.get("success") is False
+            or action_result.get("status") in ("error", "failed", "declined")
+        ):
             return OutcomeVerificationResult(
                 status=OutcomeStatus.VERIFIED_FAILURE,
                 verified=False,
                 confidence=ConfidenceLevel.HIGH,
-                failure_reason=action_result.get("error", "Volume adjustment failed."),
+                failure_reason=action_result.get("error") or action_result.get("message", "Volume adjustment failed."),
+                verification_method="audio_action_result"
+            )
+
+        if action_result and (action_result.get("status") in ("success", "verified") or action_result.get("success") is True):
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_SUCCESS,
+                verified=True,
+                confidence=ConfidenceLevel.HIGH,
+                expected_state=expected.expected_state,
+                observed_state={"volume": observed_level},
                 verification_method="audio_action_result"
             )
 
         # Fallback to UNCERTAIN if audio level cannot be measured deterministically
         return OutcomeVerificationResult(
             status=OutcomeStatus.UNCERTAIN,
-            verified=bool(action_result and action_result.get("status") != "error"),
+            verified=False,
             confidence=ConfidenceLevel.LOW,
             failure_reason="System audio volume could not be measured directly via OS endpoint.",
             verification_method="audio_action_result"
@@ -2044,6 +2075,21 @@ class OutcomeVerifier:
             return VerificationAdapters.verify_memory_store(expected, obs_dict, state_diff, action_result, user_id=user_id)
 
         # Informational / Conversational fallback
+        # CRITICAL PROTECTION: An action that reported failure/declined must NEVER be marked VERIFIED_SUCCESS!
+        if action_result and (
+            action_result.get("success") is False
+            or action_result.get("status") in ("error", "declined", "failed", "unverified")
+        ):
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_FAILURE,
+                verified=False,
+                confidence=ConfidenceLevel.HIGH,
+                expected_state=expected.expected_state,
+                observed_state={"status": action_result.get("status")},
+                failure_reason=action_result.get("message") or action_result.get("error") or "Action was not completed successfully.",
+                verification_method="failure_outcome_verification"
+            )
+
         if action_result.get("handled", False) or action_result.get("response"):
             return OutcomeVerificationResult(
                 status=OutcomeStatus.VERIFIED_SUCCESS,

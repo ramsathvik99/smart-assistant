@@ -726,16 +726,30 @@ class ClockController:
             "response": msg
         }
 
-    def get_local_date(self) -> Dict[str, Any]:
-        """Returns the local system date."""
+    def get_local_date(self, query: Optional[str] = None) -> Dict[str, Any]:
+        """Returns the local system date, honoring relative date queries (tomorrow, yesterday)."""
         now = datetime.datetime.now()
-        date_str = now.strftime("%A, %B %d, %Y")
-        msg = f"Today is {date_str}."
+        target_date = now
+        prefix = "Today is"
+
+        q_low = (query or "").lower()
+        if "day after tomorrow" in q_low:
+            target_date = now + datetime.timedelta(days=2)
+            prefix = "The day after tomorrow is"
+        elif "tomorrow" in q_low:
+            target_date = now + datetime.timedelta(days=1)
+            prefix = "Tomorrow is"
+        elif "yesterday" in q_low:
+            target_date = now - datetime.timedelta(days=1)
+            prefix = "Yesterday was"
+
+        date_str = target_date.strftime("%A, %B %d, %Y")
+        msg = f"{prefix} {date_str}."
         return {
             "success": True,
             "status": "success",
             "date_str": date_str,
-            "iso": now.isoformat(),
+            "iso": target_date.isoformat(),
             "message": msg,
             "response": msg
         }

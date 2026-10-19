@@ -223,20 +223,25 @@ class RAGResponseGenerator:
                     "The provided GROUND TRUTH EVIDENCE contains verified, real-time web search results retrieved specifically for this query.\n"
                     "- You MUST answer the user's question accurately using this information (check DIRECT ANSWER / AI OVERVIEW, ANSWER BOX, KNOWLEDGE GRAPH, and SEARCH RESULTS).\n"
                     "- State the factual answer directly, concisely, and accurately without referencing the evidence or search process.\n"
-                    "- Do NOT rely on outdated pre-training knowledge when fresh search evidence is provided."
+                    "- Do NOT rely on outdated pre-training knowledge when fresh search evidence is provided.\n"
+                    "- STRICT FACTUAL GROUNDING: Rely ONLY on verifiable facts. NEVER invent or hallucinate specifications, pricing, model availability, release dates, announcements, or unverified claims (such as flying capabilities, rocket thrusters, pre-order guarantees, or unverified acceleration figures) unless explicitly corroborated by the retrieved ground truth.\n"
+                    "- If the provided search results or general knowledge do not verify a specific claim, explicitly state that limitation or lack of verification rather than speculating or asserting it as fact.\n"
+                    "- Separate retrieved facts from unverified claims or speculation.\n"
+                    "- Do NOT treat prior assistant answers in history as independent evidence for unverified claims."
                 )
             else:
                 intent_instructions = (
                     "The user asked a factual query, but real-time search retrieval returned no verified results.\n"
                     "- Answer using your general knowledge to the best of your ability.\n"
                     "- Do NOT claim that you searched the web or cite non-existent sources.\n"
+                    "- NEVER invent or hallucinate specifications, pricing, model availability, release dates, or speculative features (e.g. flying capabilities or thrusters). State honestly if details are unconfirmed.\n"
                     "- If the query strictly requires live information that you do not possess, truthfully acknowledge that current live data is unavailable."
                 )
         elif intent == "fallback":
             intent_instructions = (
                 "The user asked a query that normally requires live search or retrieval, but the retrieval service was unavailable.\n"
                 "- Answer truthfully to the best of your general knowledge.\n"
-                "- Do NOT state 'According to search results' or fabricate retrieved evidence.\n"
+                "- Do NOT state 'According to search results' or fabricate retrieved evidence or unverified specifications.\n"
                 "- Be concise and direct."
             )
         elif intent == "current_time_query":
@@ -289,7 +294,7 @@ class RAGResponseGenerator:
         try:
             print(f"[PIPELINE - GENERATION] Calling LLM with intent: {intent} (has_ground_truth={has_ground_truth})")
             response = self.llm.get_completion(prompt=query, system_prompt=full_system_prompt, user_id=user_id)
-            if not response:
+            if not response or not isinstance(response, str) or not response.strip():
                 # LLM synthesis unavailable: check if retrieval data has usable direct answer or snippets
                 if data and isinstance(data, dict):
                     direct_fallback = self.extract_direct_answer(data)
@@ -305,8 +310,25 @@ class RAGResponseGenerator:
                             if srcs:
                                 joined += "\n\nSources:\n" + "\n".join(srcs)
                             print("[PIPELINE - GENERATION] LLM unavailable; recovered with top retrieval snippets.")
-                            return joined
-                return "I apologize, but I am currently unable to reach my language model services. Please check your connection or try again in a moment."
+                classified = getattr(self.llm, "get_classified_failure", lambda: {})()
+                if classified and classified.get("user_message"):
+                    return f"I am unable to reach my language model service: {classified.get('user_message')}"
+                return "I am temporarily unable to reach my language model services. The language model service is currently unavailable."
+
+            response = response.strip()
+            if data and isinstance(data, dict):
+                organic_items = data.get("organic_items") or []
+                if organic_items and "sources:" not in response.lower() and "http" not in response:
+                    src_links = []
+                    for idx, item in enumerate(organic_items[:3], 1):
+                        title = item.get("title", "").strip()
+                        link = item.get("link", "").strip()
+                        if title and link:
+                            src_links.append(f"[{idx}] {title} ({link})")
+                        elif link:
+                            src_links.append(f"[{idx}] {link}")
+                    if src_links:
+                        response += "\n\nSources:\n" + "\n".join(src_links)
             return response
         except Exception as e:
             print(f"[RAG GENERATOR ERROR] {e}")
@@ -314,4 +336,7 @@ class RAGResponseGenerator:
                 direct_fallback = self.extract_direct_answer(data)
                 if direct_fallback:
                     return direct_fallback
-            return "I apologize, but I encountered an error while formulating my response."
+            classified = getattr(self.llm, "get_classified_failure", lambda: {})()
+            if classified and classified.get("user_message"):
+                return f"I am unable to reach my language model service: {classified.get('user_message')}"
+            return "I am temporarily unable to reach my language model services. The knowledge service is currently unavailable."

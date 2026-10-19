@@ -40,7 +40,9 @@ def _extract_keywords(text: str) -> List[str]:
         "did", "you", "say", "about", "for", "with", "are", "have", "can", "tell",
         "please", "give", "show", "know", "there", "their", "they", "from", "just",
         "is", "my", "me", "we", "our", "us", "your", "it", "its", "in", "on", "at",
-        "to", "of", "a", "an", "do", "does", "be", "was", "were", "been", "being"
+        "to", "of", "a", "an", "do", "does", "be", "was", "were", "been", "being",
+        "no", "not", "none", "never", "dont", "didnt", "wont", "cant", "isnt", "arent",
+        "wasnt", "werent", "ask", "asked", "asking", "said", "saying", "told"
     }
     return [w for w in words if w not in stop_words]
 
@@ -90,43 +92,124 @@ class ChatGPTMemoryManager:
 
     # ── A. USER FACTS (memory_facts) ──────────────────────────────────────────
 
-    def set_user_fact(self, user_id: int, key: str, value: str, confidence: float = 1.0, source: str = "conversation") -> bool:
-        """Upsert a declarative user fact across memory_facts, user_memory, and user_preferences."""
+    def set_user_fact(
+        self,
+        user_id: int,
+        key: str,
+        value: str,
+        confidence: float = 1.0,
+        source: str = "conversation",
+        category: str = "general",
+        status: str = "confirmed",
+        source_ref: str = "",
+        expiration_date: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Upsert a structured declarative user fact across memory_facts, user_memory, and user_preferences.
+        Supports intelligent deduplication, progression updating, and temporal expiration.
+        """
         if not user_id or not key or value is None:
             return False
 
         clean_key = key.strip().lower().replace(" ", "_")[:100]
         clean_val = str(value).strip()[:MAX_FACT_VALUE_LENGTH]
+        clean_cat = str(category).strip().lower()[:50] if category else "general"
+        clean_status = str(status).strip().lower()[:20] if status else "confirmed"
         user_id = int(user_id)
 
         try:
-            # 1. Upsert into memory_facts
+            # 1. Upsert into memory_facts with supersession and status
             with self.pool.get_cursor() as cur:
                 cur.execute("""
-                    SELECT id, fact_value FROM memory_facts WHERE user_id = %s AND fact_key = %s
+                    SELECT id, fact_value, status FROM memory_facts
+                    WHERE user_id = %s AND fact_key = %s AND (status IS NULL OR status != 'superseded')
+                    ORDER BY id DESC LIMIT 1;
                 """, (user_id, clean_key))
                 existing = cur.fetchone()
 
                 if existing:
-                    if existing[1] == clean_val:
-                        # Value already up to date; skip redundant write and sync
+                    existing_id, existing_val, existing_status = existing[0], existing[1], existing[2]
+                    if existing_val == clean_val and existing_status == clean_status:
+                        # Value and status already identical; refresh last_accessed and last_confirmed
+                        try:
+                            cur.execute("""
+                                UPDATE memory_facts
+                                SET last_accessed = CURRENT_TIMESTAMP, last_confirmed = CURRENT_TIMESTAMP
+                                WHERE id = %s
+                            """, (existing_id,))
+                        except Exception:
+                            pass
                         return True
-                    cur.execute("""
-                        UPDATE memory_facts
-                        SET fact_value = %s, confidence = %s, source = %s, last_accessed = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                    """, (clean_val, confidence, source, existing[0]))
+
+                    # Value or status changed: mark existing as superseded and insert new fact
+                    new_id = None
+                    try:
+                        cur.execute("SAVEPOINT mem_upd_019;")
+                        cur.execute("""
+                            INSERT INTO memory_facts (user_id, fact_key, fact_value, confidence, source, category, status, source_ref, expiration_date, last_accessed, last_confirmed)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            RETURNING id;
+                        """, (user_id, clean_key, clean_val, confidence, source, clean_cat, clean_status, source_ref, expiration_date))
+                        row = cur.fetchone()
+                        if row:
+                            new_id = row[0]
+                        cur.execute("""
+                            UPDATE memory_facts
+                            SET status = 'superseded', superseded_by = %s
+                            WHERE id = %s;
+                        """, (new_id, existing_id))
+                        cur.execute("RELEASE SAVEPOINT mem_upd_019;")
+                    except Exception:
+                        try:
+                            cur.execute("ROLLBACK TO SAVEPOINT mem_upd_019;")
+                        except Exception:
+                            pass
+                        # Fallback for installations prior to migration 019
+                        cur.execute("""
+                            UPDATE memory_facts
+                            SET fact_value = %s, confidence = %s, source = %s, last_accessed = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                        """, (clean_val, confidence, source, existing_id))
                 else:
-                    cur.execute("""
-                        INSERT INTO memory_facts (user_id, fact_key, fact_value, confidence, source, last_accessed)
-                        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                    """, (user_id, clean_key, clean_val, confidence, source))
+                    try:
+                        cur.execute("SAVEPOINT mem_ins_019;")
+                        cur.execute("""
+                            INSERT INTO memory_facts (user_id, fact_key, fact_value, confidence, source, category, status, source_ref, expiration_date, last_accessed, last_confirmed)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                        """, (user_id, clean_key, clean_val, confidence, source, clean_cat, clean_status, source_ref, expiration_date))
+                        cur.execute("RELEASE SAVEPOINT mem_ins_019;")
+                    except Exception:
+                        try:
+                            cur.execute("ROLLBACK TO SAVEPOINT mem_ins_019;")
+                        except Exception:
+                            pass
+                        # Fallback for pre-migration 019 schema
+                        cur.execute("""
+                            INSERT INTO memory_facts (user_id, fact_key, fact_value, confidence, source, last_accessed)
+                            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP);
+                        """, (user_id, clean_key, clean_val, confidence, source))
 
             # 2. Sync to user_memory JSONB
             try:
                 from legacy.memory_manager import update_user_memory
                 update_user_memory(user_id, clean_key, clean_val)
             except Exception as _sync_err:
+                pass
+
+            # Also sync categorized dictionary in user_memory
+            try:
+                from legacy.memory_manager import load_user_memory, update_user_memory
+                mem = load_user_memory(user_id) or {}
+                valid_cat = clean_cat if clean_cat in ("identity", "preferences", "projects", "relationships", "wishes", "notes", "education", "employment", "goals", "commitments") else "notes"
+                if valid_cat not in mem or not isinstance(mem[valid_cat], dict):
+                    mem[valid_cat] = {}
+                mem[valid_cat][clean_key] = {
+                    "value": clean_val,
+                    "updated": datetime.now().strftime("%Y-%m-%d"),
+                    "status": clean_status,
+                }
+                update_user_memory(user_id, valid_cat, mem[valid_cat])
+            except Exception:
                 pass
 
             # 3. Sync to user_preferences if it's a known configuration preference
@@ -141,11 +224,11 @@ class ChatGPTMemoryManager:
             print(f"[MEMORY] set_user_fact error: {e}")
             return False
 
-    def get_user_facts(self, user_id: int) -> Dict[str, str]:
+    def get_user_facts(self, user_id: int, include_tentative: bool = False) -> Dict[str, str]:
         """
-        Returns all facts for a user as a dict of {fact_key: fact_value},
+        Returns all active confirmed facts for a user as a dict of {fact_key: fact_value},
         authoritatively merging memory_facts, user_memory JSONB, and user_preferences.
-        Strictly isolated to user_id.
+        Strictly isolated to user_id. Automatically filters out superseded and expired facts.
         """
         if not user_id:
             return {}
@@ -181,18 +264,71 @@ class ChatGPTMemoryManager:
             pass
 
         # 3. Load memory_facts (highest priority for newer declarative facts)
+        # Filter out superseded and expired facts
         try:
             with self.pool.get_cursor() as cur:
-                cur.execute("""
-                    SELECT fact_key, fact_value FROM memory_facts
-                    WHERE user_id = %s ORDER BY last_accessed ASC
-                """, (user_id,))
+                status_clause = "status IN ('confirmed', 'tentative')" if include_tentative else "(status IS NULL OR status = 'confirmed')"
+                try:
+                    cur.execute(f"""
+                        SELECT fact_key, fact_value FROM memory_facts
+                        WHERE user_id = %s
+                          AND {status_clause}
+                          AND (expiration_date IS NULL OR expiration_date > CURRENT_TIMESTAMP)
+                        ORDER BY last_accessed ASC
+                    """, (user_id,))
+                except Exception:
+                    # Fallback for columns not yet present
+                    cur.execute("""
+                        SELECT fact_key, fact_value FROM memory_facts
+                        WHERE user_id = %s ORDER BY last_accessed ASC
+                    """, (user_id,))
                 for r in cur.fetchall():
                     merged[str(r[0]).lower()] = str(r[1])
         except Exception as _e3:
             pass
 
         return merged
+
+    def get_structured_user_memories(self, user_id: int, include_tentative: bool = False) -> List[Dict[str, Any]]:
+        """
+        Returns full structured memory records with metadata:
+        category, confidence, status, source_ref, last_confirmed, expiration_date.
+        Strictly isolated to user_id.
+        """
+        if not user_id:
+            return []
+        user_id = int(user_id)
+        results = []
+        try:
+            with self.pool.get_cursor() as cur:
+                status_clause = "status IN ('confirmed', 'tentative')" if include_tentative else "(status IS NULL OR status = 'confirmed')"
+                cur.execute(f"""
+                    SELECT id, fact_key, fact_value, category, confidence, status, source_ref,
+                           created_at, last_accessed, last_confirmed, expiration_date, superseded_by
+                    FROM memory_facts
+                    WHERE user_id = %s
+                      AND {status_clause}
+                      AND (expiration_date IS NULL OR expiration_date > CURRENT_TIMESTAMP)
+                    ORDER BY last_confirmed DESC, id DESC;
+                """, (user_id,))
+                for r in cur.fetchall():
+                    results.append({
+                        "id": r[0],
+                        "key": r[1],
+                        "value": r[2],
+                        "category": r[3] or "general",
+                        "confidence": float(r[4] or 1.0),
+                        "status": r[5] or "confirmed",
+                        "source_ref": r[6] or "",
+                        "created_at": r[7].isoformat() if r[7] else None,
+                        "last_accessed": r[8].isoformat() if r[8] else None,
+                        "last_confirmed": r[9].isoformat() if r[9] else None,
+                        "expiration_date": r[10].isoformat() if r[10] else None,
+                        "superseded_by": r[11],
+                    })
+        except Exception as e:
+            print(f"[MEMORY] get_structured_user_memories error: {e}")
+        return results
 
     def delete_user_fact(self, user_id: int, key: str) -> bool:
         """Delete a specific user fact across tables."""
@@ -295,13 +431,19 @@ class ChatGPTMemoryManager:
                     pass
 
                 # 2. Authoritative insert into messages table
-                cur.execute("""
-                    INSERT INTO messages (user_id, conversation_id, role, content)
-                    VALUES (%s, %s, 'user', %s), (%s, %s, 'assistant', %s)
-                """, (user_id, conv_id, user_input, user_id, conv_id, assistant_response))
+                try:
+                    cur.execute("""
+                        INSERT INTO messages (user_id, conversation_id, role, content)
+                        VALUES (%s, %s, 'user', %s), (%s, %s, 'assistant', %s)
+                    """, (user_id, conv_id, user_input, user_id, conv_id, assistant_response))
+                except Exception as _msg_err:
+                    pass
 
             # 3. Synchronously extract facts from dialogue
-            self.extract_and_persist_facts(user_id, user_input)
+            try:
+                self.extract_and_persist_facts(user_id, user_input)
+            except Exception as _fe_err:
+                pass
         except Exception as e:
             print(f"[MEMORY] log_interaction error: {e}")
 
@@ -373,54 +515,73 @@ class ChatGPTMemoryManager:
 
     def extract_and_persist_facts(self, user_id: int, text: str) -> List[Tuple[str, str]]:
         """
-        Regex and heuristic fact extraction for fast, zero-latency declarative fact learning.
-        Extracts patterns such as:
-        - "my name is X", "i live in X", "my job is X", "i work at X"
-        - "the database for this project is X", "the backend is X"
-        - "i prefer concise answers", "i prefer X"
-        - "remember that X is Y", "my favorite X is Y"
+        Extracts candidate memories from ordinary natural conversation and persists them.
+        Uses deterministic local extraction layer (core.fact_extractor) and maps into
+        PostgreSQL memory_facts, user_memory, and user_preferences.
+        Returns list of (key, value) pairs persisted.
         """
         if not text or not user_id:
             return []
 
-        extracted = []
-        t = text.strip()
+        user_id = int(user_id)
+        extracted: List[Tuple[str, str]] = []
+        persisted_keys: set = set()
 
-        patterns = [
-            # Personal identity & relationships
-            (r"\bmy name is ([a-zA-Z\s]+)", "name"),
-            (r"\bi live in ([a-zA-Z\s,]+)", "city"),
-            (r"\bi am from ([a-zA-Z\s,]+)", "hometown"),
-            (r"\bi work at ([a-zA-Z0-9\s]+)", "workplace"),
-            (r"\bi work as an? ([a-zA-Z\s]+)", "occupation"),
-            (r"\bmy job is ([a-zA-Z\s]+)", "job"),
-            (r"\bmy favorite (\w+) is ([a-zA-Z0-9\s]+)", "favorite_{0}"),
-            (r"\bmy favourite (\w+) is ([a-zA-Z0-9\s]+)", "favorite_{0}"),
-            (r"\bmy dog(?:'s name)? is ([a-zA-Z\s]+)", "dog_name"),
-            (r"\bmy cat(?:'s name)? is ([a-zA-Z\s]+)", "cat_name"),
-            (r"\bmy wife(?:'s name)? is ([a-zA-Z\s]+)", "wife_name"),
-            (r"\bmy husband(?:'s name)? is ([a-zA-Z\s]+)", "husband_name"),
-            (r"\bmy sister(?:'s name)? is ([a-zA-Z\s]+)", "sister_name"),
-            (r"\bmy brother(?:'s name)? is ([a-zA-Z\s]+)", "brother_name"),
-            (r"\bmy birthday is ([a-zA-Z0-9\s,]+)", "birthday"),
-            # Assistant & Persona preferences
-            (r"\b(?:my\s+)?assistant(?:'s)?\s+name\s+is\s+([a-zA-Z0-9\s]+)", "assistant_name"),
-            (r"\bcall\s+my\s+assistant\s+([a-zA-Z0-9\s]+)", "assistant_name"),
-            (r"\bname\s+(?:of\s+)?my\s+assistant\s+is\s+([a-zA-Z0-9\s]+)", "assistant_name"),
-            (r"\bi\s+prefer\s+([a-zA-Z0-9\s]+)\s+answers?", "response_style"),
-            (r"\b(?:my\s+)?response\s+style\s+is\s+([a-zA-Z0-9\s]+)", "response_style"),
-            # Project, system, and declarative technical facts
-            (r"\b(?:the\s+)?database\s+(?:for\s+this\s+project\s+)?is\s+([a-zA-Z0-9_\s]+)", "database"),
-            (r"\b(?:the\s+)?(?:backend|backend\s+technology)\s+(?:for\s+this\s+project\s+)?is\s+([a-zA-Z0-9_\s]+)", "backend"),
-            (r"\b(?:the\s+)?frontend\s+(?:for\s+this\s+project\s+)?is\s+([a-zA-Z0-9_\s]+)", "frontend"),
-            (r"\b(?:the\s+)?project\s+name\s+is\s+([a-zA-Z0-9_\s]+)", "project_name"),
-            # General memory store patterns
-            (r"\bremember\s+(?:that\s+)?([a-zA-Z0-9\s_]+?)\s+is\s+([a-zA-Z0-9\s_]+)", "{0}"),
-            (r"\bremember\s+my\s+(\w+)\s+is\s+([a-zA-Z0-9\s_]+)", "{0}"),
-            (r"\bi\s+prefer\s+([a-zA-Z0-9\s]+)", "preference"),
+        # 1. Deterministic natural language fact extraction
+        try:
+            from core.fact_extractor import extract_candidate_facts
+            candidates = extract_candidate_facts(text)
+            for cand in candidates:
+                success = self.set_user_fact(
+                    user_id=user_id,
+                    key=cand.key,
+                    value=cand.value,
+                    confidence=cand.confidence,
+                    source="dialogue_extraction",
+                    category=cand.category,
+                    status=cand.status,
+                    source_ref=cand.source_ref,
+                    expiration_date=cand.expiration_date,
+                )
+                if success:
+                    extracted.append((cand.key, cand.value))
+                    persisted_keys.add(cand.key)
+        except Exception as _fe_err:
+            print(f"[MEMORY] Fact extraction error: {_fe_err}")
+
+        # 2. Legacy pattern compatibility for explicit patterns
+        t = text.strip()
+        legacy_patterns = [
+            (r"\bmy name is ([a-zA-Z\s]+)", "name", "identity"),
+            (r"\bi live in ([a-zA-Z\s,]+)", "city", "identity"),
+            (r"\bi am from ([a-zA-Z\s,]+)", "hometown", "identity"),
+            (r"\bi work at ([a-zA-Z0-9\s]+)", "workplace", "employment"),
+            (r"\bi work as an? ([a-zA-Z\s]+)", "occupation", "employment"),
+            (r"\bmy job is ([a-zA-Z\s]+)", "job", "employment"),
+            (r"\bmy favorite (\w+) is ([a-zA-Z0-9\s]+)", "favorite_{0}", "preferences"),
+            (r"\bmy favourite (\w+) is ([a-zA-Z0-9\s]+)", "favorite_{0}", "preferences"),
+            (r"\bmy dog(?:'s name)? is ([a-zA-Z\s]+)", "dog_name", "relationships"),
+            (r"\bmy cat(?:'s name)? is ([a-zA-Z\s]+)", "cat_name", "relationships"),
+            (r"\bmy wife(?:'s name)? is ([a-zA-Z\s]+)", "wife_name", "relationships"),
+            (r"\bmy husband(?:'s name)? is ([a-zA-Z\s]+)", "husband_name", "relationships"),
+            (r"\bmy sister(?:'s name)? is ([a-zA-Z\s]+)", "sister_name", "relationships"),
+            (r"\bmy brother(?:'s name)? is ([a-zA-Z\s]+)", "brother_name", "relationships"),
+            (r"\bmy birthday is ([a-zA-Z0-9\s,]+)", "birthday", "identity"),
+            (r"\b(?:my\s+)?assistant(?:'s)?\s+name\s+is\s+([a-zA-Z0-9\s]+)", "assistant_name", "preferences"),
+            (r"\bcall\s+my\s+assistant\s+([a-zA-Z0-9\s]+)", "assistant_name", "preferences"),
+            (r"\bname\s+(?:of\s+)?my\s+assistant\s+is\s+([a-zA-Z0-9\s]+)", "assistant_name", "preferences"),
+            (r"\bi\s+prefer\s+([a-zA-Z0-9\s]+)\s+answers?", "response_style", "preferences"),
+            (r"\b(?:my\s+)?response\s+style\s+is\s+([a-zA-Z0-9\s]+)", "response_style", "preferences"),
+            (r"\b(?:the\s+)?database\s+(?:for\s+this\s+project\s+)?is\s+([a-zA-Z0-9_\s]+)", "database", "projects"),
+            (r"\b(?:the\s+)?(?:backend|backend\s+technology)\s+(?:for\s+this\s+project\s+)?is\s+([a-zA-Z0-9_\s]+)", "backend", "projects"),
+            (r"\b(?:the\s+)?frontend\s+(?:for\s+this\s+project\s+)?is\s+([a-zA-Z0-9_\s]+)", "frontend", "projects"),
+            (r"\b(?:the\s+)?project\s+name\s+is\s+([a-zA-Z0-9_\s]+)", "project_name", "projects"),
+            (r"\bremember\s+(?:that\s+)?([a-zA-Z0-9\s_]+?)\s+is\s+([a-zA-Z0-9\s_]+)", "{0}", "general"),
+            (r"\bremember\s+my\s+(\w+)\s+is\s+([a-zA-Z0-9\s_]+)", "{0}", "general"),
+            (r"\bi\s+prefer\s+([a-zA-Z0-9\s]+)", "preference", "preferences"),
         ]
 
-        for pat, key_template in patterns:
+        for pat, key_template, cat_name in legacy_patterns:
             match = re.search(pat, t, re.IGNORECASE)
             if match:
                 groups = match.groups()
@@ -436,14 +597,22 @@ class ChatGPTMemoryManager:
                 if key and val and len(val) > 1:
                     clean_k = key.strip().lower().replace(" ", "_")
                     clean_v = val.strip()
-                    self.set_user_fact(user_id, clean_k, clean_v, confidence=0.95, source="dialogue_extraction")
-                    extracted.append((clean_k, clean_v))
+                    if clean_k not in persisted_keys:
+                        self.set_user_fact(user_id, clean_k, clean_v, confidence=0.95, source="dialogue_extraction", category=cat_name)
+                        extracted.append((clean_k, clean_v))
+                        persisted_keys.add(clean_k)
 
         return extracted
 
     # ── E. CONTEXT RETRIEVAL & PROMPT BUDGETING ───────────────────────────────
 
-    def retrieve_relevant_memories(self, user_id: int, query_text: str, limit: int = 6) -> List[Dict[str, Any]]:
+    def retrieve_relevant_memories(
+        self,
+        user_id: int,
+        query_text: str = "",
+        limit: int = 6,
+        category: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         Ranks all user facts and categorized memories based on query relevance and recency.
         Only returns items meeting relevance threshold.
@@ -457,23 +626,36 @@ class ChatGPTMemoryManager:
             return []
 
         scored_items = []
+        is_personalization_query = any(k in (query_text or "").lower() for k in (
+            "help me", "prepare for", "placement", "interview", "resume", "study",
+            "exam", "career", "advice", "suggest", "about me", "myself"
+        ))
+
         for key, val in all_facts.items():
             base_score = _compute_relevance_score(keywords, key, val)
-            
-            # If specific keywords are queried, require relevance
+
+            # If specific keywords are queried, boost matched keywords
             if keywords:
                 if base_score > 0:
-                    if key in ["name", "city", "job", "occupation", "language"]:
+                    if key in ["preferred_name", "name", "city", "job", "occupation", "education", "institution", "activity"]:
                         base_score += 5.0
                     scored_items.append({
                         "key": key,
                         "value": val,
                         "score": base_score
                     })
+                elif is_personalization_query:
+                    # Contextual personalization inclusion for core profile facts
+                    if key in ["preferred_name", "name", "education", "institution", "activity", "major"]:
+                        scored_items.append({
+                            "key": key,
+                            "value": val,
+                            "score": 8.0
+                        })
             else:
-                # Generic retrieval: include all facts
+                # Generic retrieval: include all facts with bias for identity & profile
                 score = base_score
-                if key in ["name", "city", "job", "occupation", "language"]:
+                if key in ["preferred_name", "name", "education", "institution", "activity", "city"]:
                     score += 15.0
                 scored_items.append({
                     "key": key,
@@ -519,6 +701,10 @@ class ChatGPTMemoryManager:
         """
         Direct factual recall and preference querying grounded in PostgreSQL storage.
         Answers questions such as:
+        - "Which university do I attend?" / "What is my university?"
+        - "What is my education?" / "What year am I in?"
+        - "What activity am I in?" / "Am I in the placement cell?"
+        - "What is my preferred name?" / "What is my name?"
         - "What name did I choose for my assistant?" / "What is my assistant's name?"
         - "Which database does this project use?" / "What database does this project use?"
         - "What technology did I use for the backend?"
@@ -529,8 +715,102 @@ class ChatGPTMemoryManager:
         if not user_id or not query_text:
             return None
         q = query_text.lower().strip().rstrip(".?!")
+
+        # Ignore corrections, rejections, and meta-dialogue from fact queries
+        if any(p in q for p in (
+            "not what i asked", "not what i ask", "that's not what", "thats not what",
+            "not what i meant", "you misunderstood", "that's wrong", "thats wrong",
+            "wrong answer", "what did i ask", "what did i just ask", "what did i ask you",
+            "what was my last question", "what was my previous question"
+        )):
+            return None
+
         facts = self.get_user_facts(user_id)
         prefs = self.get_preferences(user_id)
+
+        # 0. University & Institution Inquiries
+        # e.g. "Which university do I attend?", "What university do I attend?", "Where do I study?", "What college do I attend?"
+        if any(p in q for p in (
+            "university do i attend", "which university", "what university",
+            "where do i study", "what college do i", "which college do i",
+            "college do i attend", "what is my university", "what is my college",
+            "my institution", "which institution", "what school do i attend", "where do i go to school"
+        )):
+            inst = facts.get("institution") or facts.get("university") or facts.get("college")
+            edu = facts.get("education") or facts.get("student_status")
+            if inst:
+                if edu:
+                    return f"You attend {inst} as a {edu}."
+                return f"You attend {inst}."
+            return "I don't have a record of which university or college you attend."
+
+        # 0.1 Education, Year, & Student Status
+        # e.g. "What is my education?", "What year am I in?", "Am I a student?", "What is my student status?"
+        if any(p in q for p in (
+            "what is my education", "what year am i in", "am i a student",
+            "what is my student status", "what am i studying", "what year student am i",
+            "my academic year", "what course am i taking"
+        )):
+            edu = facts.get("education") or facts.get("student_status")
+            inst = facts.get("institution") or facts.get("university")
+            maj = facts.get("major")
+            if edu:
+                details = [f"You are a {edu}"]
+                if maj:
+                    details.append(f"studying {maj}")
+                if inst:
+                    details.append(f"at {inst}")
+                return " ".join(details) + "."
+            return "I don't have a record of your education or student status."
+
+        # 0.2 Activity, Placement Cell, & Roles
+        # e.g. "What activity am I in?", "What cell am I in?", "Am I in the placement cell?", "What club or cell am I part of?"
+        if any(p in q for p in (
+            "what cell am i in", "what is my activity", "am i in the placement cell",
+            "what role do i have", "what committee am i in", "what club am i in",
+            "what activities am i involved in", "my activity",
+            "club or cell", "in any club", "in a club", "in any cell", "in a cell",
+            "what club", "which club", "which cell", "what cell", "part of any club",
+            "part of any cell", "club or cell am i part of", "am i part of any club", "am i part of any cell"
+        )):
+            act = facts.get("activity") or facts.get("role")
+            if act:
+                return f"You are a {act}."
+            return "I don't have a record of your activities or committee roles."
+
+        # 0.3 Preferred Name & Name
+        # e.g. "What is my preferred name?", "What is my name?", "What should you call me?"
+        if any(p in q for p in (
+            "what is my preferred name", "my preferred name", "what name do i prefer",
+            "what should you call me", "what is my name", "what's my name", "whats my name",
+            "who am i", "do you know my name", "tell me my name"
+        )):
+            name = facts.get("preferred_name") or facts.get("name")
+            if name:
+                return f"Your preferred name is {name}."
+            return "I don't have a preferred name recorded for you."
+
+        # 0.4 Commitments & Deadlines
+        # e.g. "When is my interview?", "What deadlines do I have?", "What is my next commitment?"
+        if any(p in q for p in (
+            "when is my interview", "what deadlines do i have", "what is my deadline",
+            "do i have an interview", "what commitments do i have", "my next commitment"
+        )):
+            comm = facts.get("commitment") or facts.get("deadline")
+            if comm:
+                return f"You have an upcoming commitment: {comm}."
+            return "You don't have any upcoming commitments or deadlines recorded."
+
+        # 0.5 Career Goals & Applications
+        # e.g. "What are my goals?", "What am I applying for?", "What is my career goal?"
+        if any(p in q for p in (
+            "what are my goals", "what is my goal", "what am i applying for",
+            "what career goal do i have", "my current goal"
+        )):
+            goal = facts.get("career_goal") or facts.get("goal")
+            if goal:
+                return f"Your current goal is {goal}."
+            return "I don't have any career goals or applications recorded for you yet."
 
         # 1. Assistant Name
         if any(p in q for p in (
@@ -577,8 +857,22 @@ class ChatGPTMemoryManager:
                 return f"You chose a {clean_s} response style."
             return "You haven't configured a specific response style yet."
 
-        # 5. What did I ask you to remember?
-        if any(p in q for p in ("what did i ask you to remember", "what did i tell you to remember", "what do you remember", "what is in my memory")):
+        # 5. What did I ask you to remember? / Test phrase query
+        if any(p in q for p in (
+            "what did i ask you to remember", "what did i tell you to remember",
+            "what do you remember", "what is in my memory",
+            "what was the test phrase", "what was the phrase", "what is the test phrase",
+            "test phrase i asked you to remember", "phrase i asked you to remember"
+        )):
+            if "test phrase" in q or "phrase" in q:
+                test_phrase = facts.get("test_phrase") or facts.get("phrase")
+                if not test_phrase:
+                    for fk, fv in facts.items():
+                        if "phrase" in fk:
+                            test_phrase = fv
+                            break
+                if test_phrase:
+                    return f"The test phrase you asked me to remember is '{test_phrase}'."
             if facts:
                 summary_parts = []
                 for k, v in facts.items():
@@ -591,6 +885,14 @@ class ChatGPTMemoryManager:
             return "You haven't asked me to remember any specific facts yet."
 
         # 6. Specific user fact lookup by entity key & relevance scoring
+        # Guard: Only evaluate if the query is an inquiry about personal facts or preferences
+        is_fact_inquiry = any(q.startswith(p) for p in (
+            "what is", "what's", "whats", "which", "tell me", "who is", "where is",
+            "show me", "do you know", "do i have", "do i prefer", "what do i"
+        )) or any(k in q for k in ("favorite", "preference", "secret", "my ", "our "))
+        if not is_fact_inquiry:
+            return None
+
         clean_q_key = re.sub(r'^(?:what\s+is|what\'s|which|tell\s+me|who\s+is|where\s+is|show\s+me|do\s+you\s+know)\s+(?:my\s+|our\s+)?', '', q).strip().replace(" ", "_")
         clean_q_key = re.sub(r'^(?:do\s+i\s+prefer|i\s+prefer)\s*', '', clean_q_key)
         if clean_q_key and clean_q_key in facts:
@@ -599,6 +901,8 @@ class ChatGPTMemoryManager:
 
         keywords = _extract_keywords(query_text)
         filtered_kw = [w for w in keywords if w not in ("name", "fact", "preference", "thing", "something", "prefer", "like", "use", "project")]
+        if not filtered_kw:
+            return None
 
         best_key = None
         best_val = None
@@ -617,7 +921,7 @@ class ChatGPTMemoryManager:
                 elif kw in k_words:
                     score += 25.0
                     matched_count += 1
-                elif kw in k_low:
+                elif len(kw) >= 5 and any(w.startswith(kw) or kw in w for w in k_words):
                     score += 10.0
                     matched_count += 1
 

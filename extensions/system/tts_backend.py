@@ -906,6 +906,16 @@ class SAPIBackend(TTSBackend):
                     if v.get("gender") == gen:
                         return v.get("id")
             for v in installed:
+                vid_low = (v.get("id") or "").lower()
+                name_low = (v.get("name") or "").lower()
+                if "zira" in vid_low or "zira" in name_low:
+                    return v.get("id")
+            for v in installed:
+                vid_low = (v.get("id") or "").lower()
+                name_low = (v.get("name") or "").lower()
+                if "david" in vid_low or "david" in name_low:
+                    return v.get("id")
+            for v in installed:
                 if "english" in v.get("language", "").lower() or "en" in v.get("language", "").lower():
                     return v.get("id")
             return installed[0].get("id")
@@ -916,6 +926,12 @@ class SAPIBackend(TTSBackend):
     def validate_or_fallback_voice(cls, voice_id: Optional[str], gender: Optional[str] = None, language: Optional[str] = None) -> Optional[str]:
         if cls.is_valid_voice(voice_id):
             return str(voice_id).strip()
+        try:
+            from legacy.tts import _voice_id as active_tts_vid
+            if active_tts_vid and cls.is_valid_voice(active_tts_vid):
+                return str(active_tts_vid).strip()
+        except Exception:
+            pass
         fallback = cls.get_fallback_voice(gender, language)
         if voice_id:
             logger.warning("[SAPI TTS] Invalid voice '%s' — using validated fallback '%s'", voice_id, fallback)

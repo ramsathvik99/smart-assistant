@@ -1,10 +1,11 @@
 """
-Word (.docx) Document Generator for Nova Smart Assistant.
+Word (.docx) Document Generator for Smart Assistant.
 Generates professionally styled Word documents with titles, headings, bullet lists, and tables.
 """
 
 import os
 import logging
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
@@ -13,51 +14,76 @@ logger = logging.getLogger(__name__)
 
 def get_default_output_dir() -> str:
     """
-    Get safe user Documents directory or fall back to Desktop.
+    Get user Desktop directory, checking OneDrive Desktop first then standard Desktop.
     """
     home = os.path.expanduser("~")
-    docs = os.path.join(home, "Documents")
-    if os.path.exists(docs):
-        return docs
-    desktop = os.path.join(home, "Desktop")
-    if os.path.exists(desktop):
-        return desktop
+    onedrive_desktop = os.path.join(home, "OneDrive", "Desktop")
+    if os.path.exists(onedrive_desktop) and os.path.isdir(onedrive_desktop):
+        return onedrive_desktop
+    standard_desktop = os.path.join(home, "Desktop")
+    if os.path.exists(standard_desktop) and os.path.isdir(standard_desktop):
+        return standard_desktop
     return home
+
+
+def _add_styled_runs(paragraph, text: str) -> None:
+    """
+    Parse inline Markdown formatting (**bold**, *italic*, `code`) and append styled runs.
+    """
+    import re
+    from docx.shared import Pt, RGBColor
+
+    pattern = re.compile(r'(\*\*.*?\*\*|\*.*?\*|`.*?`)')
+    parts = pattern.split(text)
+
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith("**") and part.endswith("**") and len(part) >= 4:
+            run = paragraph.add_run(part[2:-2])
+            run.font.bold = True
+        elif part.startswith("*") and part.endswith("*") and len(part) >= 2:
+            run = paragraph.add_run(part[1:-1])
+            run.font.italic = True
+        elif part.startswith("`") and part.endswith("`") and len(part) >= 2:
+            run = paragraph.add_run(part[1:-1])
+            run.font.name = "Consolas"
+            run.font.size = Pt(9.5)
+            run.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
+        else:
+            paragraph.add_run(part)
+
+
+def _set_cell_background(cell, hex_color: str) -> None:
+    """Set background color of a table cell via XML."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    shading_xml = f'<w:shd {nsdecls("w")} w:fill="{hex_color}"/>'
+    cell._tc.get_or_add_tcPr().append(parse_xml(shading_xml))
 
 
 def create_docx_document(
     title: str,
     content: str or List[Dict[str, Any]],
     filename: Optional[str] = None,
-    author: Optional[str] = "Nova Assistant",
+    author: Optional[str] = None,
     category: Optional[str] = None,
-    include_cover_page: bool = False
+    include_cover_page: bool = False,
+    images: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Create a styled .docx document.
-    
-    Args:
-        title: Main document title
-        content: String text or structured list of blocks:
-                 [{"type": "heading", "level": 1, "text": "..."},
-                  {"type": "paragraph", "text": "..."},
-                  {"type": "quote", "text": "...", "author": "..."},
-                  {"type": "bullet", "items": ["...", "..."]},
-                  {"type": "number", "items": ["...", "..."]},
-                  {"type": "page_break"},
-                  {"type": "table", "headers": [...], "rows": [[...], [...]]}]
-        filename: Target filename (.docx)
-        author: Document metadata author
-        category: Document category or topic
-        include_cover_page: If True, adds a professional standalone cover page
     """
     try:
         import docx
+        import re
         from docx.shared import Inches, Pt, RGBColor
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.enum.table import WD_TABLE_ALIGNMENT
         from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
+        from instance.config import get_branding_author
+
+        author = get_branding_author(author)
 
         doc = docx.Document()
         
@@ -133,67 +159,188 @@ def create_docx_document(
 
         if isinstance(content, str):
             lines = content.splitlines()
-            for line in lines:
-                line_str = line.strip()
+            idx = 0
+            while idx < len(lines):
+                line_str = lines[idx].strip()
                 if not line_str:
+                    idx += 1
                     continue
+
+                # Code block detection (```)
+                if line_str.startswith("```"):
+                    idx += 1
+                    code_lines = []
+                    while idx < len(lines) and not lines[idx].strip().startswith("```"):
+                        code_lines.append(lines[idx])
+                        idx += 1
+                    if idx < len(lines):
+                        idx += 1  # Skip closing ```
+                    
+                    code_text = "\n".join(code_lines)
+                    cp = doc.add_paragraph()
+                    cp.paragraph_format.left_indent = Inches(0.4)
+                    cp.paragraph_format.space_before = Pt(4)
+                    cp.paragraph_format.space_after = Pt(6)
+                    crun = cp.add_run(code_text)
+                    crun.font.name = "Consolas"
+                    crun.font.size = Pt(9.5)
+                    crun.font.color.rgb = RGBColor(0x1E, 0x29, 0x3B)
+                    continue
+
+                # Markdown table detection: lines starting and ending with '|'
+                if line_str.startswith("|") and line_str.endswith("|"):
+                    table_lines = []
+                    while idx < len(lines) and lines[idx].strip().startswith("|") and lines[idx].strip().endswith("|"):
+                        table_lines.append(lines[idx].strip())
+                        idx += 1
+                    
+                    parsed_rows = []
+                    for t_line in table_lines:
+                        cells = [c.strip() for c in t_line.strip('|').split('|')]
+                        if all(set(c).issubset({'-', ':', ' '}) for c in cells):
+                            continue # Skip markdown separator row |---|---|
+                        parsed_rows.append(cells)
+                    
+                    if parsed_rows:
+                        headers = parsed_rows[0]
+                        rows = parsed_rows[1:]
+                        cols = len(headers)
+                        table = doc.add_table(rows=0, cols=cols)
+                        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                        
+                        # Add header row
+                        hdr_row = table.add_row()
+                        trPr = hdr_row._tr.get_or_add_trPr()
+                        trPr.append(OxmlElement('w:cantSplit'))
+                        trPr.append(OxmlElement('w:tblHeader'))
+                        for i, h_text in enumerate(headers):
+                            cell = hdr_row.cells[i]
+                            _set_cell_background(cell, "1F497D")
+                            cp = cell.paragraphs[0]
+                            cp.paragraph_format.space_before = Pt(4)
+                            cp.paragraph_format.space_after = Pt(4)
+                            _add_styled_runs(cp, str(h_text))
+                            for r in cp.runs:
+                                r.font.bold = True
+                                r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                        
+                        # Add data rows with alternating colors
+                        for row_idx, row_data in enumerate(rows):
+                            row = table.add_row()
+                            r_trPr = row._tr.get_or_add_trPr()
+                            r_trPr.append(OxmlElement('w:cantSplit'))
+                            bg_color = "F8FAFC" if row_idx % 2 == 1 else "FFFFFF"
+                            for i, cell_val in enumerate(row_data[:cols]):
+                                cell = row.cells[i]
+                                if bg_color != "FFFFFF":
+                                    _set_cell_background(cell, bg_color)
+                                cp = cell.paragraphs[0]
+                                cp.paragraph_format.space_before = Pt(3)
+                                cp.paragraph_format.space_after = Pt(3)
+                                _add_styled_runs(cp, str(cell_val))
+                        doc.add_paragraph()
+                    continue
+
                 if line_str.startswith("# "):
                     h = doc.add_heading(line_str[2:].strip(), level=1)
-                    h.paragraph_format.space_before = Pt(14)
-                    h.paragraph_format.space_after = Pt(4)
+                    h.paragraph_format.space_before = Pt(16)
+                    h.paragraph_format.space_after = Pt(6)
+                    h.paragraph_format.keep_with_next = True
                 elif line_str.startswith("## "):
                     h = doc.add_heading(line_str[3:].strip(), level=2)
-                    h.paragraph_format.space_before = Pt(12)
-                    h.paragraph_format.space_after = Pt(3)
+                    h.paragraph_format.space_before = Pt(13)
+                    h.paragraph_format.space_after = Pt(4)
+                    h.paragraph_format.keep_with_next = True
                 elif line_str.startswith("### "):
                     h = doc.add_heading(line_str[4:].strip(), level=3)
                     h.paragraph_format.space_before = Pt(10)
+                    h.paragraph_format.space_after = Pt(3)
+                    h.paragraph_format.keep_with_next = True
+                elif line_str.startswith("#### "):
+                    h = doc.add_heading(line_str[5:].strip(), level=4)
+                    h.paragraph_format.space_before = Pt(8)
                     h.paragraph_format.space_after = Pt(2)
+                    h.paragraph_format.keep_with_next = True
                 elif line_str.startswith("> "):
                     # Callout / quote
                     qp = doc.add_paragraph()
-                    qp.paragraph_format.left_indent = Inches(0.5)
-                    qp.paragraph_format.right_indent = Inches(0.5)
-                    qp.paragraph_format.space_before = Pt(6)
-                    qp.paragraph_format.space_after = Pt(6)
-                    qrun = qp.add_run(line_str[2:].strip())
-                    qrun.font.italic = True
-                    qrun.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
-                elif line_str.startswith("- ") or line_str.startswith("* ") or line_str.startswith("• "):
-                    doc.add_paragraph(line_str[2:].strip(), style='List Bullet')
-                elif line_str.startswith("1. ") or line_str.startswith("2. ") or (len(line_str) > 3 and line_str[1:3] == ". "):
-                    dot_pos = line_str.find(". ")
-                    doc.add_paragraph(line_str[dot_pos+2:].strip(), style='List Number')
-                elif line_str == "---" or line_str == "***":
+                    qp.paragraph_format.left_indent = Inches(0.4)
+                    qp.paragraph_format.right_indent = Inches(0.4)
+                    qp.paragraph_format.space_before = Pt(5)
+                    qp.paragraph_format.space_after = Pt(5)
+                    _add_styled_runs(qp, line_str[2:].strip())
+                    for qrun in qp.runs:
+                        qrun.font.italic = True
+                        qrun.font.color.rgb = RGBColor(0x33, 0x41, 0x55)
+                elif line_str.startswith(("- ", "* ", "• ")):
+                    clean_b = re.sub(r'^[-*•]\s*', '', line_str).strip()
+                    bp = doc.add_paragraph(style='List Bullet')
+                    _add_styled_runs(bp, clean_b)
+                elif re.match(r'^\d+[\.\)]\s+', line_str):
+                    clean_num = re.sub(r'^\d+[\.\)]\s+', '', line_str).strip()
+                    np_para = doc.add_paragraph(style='List Number')
+                    _add_styled_runs(np_para, clean_num)
+                elif line_str in ("---", "***"):
+                    # Thematic divider: slight vertical spacing without an unwanted page break
+                    dp = doc.add_paragraph()
+                    dp.paragraph_format.space_before = Pt(4)
+                    dp.paragraph_format.space_after = Pt(4)
+                elif line_str in ("<!-- pagebreak -->", "\\pagebreak"):
                     doc.add_page_break()
                 else:
-                    doc.add_paragraph(line_str)
+                    para_lines = [line_str]
+                    idx += 1
+                    while idx < len(lines):
+                        next_line = lines[idx].strip()
+                        if (not next_line or 
+                            next_line.startswith(("#", ">", "-", "*", "•", "|", "```", "---", "***")) or 
+                            re.match(r'^\d+[\.\)]\s+', next_line) or
+                            next_line in ("<!-- pagebreak -->", "\\pagebreak")):
+                            break
+                        para_lines.append(next_line)
+                        idx += 1
+                    full_para = " ".join(para_lines)
+                    p = doc.add_paragraph()
+                    p.paragraph_format.space_after = Pt(5)
+                    p.paragraph_format.line_spacing = 1.15
+                    _add_styled_runs(p, full_para)
+                    continue
+                idx += 1
         elif isinstance(content, list):
             for block in content:
                 b_type = block.get("type", "paragraph")
                 if b_type == "heading":
-                    doc.add_heading(block.get("text", ""), level=block.get("level", 1))
+                    h = doc.add_heading(block.get("text", ""), level=block.get("level", 1))
+                    h.paragraph_format.keep_with_next = True
                 elif b_type == "paragraph":
-                    doc.add_paragraph(block.get("text", ""))
+                    p = doc.add_paragraph()
+                    p.paragraph_format.space_after = Pt(5)
+                    p.paragraph_format.line_spacing = 1.15
+                    _add_styled_runs(p, block.get("text", ""))
                 elif b_type in ("quote", "callout"):
                     qp = doc.add_paragraph()
-                    qp.paragraph_format.left_indent = Inches(0.5)
-                    qp.paragraph_format.right_indent = Inches(0.5)
-                    qrun = qp.add_run(f"“{block.get('text', '')}”")
-                    qrun.font.italic = True
-                    qrun.font.color.rgb = RGBColor(0x22, 0x55, 0x88)
+                    qp.paragraph_format.left_indent = Inches(0.4)
+                    qp.paragraph_format.right_indent = Inches(0.4)
+                    qp.paragraph_format.space_before = Pt(5)
+                    qp.paragraph_format.space_after = Pt(5)
+                    _add_styled_runs(qp, f"“{block.get('text', '')}”")
+                    for qrun in qp.runs:
+                        qrun.font.italic = True
+                        qrun.font.color.rgb = RGBColor(0x22, 0x55, 0x88)
                     if block.get("author"):
                         qp_auth = doc.add_paragraph()
-                        qp_auth.paragraph_format.left_indent = Inches(0.5)
+                        qp_auth.paragraph_format.left_indent = Inches(0.4)
                         auth_run = qp_auth.add_run(f"— {block.get('author')}")
                         auth_run.font.bold = True
                         auth_run.font.size = Pt(9.5)
                 elif b_type == "bullet":
                     for item in block.get("items", []):
-                        doc.add_paragraph(str(item), style='List Bullet')
+                        bp = doc.add_paragraph(style='List Bullet')
+                        _add_styled_runs(bp, str(item))
                 elif b_type == "number":
                     for item in block.get("items", []):
-                        doc.add_paragraph(str(item), style='List Number')
+                        np_para = doc.add_paragraph(style='List Number')
+                        _add_styled_runs(np_para, str(item))
                 elif b_type == "page_break":
                     doc.add_page_break()
                 elif b_type == "table":
@@ -202,36 +349,77 @@ def create_docx_document(
                     if headers or rows:
                         cols = len(headers) if headers else len(rows[0])
                         table = doc.add_table(rows=0, cols=cols)
-                        table.style = 'Light Shading Accent 1'
                         table.alignment = WD_TABLE_ALIGNMENT.CENTER
                         
                         if headers:
-                            hdr_cells = table.add_row().cells
+                            hdr_row = table.add_row()
+                            trPr = hdr_row._tr.get_or_add_trPr()
+                            trPr.append(OxmlElement('w:cantSplit'))
+                            trPr.append(OxmlElement('w:tblHeader'))
                             for i, h_text in enumerate(headers):
-                                hdr_cells[i].text = str(h_text)
-                                for r in hdr_cells[i].paragraphs[0].runs:
+                                cell = hdr_row.cells[i]
+                                _set_cell_background(cell, "1F497D")
+                                cp = cell.paragraphs[0]
+                                cp.paragraph_format.space_before = Pt(4)
+                                cp.paragraph_format.space_after = Pt(4)
+                                _add_styled_runs(cp, str(h_text))
+                                for r in cp.runs:
                                     r.font.bold = True
+                                    r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
                         
-                        for row_data in rows:
-                            row_cells = table.add_row().cells
-                            for i, cell_val in enumerate(row_data):
-                                if i < cols:
-                                    row_cells[i].text = str(cell_val)
-                        doc.add_paragraph() # Spacing after table
+                        for row_idx, row_data in enumerate(rows):
+                            row = table.add_row()
+                            r_trPr = row._tr.get_or_add_trPr()
+                            r_trPr.append(OxmlElement('w:cantSplit'))
+                            bg_color = "F8FAFC" if row_idx % 2 == 1 else "FFFFFF"
+                            for i, cell_val in enumerate(row_data[:cols]):
+                                cell = row.cells[i]
+                                if bg_color != "FFFFFF":
+                                    _set_cell_background(cell, bg_color)
+                                cp = cell.paragraphs[0]
+                                cp.paragraph_format.space_before = Pt(3)
+                                cp.paragraph_format.space_after = Pt(3)
+                                _add_styled_runs(cp, str(cell_val))
+                        doc.add_paragraph()
 
-        # Determine output file path
+        # Embed visual assets / diagrams if provided
+        if images:
+            for img_path in images:
+                if img_path and os.path.exists(img_path):
+                    try:
+                        doc.add_paragraph()
+                        doc.add_picture(img_path, width=Inches(6.0))
+                        cap_p = doc.add_paragraph(f"Figure: {Path(img_path).stem.replace('_', ' ').title()}")
+                        cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        if cap_p.runs:
+                            cap_p.runs[0].font.size = Pt(9)
+                            cap_p.runs[0].font.italic = True
+                        doc.add_paragraph()
+                    except Exception as img_err:
+                        logger.warning(f"[DOCX] Could not embed image {img_path}: {img_err}")
+
+        # Determine output file path using canonical SemanticFileNamingService
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        namer = get_semantic_file_naming_service()
+
         if not filename:
-            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '_', '-')).rstrip()
-            filename = f"{safe_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
-        elif not filename.endswith(".docx"):
-            filename += ".docx"
-
-        if os.path.isabs(filename):
-            target_path = filename
+            target_path, _ = namer.resolve_output_path(
+                task_description=title,
+                title=title,
+                artifact_type="document",
+                extension=".docx"
+            )
             out_dir = os.path.dirname(target_path)
         else:
-            out_dir = get_default_output_dir()
-            target_path = os.path.join(out_dir, filename)
+            clean_name = namer.sanitize_filename(filename)
+            if not clean_name.endswith(".docx"):
+                clean_name += ".docx"
+            if os.path.isabs(filename):
+                target_path = filename
+                out_dir = os.path.dirname(target_path)
+            else:
+                out_dir = namer.get_default_output_dir()
+                target_path = namer.get_unique_path(out_dir, os.path.splitext(clean_name)[0], ".docx")
 
         os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
         doc.save(target_path)

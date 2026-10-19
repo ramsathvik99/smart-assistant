@@ -130,8 +130,17 @@ class ArtifactReferenceResolver:
 
             if req_topic and (req_topic in topic_low or topic_low in req_topic or req_topic in subtopic_low):
                 score += 15.0
-                signals.append(f"topic_match:{art.topic}")
-            elif any(part in low_text for part in topic_low.split() if len(part) >= 3):
+            elif any(
+                part in low_text
+                for part in topic_low.split()
+                if len(part) >= 3 and part not in {
+                    "the", "about", "for", "with", "from", "and", "that", "this",
+                    "some", "any", "how", "what", "where", "when", "why", "into",
+                    "onto", "your", "mine", "their", "them", "have", "been",
+                    "you", "which", "dont", "know", "not", "can", "will", "did",
+                    "all", "who", "whom", "whose", "does", "done", "doing"
+                }
+            ):
                 # Partial topic word match (e.g. "dbms", "sql", "normalization")
                 score += 8.0
                 signals.append(f"partial_topic:{art.topic}")

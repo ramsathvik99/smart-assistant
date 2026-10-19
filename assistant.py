@@ -275,6 +275,28 @@ def main():
     # Keep CWD at project root so all module paths resolve correctly
     os.chdir(str(PROJECT_ROOT))
 
+    # Initialize Startup Elevation & Single-Instance Coordination
+    try:
+        from core.elevation_startup import get_elevation_coordinator
+        coordinator = get_elevation_coordinator()
+
+        should_exit, elev_status = coordinator.handle_startup_elevation(
+            argv=sys.argv[1:],
+            project_root=PROJECT_ROOT
+        )
+        if should_exit:
+            sys.exit(0)
+
+        # Prevent duplicate instances for the continuing process (elevated or limited)
+        if "pytest" not in sys.modules and not os.environ.get("TEST_RUN"):
+            if not coordinator.ensure_single_instance():
+                print("[ASSISTANT] Another instance of Smart Assistant is already active. Exiting to prevent duplicates.")
+                sys.exit(0)
+
+        print(f"[ASSISTANT] Elevation Status: elevated={elev_status.is_elevated}, limited_mode={elev_status.is_limited_mode}")
+    except Exception as elev_err:
+        print(f"[ASSISTANT] Elevation initialization notice: {elev_err}")
+
     # Initialize Unified Routing
     initialize_unified_routing()
 

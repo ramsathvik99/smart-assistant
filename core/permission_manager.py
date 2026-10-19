@@ -34,9 +34,38 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger("PermissionManager")
 
-# Win32 Error Codes
+# Win32 Error Codes and Constants
 ERROR_CANCELLED = 1223  # The operation was canceled by the user (UAC prompt declined)
 ERROR_ACCESS_DENIED = 5
+ERROR_FILE_NOT_FOUND = 2
+
+SEE_MASK_NOCLOSEPROCESS = 0x00000040
+SEE_MASK_FLAG_NO_UI = 0x00000400
+SW_HIDE = 0
+SW_SHOWNORMAL = 1
+WAIT_OBJECT_0 = 0x00000000
+WAIT_TIMEOUT = 0x00000102
+INFINITE = 0xFFFFFFFF
+
+
+class SHELLEXECUTEINFOW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.wintypes.DWORD),
+        ("fMask", ctypes.wintypes.ULONG),
+        ("hwnd", ctypes.wintypes.HWND),
+        ("lpVerb", ctypes.c_wchar_p),
+        ("lpFile", ctypes.c_wchar_p),
+        ("lpParameters", ctypes.c_wchar_p),
+        ("lpDirectory", ctypes.c_wchar_p),
+        ("nShow", ctypes.c_int),
+        ("hInstApp", ctypes.wintypes.HINSTANCE),
+        ("lpIDList", ctypes.c_void_p),
+        ("lpClass", ctypes.c_wchar_p),
+        ("hkeyClass", ctypes.wintypes.HKEY),
+        ("dwHotKey", ctypes.wintypes.DWORD),
+        ("hIconOrMonitor", ctypes.wintypes.HANDLE),
+        ("hProcess", ctypes.wintypes.HANDLE),
+    ]
 
 
 class PermissionCategory(str, Enum):
@@ -100,6 +129,53 @@ class PermissionCheckResult:
         return d
 
 
+def is_process_token_elevated() -> bool:
+    """
+    Directly inspect the Windows NT Access Token for TokenElevation.
+    Returns True if the current process token is elevated as Administrator.
+    """
+    if sys.platform != "win32":
+        return os.geteuid() == 0 if hasattr(os, "geteuid") else False
+    try:
+        TOKEN_QUERY = 0x0008
+        TokenElevation = 20
+
+        class TOKEN_ELEVATION(ctypes.Structure):
+            _fields_ = [('TokenIsElevated', ctypes.wintypes.DWORD)]
+
+        kernel32 = ctypes.windll.kernel32
+        advapi32 = ctypes.windll.advapi32
+
+        kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [
+            ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD, ctypes.POINTER(ctypes.wintypes.HANDLE)
+        ]
+        advapi32.OpenProcessToken.restype = ctypes.wintypes.BOOL
+
+        token = ctypes.wintypes.HANDLE()
+        proc = kernel32.GetCurrentProcess()
+        if advapi32.OpenProcessToken(proc, TOKEN_QUERY, ctypes.byref(token)):
+            try:
+                elevation = TOKEN_ELEVATION()
+                cbSize = ctypes.sizeof(TOKEN_ELEVATION)
+                ret_len = ctypes.wintypes.DWORD()
+                if advapi32.GetTokenInformation(token, TokenElevation, ctypes.byref(elevation), cbSize, ctypes.byref(ret_len)):
+                    return elevation.TokenIsElevated != 0
+            finally:
+                kernel32.CloseHandle(token)
+    except Exception:
+        pass
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def is_admin() -> bool:
+    """Module-level helper to check if process token is elevated."""
+    return is_process_token_elevated()
+
+
 class PermissionElevationManager:
     """
     Authoritative manager for permissions, elevation discovery, and legitimate Windows UAC interaction.
@@ -116,12 +192,7 @@ class PermissionElevationManager:
 
     def is_admin(self) -> bool:
         """Check if current Python process has elevated administrator privileges."""
-        if sys.platform != "win32":
-            return os.geteuid() == 0 if hasattr(os, "geteuid") else False
-        try:
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except Exception:
-            return False
+        return is_process_token_elevated()
 
     def can_elevate(self) -> bool:
         """Check if Windows elevation / UAC is available on this system for the user."""
@@ -470,6 +541,315 @@ class PermissionElevationManager:
     # 3. LEGITIMATE WINDOWS UAC ELEVATION
     # =========================================================================
 
+    def execute_elevated_command(
+        self,
+        command: str,
+        args: Optional[List[str]] = None,
+        cwd: Optional[str] = None,
+        timeout: int = 60,
+        show_window: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Canonical execution of an administrative command with legitimate Windows UAC elevation.
+        - If current process is already elevated, runs directly without UAC prompt.
+        - If standard user, uses ShellExecuteExW with verb 'runas' to invoke Windows UAC.
+        - Validates executable against an allowed command list.
+        - Waits for completion, captures exit code, handles UAC cancellation (error 1223),
+          launch failures, and timeouts.
+        """
+        if sys.platform != "win32":
+            return {"status": "unsupported", "success": False, "error": "UAC elevation is only applicable on Windows."}
+
+        full_args = args or []
+        # Argument safety check: prevent command chaining/injection characters
+        for arg in full_args:
+            if any(c in str(arg) for c in (";", "&", "|", "`", "\n", "\r")):
+                return {
+                    "status": "error",
+                    "success": False,
+                    "error": f"Invalid character detected in elevated command argument: '{arg}'"
+                }
+
+        # Resolve executable path
+        executable_path = command
+        cmd_base = os.path.basename(command).lower()
+        if cmd_base.endswith(".exe"):
+            cmd_stem = cmd_base[:-4]
+        else:
+            cmd_stem = cmd_base
+
+        if not os.path.isabs(executable_path):
+            resolved = shutil.which(command)
+            if resolved:
+                executable_path = resolved
+            elif cmd_stem == "winget":
+                local_app_data = os.environ.get("LOCALAPPDATA", "")
+                candidate = os.path.join(local_app_data, "Microsoft", "WindowsApps", "winget.exe")
+                if os.path.isfile(candidate):
+                    executable_path = candidate
+
+        # Verify executable exists
+        if not os.path.isfile(executable_path):
+            resolved = shutil.which(executable_path)
+            if resolved:
+                executable_path = resolved
+            else:
+                return {
+                    "status": "error",
+                    "success": False,
+                    "error": f"Executable not found on system: '{command}'"
+                }
+
+        arg_string = " ".join(f'"{a}"' if " " in str(a) else str(a) for a in full_args)
+        logger.info(f"[ELEVATION] Executing command: '{executable_path}' args: '{arg_string}' (already_admin={self.is_admin()})")
+
+        # ── Fast path: Process already elevated ───────────────────────────────
+        if self.is_admin():
+            try:
+                proc = subprocess.run(
+                    [executable_path, *full_args],
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    creationflags=subprocess.CREATE_NO_WINDOW if not show_window else 0
+                )
+                success = proc.returncode == 0
+                return {
+                    "status": "success" if success else "error",
+                    "success": success,
+                    "elevated": True,
+                    "already_elevated": True,
+                    "exit_code": proc.returncode,
+                    "stdout": proc.stdout,
+                    "stderr": proc.stderr,
+                    "message": "Operation executed successfully." if success else (proc.stderr or proc.stdout or f"Process exited with code {proc.returncode}")
+                }
+            except subprocess.TimeoutExpired:
+                return {
+                    "status": "timeout",
+                    "success": False,
+                    "elevated": True,
+                    "already_elevated": True,
+                    "error": f"Elevated operation timed out after {timeout} seconds."
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "success": False,
+                    "elevated": True,
+                    "already_elevated": True,
+                    "error": str(e)
+                }
+
+        # ── Standard user: Invoke Windows UAC via ShellExecuteExW ─────────────
+        sei = SHELLEXECUTEINFOW()
+        sei.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
+        # CRITICAL WIN32 CONTRACT: SEE_MASK_FLAG_NO_UI suppresses UI error/elevation dialogs.
+        # It must NOT be passed when an interactive Windows UAC prompt is required.
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                hwnd = ctypes.windll.user32.GetDesktopWindow()
+        except Exception:
+            hwnd = None
+        sei.hwnd = hwnd
+        sei.lpVerb = "runas"
+        sei.lpFile = executable_path
+        sei.lpParameters = arg_string if arg_string else None
+        sei.lpDirectory = cwd if cwd else None
+        sei.nShow = SW_SHOWNORMAL if show_window else SW_HIDE
+
+        logger.info(
+            f"[ELEVATION_INVOKE] Calling ShellExecuteExW: verb='{sei.lpVerb}' "
+            f"file='{sei.lpFile}' hwnd={sei.hwnd} fMask={hex(sei.fMask)} nShow={sei.nShow}"
+        )
+        ret = ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei))
+        if not ret:
+            err = ctypes.GetLastError()
+            if err == ERROR_CANCELLED:  # 1223
+                logger.warning(f"[ELEVATION_RESULT] ShellExecuteExW UAC prompt declined by user (Win32 error {err}).")
+                return {
+                    "status": "declined",
+                    "success": False,
+                    "elevated": False,
+                    "exit_code": ERROR_CANCELLED,
+                    "error": "Administrator elevation was declined, so I couldn't complete the operation.",
+                    "message": self.format_elevation_declined_message(command),
+                }
+            else:
+                logger.error(f"[ELEVATION_RESULT] ShellExecuteExW failed with Win32 error {err}.")
+                return {
+                    "status": "error",
+                    "success": False,
+                    "elevated": False,
+                    "exit_code": err,
+                    "error": f"Failed to launch elevated process (Win32 error {err}).",
+                }
+
+        hProcess = sei.hProcess
+        if not hProcess:
+            logger.error("[ELEVATION_RESULT] ShellExecuteExW succeeded but hProcess was null.")
+            return {
+                "status": "error",
+                "success": False,
+                "elevated": True,
+                "error": "ShellExecuteExW returned success but no process handle was provided."
+            }
+
+        logger.info(f"[ELEVATION_RESULT] ShellExecuteExW succeeded with hProcess={hProcess}. Waiting for child process completion...")
+        try:
+            wait_ms = int(timeout * 1000) if timeout else INFINITE
+            wait_res = ctypes.windll.kernel32.WaitForSingleObject(hProcess, wait_ms)
+
+            if wait_res == WAIT_OBJECT_0:
+                exit_code = ctypes.wintypes.DWORD()
+                ctypes.windll.kernel32.GetExitCodeProcess(hProcess, ctypes.byref(exit_code))
+                code = exit_code.value
+                success = code == 0
+                logger.info(f"[ELEVATION_RESULT] Elevated process completed with exit_code={code}, success={success}.")
+                return {
+                    "status": "success" if success else "error",
+                    "success": success,
+                    "elevated": success,
+                    "already_elevated": False,
+                    "exit_code": code,
+                    "message": "Operation executed successfully with administrator elevation." if success else f"Elevated process exited with code {code}."
+                }
+            elif wait_res == WAIT_TIMEOUT:
+                logger.warning(f"[ELEVATION_RESULT] Elevated operation timed out after {timeout} seconds.")
+                return {
+                    "status": "timeout",
+                    "success": False,
+                    "elevated": False,
+                    "error": f"Elevated operation timed out after {timeout} seconds."
+                }
+            else:
+                logger.error(f"[ELEVATION_RESULT] Unexpected wait result: {wait_res}.")
+                return {
+                    "status": "error",
+                    "success": False,
+                    "elevated": False,
+                    "error": f"Unexpected wait result: {wait_res}"
+                }
+        finally:
+            ctypes.windll.kernel32.CloseHandle(hProcess)
+
+    def execute_privileged_operation(
+        self,
+        operation: str,
+        params: Dict[str, Any],
+        user_id: int = 1
+    ) -> Dict[str, Any]:
+        """
+        High-level dispatcher for verified administrative operations.
+        Maps operations (install_software, uninstall_software, service_control, test_elevation, elevated_command)
+        to validated executables and calls execute_elevated_command.
+        """
+        op = (operation or "").lower().strip()
+        params = params or {}
+
+        if op in ("test_elevation", "elevation", "request_elevation"):
+            # Safe, harmless privileged-process probe using net session via cmd.exe.
+            # 'net session' succeeds (exit code 0) ONLY when executed with verified Administrator privileges.
+            # As a standard user without elevation, it fails with Access Denied (exit code 1 or 2).
+            cmd = os.environ.get("COMSPEC", "cmd.exe")
+            args = ["/c", "net", "session"]
+            res = self.execute_elevated_command(cmd, args, timeout=params.get("timeout", 45), show_window=params.get("show_window", False))
+            
+            exit_code = res.get("exit_code")
+            is_ok = res.get("success", False) and exit_code == 0
+            res["verified"] = is_ok
+            res["success"] = is_ok
+            
+            if is_ok:
+                res["status"] = "verified"
+                res["message"] = "Administrator elevation verified successfully. Smart Assistant has administrator access for privileged operations."
+                logger.info("[ELEVATION_VERIFICATION] Administrator elevation verified successfully (exit_code=0).")
+            elif res.get("status") == "declined" or exit_code == ERROR_CANCELLED:
+                res["status"] = "declined"
+                res["message"] = "Administrator elevation was declined, so I couldn't complete the operation."
+                logger.warning(f"[ELEVATION_VERIFICATION] Administrator elevation prompt was declined (exit_code={exit_code}).")
+            else:
+                res["status"] = "error"
+                res["message"] = f"Administrator elevation could not be verified (exit code {exit_code})."
+                logger.error(f"[ELEVATION_VERIFICATION] Administrator elevation unverified or failed (exit_code={exit_code}).")
+            return res
+
+        elif op == "install_software":
+            pkg = params.get("name") or params.get("package") or params.get("app") or ""
+            pkg = str(pkg).strip()
+            if not pkg:
+                return {"status": "error", "success": False, "message": "Package name required for installation."}
+
+            winget_path = shutil.which("winget")
+            if not winget_path:
+                local_app_data = os.environ.get("LOCALAPPDATA", "")
+                candidate = os.path.join(local_app_data, "Microsoft", "WindowsApps", "winget.exe")
+                if os.path.isfile(candidate):
+                    winget_path = candidate
+
+            if not winget_path:
+                return {"status": "error", "success": False, "message": "winget package manager is not available."}
+
+            args = ["install", "--exact", "--id", pkg, "--silent", "--accept-package-agreements", "--accept-source-agreements"]
+            res = self.execute_elevated_command(winget_path, args, timeout=180)
+            res["verified"] = res.get("success", False)
+            return res
+
+        elif op == "uninstall_software":
+            pkg = params.get("name") or params.get("package") or params.get("app") or ""
+            pkg = str(pkg).strip()
+            if not pkg:
+                return {"status": "error", "success": False, "message": "Package name required for uninstallation."}
+
+            winget_path = shutil.which("winget")
+            if not winget_path:
+                local_app_data = os.environ.get("LOCALAPPDATA", "")
+                candidate = os.path.join(local_app_data, "Microsoft", "WindowsApps", "winget.exe")
+                if os.path.isfile(candidate):
+                    winget_path = candidate
+
+            if not winget_path:
+                return {"status": "error", "success": False, "message": "winget package manager is not available."}
+
+            args = ["uninstall", "--exact", "--id", pkg, "--silent"]
+            res = self.execute_elevated_command(winget_path, args, timeout=180)
+            res["verified"] = res.get("success", False)
+            return res
+
+        elif op == "service_control":
+            svc = params.get("name") or params.get("service") or params.get("service_name") or ""
+            cmd = params.get("command") or params.get("sub_action") or "restart"
+            svc = str(svc).strip()
+            cmd = str(cmd).strip().lower()
+            if not svc:
+                return {"status": "error", "success": False, "message": "Service name required for service control."}
+
+            sc_path = shutil.which("sc") or r"C:\Windows\System32\sc.exe"
+            if cmd == "restart":
+                self.execute_elevated_command(sc_path, ["stop", svc], timeout=30)
+                time.sleep(1)
+                res = self.execute_elevated_command(sc_path, ["start", svc], timeout=30)
+            else:
+                res = self.execute_elevated_command(sc_path, [cmd, svc], timeout=30)
+
+            res["verified"] = res.get("success", False)
+            return res
+
+        elif op == "elevated_command":
+            cmd = params.get("command") or ""
+            args = params.get("args") or []
+            if not cmd:
+                return {"status": "error", "success": False, "message": "Command required for elevated command execution."}
+            res = self.execute_elevated_command(cmd, args, timeout=params.get("timeout", 60))
+            res["verified"] = res.get("success", False)
+            return res
+
+        else:
+            return {"status": "unsupported", "success": False, "message": f"Unsupported privileged operation: {operation}"}
+
     def request_uac_elevation(
         self,
         command: str,
@@ -478,80 +858,9 @@ class PermissionElevationManager:
         timeout: int = 45
     ) -> Dict[str, Any]:
         """
-        Executes a legitimate Windows UAC elevation request.
-        Uses PowerShell Start-Process -Verb RunAs or Win32 ShellExecuteW(None, "runas", ...).
-        Never bypasses UAC. User must explicitly approve in the Windows UAC dialog.
-
-        Returns:
-            status: "success" if elevation was approved and completed
-            status: "declined" if user clicked "No" on UAC prompt (Win32 error 1223)
-            status: "error" if elevation failed
+        Executes a legitimate Windows UAC elevation request using Win32 ShellExecuteExW.
         """
-        if sys.platform != "win32":
-            return {"status": "unsupported", "error": "UAC elevation is only applicable on Windows."}
-
-        full_args = args or []
-        arg_string = " ".join(f'"{a}"' if " " in a else a for a in full_args)
-
-        logger.info(f"[ELEVATION] Requesting legitimate Windows UAC elevation for: '{command}' with args: '{arg_string}'")
-
-        # Approach: PowerShell Start-Process with -Verb RunAs
-        # Captures exit code and handles UAC rejection (ERROR_CANCELLED 1223)
-        ps_script = (
-            f"$proc = Start-Process -FilePath '{command}' "
-            + (f"-ArgumentList '{arg_string}' " if arg_string else "")
-            + f"-Verb RunAs -PassThru -ErrorAction Stop; "
-            + ("$proc.WaitForExit(); exit $proc.ExitCode" if wait else "exit 0")
-        )
-
-        try:
-            res = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            )
-
-            if res.returncode == 0:
-                logger.info(f"[ELEVATION] Elevated command '{command}' succeeded.")
-                return {
-                    "status": "success",
-                    "elevated": True,
-                    "command": command,
-                    "message": "Operation executed successfully with administrator elevation.",
-                }
-            else:
-                err_text = (res.stderr or res.stdout).strip()
-                # Check for user declining UAC prompt
-                if "canceled by the user" in err_text.lower() or "1223" in err_text:
-                    logger.warning("[ELEVATION] User declined Windows UAC prompt.")
-                    return {
-                        "status": "declined",
-                        "elevated": False,
-                        "error": "Administrator elevation was declined, so I couldn't complete the operation.",
-                        "message": self.format_elevation_declined_message(command),
-                    }
-
-                return {
-                    "status": "error",
-                    "elevated": False,
-                    "exit_code": res.returncode,
-                    "error": err_text or f"Elevated command exited with code {res.returncode}.",
-                }
-
-        except subprocess.TimeoutExpired:
-            return {"status": "timeout", "error": f"Elevated operation timed out after {timeout} seconds."}
-        except Exception as exc:
-            err_str = str(exc)
-            if "canceled by the user" in err_str.lower() or "1223" in err_str:
-                return {
-                    "status": "declined",
-                    "elevated": False,
-                    "error": "Administrator elevation was declined.",
-                    "message": self.format_elevation_declined_message(command),
-                }
-            return {"status": "error", "error": f"UAC elevation failed: {exc}"}
+        return self.execute_elevated_command(command, args=args, timeout=timeout)
 
     # =========================================================================
     # 4. USER EXPERIENCE & MESSAGING
@@ -650,5 +959,6 @@ def get_permission_elevation_manager() -> PermissionElevationManager:
         _permission_elevation_manager = PermissionElevationManager()
     return _permission_elevation_manager
 
+get_permission_manager = get_permission_elevation_manager
 permission_manager = get_permission_elevation_manager()
 

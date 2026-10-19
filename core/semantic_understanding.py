@@ -354,6 +354,39 @@ class PostgresHistoricalMemoryRetriever:
         time_filt = rep.time_filter
         user_input_low = rep.user_input.lower()
 
+        # Conversational History Recall ("What did I ask you earlier?", "What was my last question?", etc.)
+        is_conversational_recall = (
+            getattr(rep, "action", "") == "recall_previous_turn"
+            or any(p in user_input_low for p in (
+                "what did i ask you earlier", "what did i ask earlier", "what did i ask you before",
+                "what did i ask before", "what did i ask you", "what did i ask",
+                "what did i just ask", "what was my last question", "what was my previous question",
+                "what was the question that i asked", "what was the last thing i asked",
+                "remind me what i asked"
+            ))
+        )
+        if is_conversational_recall:
+            if dialogue_state and hasattr(dialogue_state, "turns") and dialogue_state.turns:
+                prev_turns = [t for t in dialogue_state.turns if getattr(t, "user_input", None) and t.user_input.lower().strip() != user_input_low.strip()]
+                if prev_turns:
+                    return f"You asked: '{prev_turns[-1].user_input}'."
+            try:
+                from core.db_pool import get_db_pool
+                pool = get_db_pool()
+                if pool and pool.is_healthy():
+                    with pool.get_cursor() as cur:
+                        cur.execute("""
+                            SELECT content FROM messages
+                            WHERE user_id = %s AND role = 'user' AND content NOT ILIKE %s
+                            ORDER BY created_at DESC LIMIT 1;
+                        """, (int(user_id), f"%{user_input_low[:15]}%"))
+                        row = cur.fetchone()
+                        if row:
+                            return f"You asked: '{row[0]}'."
+            except Exception:
+                pass
+            return "I don't have a record of your previous request."
+
         # Check factual memory and command recall from centralized ChatGPTMemoryManager
         try:
             from core.chatgpt_memory import get_chatgpt_memory
@@ -1410,10 +1443,152 @@ class SemanticUnderstandingEngine:
                 confidence=0.99,
             )
 
+        # -------------------------------------------------------------
+        # 2a. System Uptime & Telemetry Queries (Section 2, 4, 18)
+        # -------------------------------------------------------------
         if any(re.search(p, norm) for p in [
+            r'\bhow\s+long\s+(?:has|is)\s+(?:my|the|this)?\s*(?:pc|comput[er]{1,2}|system|mach[in]{1,3}e?|device|laptop|workstation)\s+(?:been\s+|being\s+)?(?:run[in]{1,3}g|on|up)\b',
+            r'\b(?:what(?:\x27s|\s+is)\s+(?:my|the)?\s*(?:system\s+)?uptime|(?:system\s+)?uptime|check\s+(?:my|the)?\s*uptime|how\s+long\s+(?:has\s+it|have\s+you|is\s+it)\s+(?:been\s+|being\s+)?(?:run[in]{1,3}g|on|up))\b',
+        ]) or norm in ("system uptime", "uptime", "check uptime", "what is uptime", "how long is the system running", "how long is the system being running"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="check system uptime",
+                intent="DEVICE_CONTROL",
+                action="uptime",
+                target="system_uptime",
+                parameters={"action": "uptime"},
+                confidence=1.0,
+            )
+
+        # -------------------------------------------------------------
+        # 2b. Voice Listening & Microphone Lifecycle Control
+        # -------------------------------------------------------------
+        if any(re.search(p, norm) for p in [
+            r'\b(?:toggle|switch)\s+(?:voice\s+)?listening\b',
+            r'\b(?:toggle|switch)\s+(?:the\s+)?(?:mic|microphone)\b',
+        ]) or norm in ("toggle voice listening", "toggle listening", "toggle mic", "toggle microphone"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="toggle continuous voice listening",
+                intent="DEVICE_CONTROL",
+                action="toggle_listening",
+                target="voice_listening",
+                parameters={"action": "toggle_listening"},
+                confidence=1.0,
+            )
+
+        if any(re.search(p, norm) for p in [
+            r'\b(?:start|resume|enable|unpause)\s+(?:voice\s+)?listening\b',
+            r'\b(?:unmute)\s+(?:the\s+)?(?:mic|microphone|voice)\b',
+        ]) or norm in ("start listening", "resume listening", "unmute mic", "unmute microphone", "start voice listening"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="start continuous voice listening",
+                intent="DEVICE_CONTROL",
+                action="start_listening",
+                target="voice_listening",
+                parameters={"action": "start_listening"},
+                confidence=1.0,
+            )
+
+        if any(re.search(p, norm) for p in [
+            r'\b(?:stop|pause|disable)\s+(?:voice\s+)?listening\b',
+            r'\b(?:mute)\s+(?:the\s+)?(?:mic|microphone|voice)\b',
+        ]) or norm in ("stop listening", "pause listening", "mute mic", "mute microphone", "stop voice listening"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="pause continuous voice listening",
+                intent="DEVICE_CONTROL",
+                action="stop_listening",
+                target="voice_listening",
+                parameters={"action": "stop_listening"},
+                confidence=1.0,
+            )
+
+        # -------------------------------------------------------------
+        # 2c. System Resource Queries (CPU, RAM, Disk, GPU, Processes)
+        # -------------------------------------------------------------
+        if any(re.search(p, norm) for p in [
+            r'\b(?:what(?:\x27s|\s+is)\s+(?:my\s+)?cpu\s+usage|check\s+(?:my\s+)?cpu|how\s+much\s+cpu\s+(?:am\s+i\s+using|is\s+used)|cpu\s+usage)\b',
+        ]) or norm in ("cpu usage", "check cpu", "what is my cpu usage"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="check CPU usage",
+                intent="DEVICE_CONTROL",
+                action="cpu_usage",
+                target="cpu",
+                parameters={"action": "cpu_usage"},
+                confidence=1.0,
+            )
+
+        if any(re.search(p, norm) for p in [
+            r'\b(?:what(?:\x27s|\s+is)\s+(?:my\s+)?(?:ram|memory)\s+usage|check\s+(?:my\s+)?(?:ram|memory)|how\s+much\s+(?:ram|memory)\s+(?:am\s+i\s+using|is\s+used|do\s+i\s+have)|ram\s+usage|memory\s+usage)\b',
+        ]) or norm in ("ram usage", "memory usage", "check ram", "check memory", "what is my ram usage"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="check RAM usage",
+                intent="DEVICE_CONTROL",
+                action="ram_usage",
+                target="ram",
+                parameters={"action": "ram_usage"},
+                confidence=1.0,
+            )
+
+        if any(re.search(p, norm) for p in [
+            r'\b(?:how\s+much\s+(?:disk\s+space|storage|space)\s+is\s+(?:available|free|left)|check\s+disk|disk\s+usage|storage\s+usage|available\s+disk\s+space|free\s+disk\s+space)\b',
+        ]) or norm in ("disk space", "disk usage", "storage usage", "check disk"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="check disk space",
+                intent="DEVICE_CONTROL",
+                action="disk",
+                target="disk",
+                parameters={"action": "disk", "drive": "C:"},
+                confidence=1.0,
+            )
+
+        if any(re.search(p, norm) for p in [
+            r'\b(?:what(?:\x27s|\s+is)\s+(?:my\s+)?gpu|check\s+(?:my\s+)?gpu|gpu\s+usage|gpu\s+telemetry|what\s+gpu\s+do\s+i\s+have|graphics\s+card\s+info)\b',
+        ]) or norm in ("gpu usage", "check gpu", "gpu telemetry", "graphics card"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="check GPU telemetry",
+                intent="DEVICE_CONTROL",
+                action="gpu_telemetry",
+                target="gpu",
+                parameters={"action": "gpu_telemetry"},
+                confidence=1.0,
+            )
+
+        if any(re.search(p, norm) for p in [
+            r'\b(?:which|what)\s+(?:app|application|process|program)\s+(?:is\s+)?(?:using|taking|consuming)\s+(?:the\s+)?most\s+cpu\b',
+            r'\btop\s+cpu\s+processes?\b',
+        ]) or norm in ("top processes", "top cpu processes", "what is using the most cpu"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="check top CPU processes",
+                intent="DEVICE_CONTROL",
+                action="top_processes",
+                target="processes",
+                parameters={"action": "top_processes", "sort_by": "cpu", "n": 1},
+                confidence=1.0,
+            )
+
+        # Guard: Exclude telemetry questions (e.g. "how long is the system running", "how long is the system being running")
+        is_telemetry_question = any(q in norm for q in ("how long", "how much", "how many", "what is my", "what is the")) or any(s in norm for s in ("system", "pc", "computer", "machine", "cpu", "gpu", "disk", "uptime"))
+        if not is_telemetry_question and (any(re.search(p, norm) for p in [
             r'\b(?:did\s+you|have\s+you)\s+(?:open|opened|launch|launched|start|started)\s+([a-zA-Z0-9_\-\s]+)',
-            r'\bis\s+([a-zA-Z0-9_\-\s]+?)\s+(?:open|running|active)\b',
-        ]) or norm in ("did you open notepad", "have you opened notepad"):
+            r'^(?:is|is\s+the)\s+([a-zA-Z0-9_\-]+)\s+(?:open|running|active)\b',
+        ]) or norm in ("did you open notepad", "have you opened notepad")):
             target_app = "notepad" if "notepad" in norm else ("chrome" if "chrome" in norm else "the application")
             return SemanticCommand(
                 user_text=text_stripped,
@@ -1742,9 +1917,54 @@ class SemanticUnderstandingEngine:
         # -------------------------------------------------------------
         # 5. Volume Equivalence Group (Section 2, 3, 9)
         # -------------------------------------------------------------
+        # Absolute Volume SET
+        m_vset = re.search(r'\b(?:set|change)\s+(?:the\s+)?volume\s+(?:to\s+)?(\d+)\s*%?\b', norm) or re.search(r'\bvolume\s+to\s+(\d+)\s*%?\b', norm)
+        if m_vset:
+            lvl = max(0, min(100, int(m_vset.group(1))))
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"set audio output volume to {lvl}%",
+                intent="DEVICE_CONTROL",
+                action="VOLUME_SET",
+                target="system_volume",
+                desired_state=f"{lvl}%",
+                parameters={
+                    "requested_device_target": "volume",
+                    "requested_action": "VOLUME_SET",
+                    "resolved_action": "VOLUME_SET",
+                    "executor_action": "set_volume",
+                    "action": "set_volume",
+                    "level": lvl,
+                    "amount": lvl,
+                    "step": lvl,
+                },
+                confidence=1.0,
+            )
+
+        # Read volume level
+        if any(k in norm for k in (
+            "what is the current volume", "what is the volume", "what's the volume",
+            "what is my current volume", "what is my volume", "what's my current volume", "what's my volume",
+            "current volume", "check volume", "check my volume", "check current volume", "check the volume",
+            "volume level", "get volume", "my current volume"
+        )) or re.search(r'\b(?:what(?:\x27s|\s+is)\s+(?:my\s+|the\s+)?(?:current\s+)?volum?e?|check\s+(?:my\s+|the\s+)?(?:current\s+)?volum?e?)\b', norm):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="read audio volume level",
+                intent="DEVICE_CONTROL",
+                action="get_volume",
+                target="system_volume",
+                parameters={"action": "get_volume"},
+                confidence=1.0,
+            )
+
         if any(re.search(p, norm) for p in [
             r'\b(?:make\s+(?:it|things)\s+quieter|quieter|lower\s+(?:the\s+)?sound|decrease\s+volume|turn\s+down\s+volume|turn\s+volume\s+down|volume\s+down|reduce\s+volume|lower\s+volume|less\s+volume|softer\s+volume)\b',
         ]):
+            m_amt = re.search(r'\b(?:by\s+)?(\d+)\s*%?\b', norm)
+            step_val = int(m_amt.group(1)) if m_amt else 10
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
@@ -1759,7 +1979,8 @@ class SemanticUnderstandingEngine:
                     "resolved_action": "VOLUME_SET",
                     "executor_action": "decrease_volume",
                     "action": "decrease_volume",
-                    "step": 10,
+                    "step": step_val,
+                    "amount": step_val,
                 },
                 confidence=1.0,
             )
@@ -1767,6 +1988,8 @@ class SemanticUnderstandingEngine:
         if any(re.search(p, norm) for p in [
             r'\b(?:make\s+(?:it|things)\s+louder|louder|raise\s+(?:the\s+)?sound|increase\s+volume|turn\s+up\s+volume|turn\s+volume\s+up|volume\s+up|higher\s+volume|more\s+volume)\b',
         ]):
+            m_amt = re.search(r'\b(?:by\s+)?(\d+)\s*%?\b', norm)
+            step_val = int(m_amt.group(1)) if m_amt else 10
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
@@ -1781,7 +2004,8 @@ class SemanticUnderstandingEngine:
                     "resolved_action": "VOLUME_SET",
                     "executor_action": "increase_volume",
                     "action": "increase_volume",
-                    "step": 10,
+                    "step": step_val,
+                    "amount": step_val,
                 },
                 confidence=1.0,
             )
@@ -2063,7 +2287,7 @@ class SemanticUnderstandingEngine:
         )
         has_compat = any(k in norm for k in ("compatible", "can i run", "can i download and run", "can run on", "in this system", "on this pc", "requirements"))
         has_game = any(k in norm for k in ("games", "game", "gaming"))
-        has_music_noun = any(k in norm for k in ("music", "song", "songs", "tune", "tunes", "track", "spotify"))
+        has_music_noun = any(k in norm for k in ("music", "song", "songs", "tune", "tunes", "track")) or ("spotify" in norm and not any(norm.startswith(p) for p in ("switch to ", "switch ", "bring ", "focus ", "close ", "quit ", "kill ")))
         has_play_game = any(k in norm for k in ("play", "playing", "start a game", "play a game", "play games", "game to play", "games to play", "play some games"))
         has_game_rec = any(k in norm for k in ("recommend", "recommendation", "recommendations", "suggest", "suggestion", "suggestions", "discover", "discovery", "good games", "best games", "fun games", "ideas for games", "what games", "which games"))
 
@@ -2138,18 +2362,35 @@ class SemanticUnderstandingEngine:
                     parameters={"action": "recommend", "query": text_stripped, "domain": "music"},
                     confidence=0.99,
                 )
+            m_action = "play"
+            m_goal = "music playback"
+            m_desired_state = "playing"
+            try:
+                from modules.music.music_controller import MusicCommandParser
+                _p = MusicCommandParser().parse(text_stripped)
+                if _p.is_transport:
+                    m_action = _p.transport_action
+                    m_goal = f"music {m_action}"
+                    m_desired_state = "paused" if m_action == "pause" else ("stopped" if m_action == "stop" else "playing")
+                elif _p.is_video_requested:
+                    m_action = "play_video"
+                    m_goal = "music video playback"
+                    m_desired_state = "playing"
+            except Exception:
+                pass
+
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
-                goal="music playback",
+                goal=m_goal,
                 intent="MUSIC",
-                action="PLAY_MUSIC",
+                action="PLAY_MUSIC" if m_action == "play" else m_action.upper(),
                 target="music",
-                desired_state="playing",
+                desired_state=m_desired_state,
                 candidate_interpretations=[
                     {"intent": "MUSIC", "confidence": 0.99},
                 ],
-                parameters={"action": "play", "query": text_stripped},
+                parameters={"action": m_action, "query": text_stripped},
                 confidence=0.99,
             )
 
@@ -2410,13 +2651,34 @@ class SemanticUnderstandingEngine:
             )
 
         # -------------------------------------------------------------
+        # 14b. Conversational Correction / Rejection Detection
+        # -------------------------------------------------------------
+        is_pure_correction = bool(re.search(
+            r'^(?:(?:oh\s+)?no[,\s]+)?(?:that\'?s|that\s+is|it\'?s|it\s+is)?\s*(?:not\s+what\s+i\s+(?:asked|was\s+asking|meant)|you\s+misunderstood|that\'?s\s+wrong)[.!?]?$',
+            norm, re.IGNORECASE
+        ))
+        if is_pure_correction:
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="correction of previous turn interpretation",
+                intent="CLARIFICATION",
+                action="reconsider_previous_request",
+                target="dialogue_history",
+                desired_state="corrected",
+                parameters={"correction": True, "action": "reconsider_previous_request"},
+                confidence=0.9,
+            )
+
+        # -------------------------------------------------------------
         # 15. Conversational History Recall (Section 7, 20)
         # -------------------------------------------------------------
-        if any(re.search(p, norm) for p in [
-            r'\b(?:what\s+did\s+i|what\s+i)\s+(?:just\s+)?ask(?:\s+(?:you\s+)?(?:before|earlier|to\s+do|for|immediately))?\b',
+        is_not_correction = not bool(re.search(r'\b(?:not|isn\'?t|wasn\'?t|didn\'?t)\s+what\s+i\b', norm)) and not norm.startswith("no ")
+        if is_not_correction and (any(re.search(p, norm) for p in [
+            r'\b(?:what\s+did\s+i|what\s+was\s+i)\s+(?:just\s+)?ask(?:ing)?(?:\s+(?:you\s+)?(?:before|earlier|to\s+do|for|immediately|about))?\b',
             r'\bwhat\s+(?:was|is)\s+(?:the\s+question(?:\s+that)?\s+i\s+asked|my\s+last\s+question|my\s+previous\s+question|the\s+last\s+thing\s+i\s+asked)\b',
             r'\bremind\s+me\s+what\s+i\s+asked\b',
-        ]) or norm in ("what did i ask before", "what was the question that i asked before", "what is the question that i asked before", "what did i just ask", "what did i ask earlier"):
+        ]) or norm in ("what did i ask before", "what was the question that i asked before", "what is the question that i asked before", "what did i just ask", "what did i ask earlier", "what did i ask you earlier")):
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
@@ -2633,13 +2895,13 @@ class SemanticUnderstandingEngine:
                 action_required=True,
                 confidence=0.99
             )
-        if clean_low in ("stop music", "pause music", "stop song", "pause song") or re.search(r'\b(?:stop|pause)\s+(?:the\s+)?(?:music|song|playback|audio)\b', clean_low):
+        if clean_low in ("stop music", "pause music", "stop song", "pause song", "stop playing", "pause playing", "stop playback", "pause playback", "stop audio", "pause audio") or re.search(r'\b(?:stop|pause)\s+(?:the\s+)?(?:music|song|playback|audio|playing)\b', clean_low):
             return SemanticIntentRepresentation(
                 user_input=raw_text,
                 interpreted_meaning="User wants to pause/stop music playback.",
                 intent="MUSIC",
-                action="pause",
-                rewritten_command="pause music",
+                action="stop" if "stop" in clean_low else "pause",
+                rewritten_command="stop music" if "stop" in clean_low else "pause music",
                 action_required=True,
                 confidence=0.98
             )
@@ -2738,10 +3000,11 @@ class SemanticUnderstandingEngine:
         # --------------------------------------------------------------------
         # 0b4. Action Verification Query (Section 6)
         # --------------------------------------------------------------------
-        if any(re.search(p, clean_low) for p in [
+        is_legacy_telemetry = any(q in clean_low for q in ("how long", "how much", "how many", "what is my", "what is the")) or any(s in clean_low for s in ("system", "pc", "computer", "machine", "cpu", "gpu", "disk", "uptime"))
+        if not is_legacy_telemetry and (any(re.search(p, clean_low) for p in [
             r'\b(?:did\s+you|have\s+you)\s+(?:open|opened|launch|launched|start|started)\s+([a-zA-Z0-9_\-\s]+)',
-            r'\bis\s+([a-zA-Z0-9_\-\s]+?)\s+(?:open|running|active)\b',
-        ]) or clean_low in ("did you open notepad", "have you opened notepad"):
+            r'^(?:is|is\s+the)\s+([a-zA-Z0-9_\-]+)\s+(?:open|running|active)\b',
+        ]) or clean_low in ("did you open notepad", "have you opened notepad")):
             target_app = "notepad" if "notepad" in clean_low else ("chrome" if "chrome" in clean_low else "the application")
             return SemanticIntentRepresentation(
                 user_input=raw_text,
@@ -2805,11 +3068,12 @@ class SemanticUnderstandingEngine:
         # 0b7. Application Paraphrases & Indirect Requests (Section 4)
         # --------------------------------------------------------------------
         m_app_req = re.search(
-            r'^(?:actually[,\s]+|no[,\s]+|wait[,\s]+|well[,\s]+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+|please\s+)?(?:bring\s+up|bring\s+back|get\s+up|i\s+need|let\'?s\s+use|let\s+us\s+use|can\s+we\s+use|open(?:\s+up)?|launch|start)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:back|up|again|please|instead))?$',
+            r'^(?:actually[,\s]+|no[,\s]+|wait[,\s]+|well[,\s]+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+|please\s+)?(switch\s+to|switch\s+back\s+to|switch|bring\s+up|bring\s+back|bring|focus|get\s+up|i\s+need|let\'?s\s+use|let\s+us\s+use|can\s+we\s+use|open(?:\s+up)?|launch|start)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:back|up|again|please|instead|to\s+(?:the\s+)?front))?$',
             clean_low
         )
         if m_app_req:
-            raw_cand = m_app_req.group(1).strip().rstrip('.?!')
+            verb_matched = m_app_req.group(1).lower()
+            raw_cand = m_app_req.group(2).strip().rstrip('.?!')
             target_app = raw_cand
             if raw_cand in ("text editor", "the text editor", "editor"):
                 target_app = "notepad"
@@ -2822,14 +3086,18 @@ class SemanticUnderstandingEngine:
 
             common_apps = ("notepad", "chrome", "vscode", "code", "calc", "calculator", "explorer", "terminal", "powershell", "cmd", "word", "excel", "spotify")
             if target_app.lower() in common_apps:
+                is_switch = any(v in verb_matched for v in ("switch", "focus", "front"))
+                act = "switch_application" if is_switch else "open_application"
+                act_cmd = f"switch to {target_app}" if is_switch else f"open {target_app}"
+                meaning = f"User wants to switch to application '{target_app}'." if is_switch else f"User wants to open application '{target_app}'."
                 return SemanticIntentRepresentation(
                     user_input=raw_text,
-                    interpreted_meaning=f"User wants to open application '{target_app}'.",
+                    interpreted_meaning=meaning,
                     intent="OPEN_APPLICATION",
                     request_type="INSTRUCTION",
-                    action="open_application",
+                    action=act,
                     entities=[{"value": target_app, "type": "application"}],
-                    rewritten_command=f"open {target_app}",
+                    rewritten_command=act_cmd,
                     target_entity=target_app,
                     action_required=True,
                     confidence=0.98,
@@ -2923,7 +3191,7 @@ class SemanticUnderstandingEngine:
         # 0c1. Contextual Content Insertion ("write the code here", "put that here")
         # --------------------------------------------------------------------
         has_transfer_verb = bool(re.search(r'\b(?:write|type|put|paste|insert|place)\b', text_low))
-        is_scratch_creation = bool(re.search(r'\b(?:write|create|generate)\s+(?:an?\s+)?(?:note|email|mail|letter|function|program|query|sql|script|code|algorithm|class|module|interface|struct)\b', text_low))
+        is_scratch_creation = bool(re.search(r'\b(?:write|create|generate|make|build)\s+(?:an?\s+)?(?:note|email|mail|letter|document|doc|docx|report|presentation|slides?|ppt|pptx|spreadsheet|sheet|excel|xlsx|pdf|function|program|query|sql|script|code|algorithm|class|module|interface|struct)\b', text_low))
 
         if has_transfer_verb and not is_scratch_creation:
             # Check if this references an artifact or indicates a transfer to a target/cursor
@@ -3146,7 +3414,7 @@ class SemanticUnderstandingEngine:
                 confidence=0.98
             )
 
-        # Declarative factual recall: Database, Backend, Assistant Name, Preferences, "What did I ask you to remember?"
+        # Declarative factual recall: Database, Backend, Assistant Name, Preferences, "What did I ask you to remember?", University, Cell, Name
         if any(re.search(pat, text_low) for pat in [
             r'\b(?:which|what)\s+database\b',
             r'\bwhat\s+database\s+(?:does|is)\b',
@@ -3156,6 +3424,12 @@ class SemanticUnderstandingEngine:
             r'\bwhat\s+did\s+i\s+(?:ask|tell)\s+you\s+to\s+remember\b',
             r'\bwhat\s+do\s+you\s+remember\s+about\s+(?:me|this\s+project)\b',
             r'\bwhat\s+(?:response\s+style|style\s+of\s+response)\s+(?:did\s+i|do\s+i)\b',
+            r'\b(?:which|what)\s+(?:university|college|school|institution)\b',
+            r'\bwhere\s+do\s+i\s+(?:study|attend)\b',
+            r'\bwhat(?:\'s|\s+is)\s+my\s+(?:education|student\s+status|major|degree)\b',
+            r'\bwhat\s+(?:club|cell|committee)(?:\s+or\s+(?:club|cell|committee))?\s+am\s+i\s+(?:in|part\s+of)\b',
+            r'\bam\s+i\s+(?:in|part\s+of)\s+(?:any\s+|the\s+)?(?:club|cell|placement\s+cell)\b',
+            r'\bwhat(?:\'s|\s+is)\s+my\s+(?:preferred\s+)?name\b',
         ]):
             return SemanticIntentRepresentation(
                 user_input=raw_text,
@@ -3573,7 +3847,7 @@ class SemanticUnderstandingEngine:
                     last_turn = dialogue_state.turns[-1]
                     ctx_summary["previous_request"] = getattr(last_turn, "user_input", "")
 
-            llm_result = llm.semantic_reasoning(raw_text, structured_context=ctx_summary, timeout_budget=2.5)
+            llm_result = llm.semantic_reasoning(raw_text, structured_context=ctx_summary, timeout_budget=4.5)
             if llm_result and isinstance(llm_result, dict):
                 req_t = llm_result.get("request_type", "INSTRUCTION")
                 act_req = bool(llm_result.get("action_required", True))

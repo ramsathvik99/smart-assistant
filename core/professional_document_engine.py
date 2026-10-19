@@ -907,11 +907,14 @@ class ProfessionalPresentationComposer:
         title: str,
         slides_spec: List[SlideSpec],
         theme: DocumentTheme,
-        author: str = "Nova Smart Assistant",
+        author: Optional[str] = None,
         filename: Optional[str] = None,
     ) -> str:
         from pptx import Presentation
         from pptx.util import Inches, Pt
+        from instance.config import get_branding_author
+
+        author = get_branding_author(author)
         from pptx.dml.color import RGBColor
         from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
         from pptx.enum.shapes import MSO_SHAPE
@@ -1424,11 +1427,14 @@ class ProfessionalDocumentComposer:
         title: str,
         sections: List[SectionBlock],
         theme: DocumentTheme,
-        author: str = "Nova Smart Assistant",
+        author: Optional[str] = None,
         filename: Optional[str] = None,
     ) -> str:
         from reportlab.lib.pagesizes import letter
         from reportlab.lib import colors
+        from instance.config import get_branding_author
+
+        author = get_branding_author(author)
         from reportlab.platypus import (
             SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
         )
@@ -1647,11 +1653,14 @@ class ProfessionalDocumentComposer:
         self,
         title: str,
         sections: List[SectionBlock],
-        author: str = "Nova Smart Assistant",
+        author: Optional[str] = None,
         filename: Optional[str] = None,
     ) -> str:
         from docx import Document
         from docx.shared import Inches, Pt, RGBColor
+        from instance.config import get_branding_author
+
+        author = get_branding_author(author)
         from docx.enum.text import WD_ALIGN_PARAGRAPH
 
         doc = Document()
@@ -2031,9 +2040,10 @@ class ProfessionalDocumentEngine:
                 if topic_ctx:
                     return topic_ctx
 
-        clean = re.sub(r'^(?:now\s+)?(?:create|make|build|generate|turn|produce)\s+(?:a|an|the)?\s*', '', query, flags=re.I).strip()
+        clean = re.sub(r'^(?:test\s+(?:the\s+)?actual\s+output\s+to\s+)?(?:now\s+)?(?:create|make|build|generate|turn|produce)\s+(?:a|an|the)?\s*', '', query, flags=re.I).strip()
         clean = re.sub(r'\s+(?:from these documents|from these files|from this|from that|from it|into a presentation|into a ppt|into a report).*$', '', clean, flags=re.I).strip()
         clean = re.sub(r'\b(?:professional|detailed|comprehensive|technical)?\s*(?:pdf|document|report|presentation|ppt|pptx|study guide|slides?)\b', '', clean, flags=re.I).strip()
+        clean = re.sub(r'^(?:with\s+)?(?:all\s+(?:the\s*)?)?(?:content|info|information)?\s*(?:about|on|explaining|for|from|regarding)\s+', '', clean, flags=re.I).strip()
         clean = re.sub(r'^(?:about|on|explaining|for|from|regarding)\s+', '', clean, flags=re.I).strip()
         clean = re.sub(r'\s+(?:into a presentation|into a ppt|into a report|into a deck).*$', '', clean, flags=re.I).strip()
         clean = clean.strip(".?! ,")
@@ -2187,78 +2197,159 @@ class ProfessionalDocumentEngine:
 
         # 3. Artifact Format Conversion
         is_convert = bool(re.search(r'\b(?:convert|export)\b', user_input, re.IGNORECASE))
-        if is_convert and dialogue_state:
-            target_is_pdf = bool(re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?pdf\b', user_input, re.IGNORECASE)) or (doc_type == "pdf")
-            if target_is_pdf:
-                source_art = None
+        if is_convert:
+            from modules.document_tools.conversion_registry import ConversionRegistry
+
+            # Step A: Resolve target format
+            target_fmt = None
+            if re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?pdf\b', user_input, re.IGNORECASE) or doc_type == "pdf":
+                target_fmt = "pdf"
+            elif re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?(?:docx|word|editable\s+word|doc)\b', user_input, re.IGNORECASE) or doc_type in ("docx", "doc", "word"):
+                target_fmt = "docx"
+            elif re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?csv\b', user_input, re.IGNORECASE) or doc_type == "csv":
+                target_fmt = "csv"
+            elif re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?(?:xlsx|excel|spreadsheet)\b', user_input, re.IGNORECASE) or doc_type in ("xlsx", "xls", "excel"):
+                target_fmt = "xlsx"
+            elif re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?(?:markdown|md)\b', user_input, re.IGNORECASE) or doc_type in ("markdown", "md"):
+                target_fmt = "markdown"
+            elif re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?html\b', user_input, re.IGNORECASE) or doc_type in ("html", "htm"):
+                target_fmt = "html"
+            elif re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?(?:text|txt|plain\s+text)\b', user_input, re.IGNORECASE) or doc_type in ("txt", "text"):
+                target_fmt = "txt"
+            elif re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?json\b', user_input, re.IGNORECASE):
+                target_fmt = "json"
+            elif re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?yaml\b', user_input, re.IGNORECASE):
+                target_fmt = "yaml"
+            elif re.search(r'\b(?:to|into|as)\s+(?:a\s+|an\s+)?(?:png|image|jpeg|jpg)\b', user_input, re.IGNORECASE):
+                target_fmt = "png"
+            elif doc_type:
+                target_fmt = doc_type
+
+            # Step B: Resolve source file
+            source_file = None
+            if params and (params.get("filepath") or params.get("source_path") or params.get("file_path")):
+                p_cand = params.get("filepath") or params.get("source_path") or params.get("file_path")
+                if os.path.exists(p_cand):
+                    source_file = p_cand
+
+            if not source_file:
+                m_q = re.search(r'["\']([^"\']+\.[a-zA-Z0-9]+)["\']', user_input)
+                if m_q and os.path.exists(m_q.group(1)):
+                    source_file = m_q.group(1)
+                else:
+                    m_path = re.search(r'([a-zA-Z]:[\\/][^\s"\'<>|?*]+\.[a-zA-Z0-9]+)', user_input)
+                    if m_path and os.path.exists(m_path.group(1)):
+                        source_file = m_path.group(1)
+
+            if not source_file and dialogue_state:
                 for art in getattr(dialogue_state, "active_documents", []):
-                    t = (art.get("type") or art.get("doc_type") or "").lower()
-                    if t in ("ppt", "pptx") and art.get("filepath") and os.path.exists(art["filepath"]):
-                        source_art = art
-                        break
-                if not source_art:
+                    f_art = art.get("filepath") or art.get("path")
+                    if f_art and os.path.exists(f_art):
+                        s_ext = Path(f_art).suffix.lstrip('.').lower()
+                        if s_ext != target_fmt:
+                            source_file = f_art
+                            break
+                if not source_file:
                     active_g = getattr(dialogue_state, "current_goal", None)
                     if active_g and isinstance(active_g, dict):
                         for d in active_g.get("deliverables", []):
-                            dt = d.get("type", "").lower()
-                            if dt in ("ppt", "pptx") and d.get("file_path") and os.path.exists(d["file_path"]):
-                                source_art = {"filepath": d["file_path"], "type": "pptx", "topic": active_g.get("topic")}
+                            f_del = d.get("file_path") or d.get("filepath")
+                            if f_del and os.path.exists(f_del):
+                                source_file = f_del
                                 break
-                if not source_art and getattr(dialogue_state, "active_artifact", None):
-                    if os.path.exists(dialogue_state.active_artifact.get("filepath", "")):
-                        source_art = dialogue_state.active_artifact
+                if not source_file and getattr(dialogue_state, "active_artifact", None):
+                    f_act = dialogue_state.active_artifact.get("filepath") or dialogue_state.active_artifact.get("path")
+                    if f_act and os.path.exists(f_act):
+                        source_file = f_act
 
-                pdf_spec = construct_content_spec(user_input, params={"doc_type": "pdf"}, context=context)
-                pdf_sections = []
-                if source_art and source_art.get("filepath", "").lower().endswith((".pptx", ".ppt")):
-                    try:
-                        from pptx import Presentation
-                        prs = Presentation(source_art["filepath"])
-                        for i, slide in enumerate(prs.slides, 1):
-                            slide_title = ""
-                            slide_text = []
-                            for shape in slide.shapes:
-                                if shape.has_text_frame:
-                                    for p in shape.text_frame.paragraphs:
-                                        txt = p.text.strip()
-                                        if txt:
-                                            if not slide_title:
-                                                slide_title = txt
-                                            else:
-                                                slide_text.append(txt)
-                            pdf_sections.append({
-                                "heading": slide_title or f"Slide {i}",
-                                "content": " ".join(slide_text) if slide_text else "Overview content.",
-                                "type": "section"
-                            })
-                    except Exception:
-                        pass
+            if not source_file and context:
+                act = context.get("active_document") or context.get("active_artifact") or context.get("last_artifact")
+                if isinstance(act, dict):
+                    f_cand = act.get("filepath") or act.get("path")
+                    if f_cand and os.path.exists(f_cand):
+                        source_file = f_cand
 
-                if not pdf_sections:
-                    pdf_sections = build_document_content(topic, user_input, doc_type="pdf", spec=pdf_spec)
-
-                pdf_res = create_pdf_document(title=f"{title} (Exported PDF)", content=pdf_sections)
-                if pdf_res.get("success"):
+            # Step C: Execute Conversion
+            if source_file and target_fmt:
+                all_ws = bool(re.search(r'\b(?:each|all|separate)\s+(?:sheet|worksheet)', user_input, re.IGNORECASE))
+                conv_res = ConversionRegistry.convert_file(
+                    source_path=source_file,
+                    target_format=target_fmt,
+                    options={"all_worksheets": all_ws}
+                )
+                if conv_res.success:
                     result["status"] = "success"
-                    result["filepath"] = pdf_res["filepath"]
-                    result["response"] = f"Exported presentation to PDF at {pdf_res['filepath']}."
+                    result["filepath"] = conv_res.target_path
+                    result["doc_type"] = target_fmt
+                    result["response"] = conv_res.message
+                    result["fidelity_notes"] = conv_res.fidelity_notes
+                    result["warnings"] = conv_res.warnings
+                    if conv_res.extra_files:
+                        result["extra_files"] = conv_res.extra_files
+                    doc_task_mgr.complete_task(
+                        task_id=doc_task.task_id,
+                        artifact_path=conv_res.target_path,
+                        title=title
+                    )
+                    return result
+                else:
+                    result["status"] = "error"
+                    result["response"] = conv_res.message
+                    doc_task_mgr.fail_task(task_id=doc_task.task_id, error=conv_res.message)
                     return result
 
         # 4. Standard Format-Specific Generation Dispatch
+        # Embed visual diagrams if requested
+        visuals_to_embed = []
+        q_lower = user_input.lower()
+        try:
+            if any(k in q_lower for k in ["neural network", "deep learning", "ann", "mlp"]):
+                from modules.document_tools.visual_builder import create_neural_network_diagram
+                diag_res = create_neural_network_diagram(title=f"{topic} Neural Network")
+                diag_path = diag_res.get("filepath") if isinstance(diag_res, dict) else str(diag_res)
+                if diag_path and os.path.exists(diag_path):
+                    visuals_to_embed.append(diag_path)
+            elif any(k in q_lower for k in ["architecture", "subsystem", "component diagram"]):
+                from modules.document_tools.visual_builder import VisualAssetBuilder
+                diag_path = VisualAssetBuilder.create_system_architecture_diagram(title=f"{topic} Architecture")
+                if diag_path and os.path.exists(diag_path):
+                    visuals_to_embed.append(diag_path)
+            elif any(k in q_lower for k in ["flowchart", "process flow", "workflow"]):
+                from modules.document_tools.visual_builder import VisualAssetBuilder
+                diag_path = VisualAssetBuilder.create_process_flowchart(title=f"{topic} Flow")
+                if diag_path and os.path.exists(diag_path):
+                    visuals_to_embed.append(diag_path)
+        except Exception as v_err:
+            logger.warning(f"[ProfessionalDocEngine] Visual builder note: {v_err}")
+
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        namer = get_semantic_file_naming_service()
+
+        target_filepath, target_filename = namer.resolve_output_path(
+            task_description=user_input,
+            title=title,
+            artifact_type=doc_type,
+            extension=doc_type,
+            context=context,
+            user_id=user_id,
+            task_id=doc_task.task_id
+        )
+
         if doc_type in ("doc", "docx", "word"):
             content = build_document_content(topic, user_input, doc_type="docx", spec=spec)
-            gen_res = create_docx_document(title=title, content=content)
+            gen_res = create_docx_document(title=title, content=content, filename=target_filepath, images=visuals_to_embed if visuals_to_embed else None)
             desc = "Word document"
         elif doc_type in ("ppt", "pptx", "presentation", "slides"):
             slides = build_presentation_slides(topic, user_input, spec=spec)
-            gen_res = create_presentation(title=title, slides=slides)
+            gen_res = create_presentation(title=title, slides=slides, filename=target_filepath)
             desc = "PowerPoint presentation"
         elif doc_type in ("xls", "xlsx", "excel", "spreadsheet", "sheet"):
             sheet_spec = build_spreadsheet_spec(topic, user_input, spec=spec)
             if isinstance(sheet_spec, dict) and "sheets" in sheet_spec:
                 gen_res = create_excel_spreadsheet(
                     sheets=sheet_spec["sheets"],
-                    chart_type=sheet_spec.get("chart_type")
+                    chart_type=sheet_spec.get("chart_type"),
+                    filename=target_filepath
                 )
             elif isinstance(sheet_spec, dict):
                 gen_res = create_excel_spreadsheet(
@@ -2266,15 +2357,32 @@ class ProfessionalDocumentEngine:
                     headers=sheet_spec.get("headers"),
                     rows=sheet_spec.get("rows"),
                     add_totals=sheet_spec.get("add_totals", False),
-                    chart_type=sheet_spec.get("chart_type")
+                    chart_type=sheet_spec.get("chart_type"),
+                    filename=target_filepath
                 )
             else:
-                gen_res = create_excel_spreadsheet(title=title)
+                gen_res = create_excel_spreadsheet(title=title, filename=target_filepath)
             desc = "Excel spreadsheet"
+        elif doc_type in ("md", "markdown"):
+            content = build_document_content(topic, user_input, doc_type="markdown", spec=spec)
+            os.makedirs(os.path.dirname(target_filepath), exist_ok=True)
+            with open(target_filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            gen_res = {"success": True, "filepath": target_filepath, "message": f"Generated Markdown document at {target_filepath}."}
+            desc = "Markdown document"
+        elif doc_type in ("html", "htm"):
+            content = build_document_content(topic, user_input, doc_type="html", spec=spec)
+            os.makedirs(os.path.dirname(target_filepath), exist_ok=True)
+            html_body = content.replace("\n\n", "</p><p>").replace("\n", "<br/>")
+            html_doc = f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{title}</title><style>body{{font-family:Segoe UI,sans-serif;margin:40px;line-height:1.6;color:#222;}}h1{{color:#1F497D;}}h2{{color:#2E75B6;}}</style></head><body><h1>{title}</h1><p>{html_body}</p></body></html>"
+            with open(target_filepath, "w", encoding="utf-8") as f:
+                f.write(html_doc)
+            gen_res = {"success": True, "filepath": target_filepath, "message": f"Generated HTML document at {target_filepath}."}
+            desc = "HTML document"
         else:
             # Default to PDF
             content = build_document_content(topic, user_input, doc_type="pdf", spec=spec)
-            gen_res = create_pdf_document(title=title, content=content)
+            gen_res = create_pdf_document(title=title, content=content, filename=target_filepath, images=visuals_to_embed if visuals_to_embed else None)
             desc = "PDF document"
 
         if gen_res.get("success"):

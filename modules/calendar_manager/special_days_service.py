@@ -156,7 +156,45 @@ class SpecialDaysService:
                     "type": h_type
                 })
 
-        else:
+        elif reg in ("GB", "UK", "UNITED KINGDOM", "BRITAIN"):
+            # United Kingdom Statutory Bank Holidays
+            from datetime import date
+            def nth_weekday(month: int, weekday: int, n: int) -> date:
+                d = date(year, month, 1)
+                while d.weekday() != weekday:
+                    d += timedelta(days=1)
+                return d + timedelta(weeks=n - 1)
+
+            def last_weekday(month: int, weekday: int) -> date:
+                if month == 12:
+                    d = date(year, 12, 31)
+                else:
+                    d = date(year, month + 1, 1) - timedelta(days=1)
+                while d.weekday() != weekday:
+                    d -= timedelta(days=1)
+                return d
+
+            early_may = nth_weekday(5, 0, 1)    # 1st Mon May
+            spring_bh = last_weekday(5, 0)      # Last Mon May
+            summer_bh = last_weekday(8, 0)      # Last Mon Aug
+
+            uk_holidays = [
+                (f"{year}-01-01", "New Year's Day", "Public Holiday"),
+                (early_may.strftime("%Y-%m-%d"), "Early May Bank Holiday", "Public Holiday"),
+                (spring_bh.strftime("%Y-%m-%d"), "Spring Bank Holiday", "Public Holiday"),
+                (summer_bh.strftime("%Y-%m-%d"), "Summer Bank Holiday", "Public Holiday"),
+                (f"{year}-12-25", "Christmas Day", "Public Holiday"),
+                (f"{year}-12-26", "Boxing Day", "Public Holiday"),
+            ]
+            for d_str, name, h_type in uk_holidays:
+                holidays.append({
+                    "date": d_str,
+                    "name": name,
+                    "description": f"UK statutory bank holiday: {name}",
+                    "type": h_type
+                })
+
+        elif reg in ("IN", "INDIA"):
             # India (IN) Gazetted National Holidays & Major Religious/Cultural Festivals
             lunar_calendar = {
                 2025: {
@@ -197,6 +235,9 @@ class SpecialDaysService:
                         "description": f"Major cultural and religious festival in India: {fest_name}",
                         "type": "Festival / Observance"
                     })
+        else:
+            # Region not in built-in catalog
+            return []
 
         holidays.sort(key=lambda x: x["date"])
         return holidays
@@ -205,7 +246,7 @@ class SpecialDaysService:
         target_reg = (region or self.region or "IN").upper()
         
         # Ground truth verified catalogs for official statutory public holidays
-        if target_reg in ("RU", "US", "IN"):
+        if target_reg in ("RU", "US", "IN", "GB"):
             verified = self._get_verified_holidays(year, region=target_reg)
             if verified:
                 for h in verified:

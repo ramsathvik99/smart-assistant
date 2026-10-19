@@ -111,18 +111,18 @@ def extract_folder_name(text):
     return None
 
 def find_file(filename):
-    """Find file on desktop using OneDrive-aware path"""
-    import os
-    from modules.system_controller.folder_manager import get_desktop_path
-    
-    desktop = get_desktop_path()
-    
-    for root, dirs, files in os.walk(desktop):
-        for file in files:
-            if file.lower() == filename.lower():
-                return os.path.join(root, file)
-    
-    return None
+    """Find file on desktop using canonical FileManager."""
+    try:
+        from modules.system_controller.file_manager import find_file_in_desktop
+        return find_file_in_desktop(filename)
+    except Exception:
+        from modules.system_controller.folder_manager import get_desktop_path
+        desktop = get_desktop_path()
+        for root, dirs, files in os.walk(desktop):
+            for file in files:
+                if file.lower() == filename.lower():
+                    return os.path.join(root, file)
+        return None
 
 def handle_device_command(text):
     """Parse and execute device commands locally"""
@@ -366,29 +366,46 @@ def tell_date(location=None):
 # TIMER
 # ======================================================
 
-def set_timer(text):
-    text = text.lower()
-    seconds = 0
+def set_timer(text, user_id=None):
+    """Set a timer using canonical ClockController."""
+    from instance.config import settings
+    uid = int(user_id or getattr(settings, 'CURRENT_USER_ID', None) or (settings.get_last_user() if hasattr(settings, 'get_last_user') else None) or 1)
+    try:
+        from skills.clock_manager import get_clock_controller
+        ctrl = get_clock_controller()
+        res = ctrl.set_timer(text, user_id=uid)
+        if res.get("success"):
+            msg = res.get("message") or "Timer set."
+            speak(msg)
+            return msg
+        else:
+            msg = res.get("message") or "I couldn't understand the timer duration."
+            speak(msg)
+            return msg
+    except Exception as e:
+        print(f"[LEGACY TIMER] ClockController delegation error: {e}")
+        text_low = text.lower()
+        seconds = 0
 
-    if "hour" in text:
-        seconds += int(re.search(r"(\d+)\s*hour", text).group(1)) * 3600
+        if "hour" in text_low:
+            seconds += int(re.search(r"(\d+)\s*hour", text_low).group(1)) * 3600
 
-    if "minute" in text:
-        seconds += int(re.search(r"(\d+)\s*minute", text).group(1)) * 60
+        if "minute" in text_low:
+            seconds += int(re.search(r"(\d+)\s*minute", text_low).group(1)) * 60
 
-    if "second" in text:
-        seconds += int(re.search(r"(\d+)\s*second", text).group(1))
+        if "second" in text_low:
+            seconds += int(re.search(r"(\d+)\s*second", text_low).group(1))
 
-    if seconds <= 0:
-        return "I couldn't understand the timer duration."
+        if seconds <= 0:
+            return "I couldn't understand the timer duration."
 
-    def alert():
-        winsound.Beep(1800, 700)
-        speak("Your timer is done.")
+        def alert():
+            winsound.Beep(1800, 700)
+            speak("Your timer is done.")
 
-    threading.Timer(seconds, alert).start()
-    speak("Timer set.")
-    return "Timer set."
+        threading.Timer(seconds, alert).start()
+        speak("Timer set.")
+        return "Timer set."
 
 # ======================================================
 # HELPERS
@@ -418,46 +435,62 @@ def alarm_beep():
 # ALARM
 # ======================================================
 
-def set_alarm(text):
-    text = text.lower().strip()
+def set_alarm(text, user_id=None):
+    """Set an alarm using canonical ClockController."""
+    from instance.config import settings
+    uid = int(user_id or getattr(settings, 'CURRENT_USER_ID', None) or (settings.get_last_user() if hasattr(settings, 'get_last_user') else None) or 1)
+    try:
+        from skills.clock_manager import get_clock_controller
+        ctrl = get_clock_controller()
+        res = ctrl.set_alarm(text, user_id=uid)
+        if res.get("success"):
+            msg = res.get("message") or "Alarm set."
+            speak(msg)
+            return msg
+        else:
+            speak("I didn't understand the alarm time.")
+            return None
+    except Exception as e:
+        print(f"[LEGACY ALARM] ClockController delegation error: {e}")
+        text_low = text.lower().strip()
 
-    # CASE 1: Timer format
-    duration = natural_time_to_seconds(text)
-    if duration > 0:
-        msg = f"Alarm set for {duration} seconds from now."
+        # CASE 1: Timer format
+        duration = natural_time_to_seconds(text_low)
+        if duration > 0:
+            msg = f"Alarm set for {duration} seconds from now."
+            speak(msg)
+            threading.Timer(duration, lambda: (alarm_beep(), speak("Your alarm is ringing!"))).start()
+            return msg
+
+        # CASE 2: Clock format
+        match = re.match(r"(\d{1,2}):(\d{2})(\s*[ap]m)?", text_low)
+        if not match:
+            speak("I didn't understand the alarm time.")
+            return
+
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        ampm = match.group(3)
+
+        if ampm:
+            ampm = ampm.strip()
+            if "pm" in ampm and hour != 12:
+                hour += 12
+            if "am" in ampm and hour == 12:
+                hour = 0
+
+        now = datetime.datetime.now()
+        alarm = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        if alarm < now:
+            alarm += datetime.timedelta(days=1)
+
+        delay = (alarm - now).total_seconds()
+
+        msg = f"Alarm set for {alarm.strftime('%I:%M %p')}."
         speak(msg)
-        threading.Timer(duration, lambda: (alarm_beep(), speak("Your alarm is ringing!"))).start()
+        threading.Timer(delay, lambda: (alarm_beep(), speak("Wake up! Your alarm is ringing!"))).start()
         return msg
-
-    # CASE 2: Clock format
-    match = re.match(r"(\d{1,2}):(\d{2})(\s*[ap]m)?", text)
-    if not match:
-        speak("I didn't understand the alarm time.")
-        return
-
-    hour = int(match.group(1))
-    minute = int(match.group(2))
-    ampm = match.group(3)
-
-    if ampm:
-        ampm = ampm.strip()
-        if "pm" in ampm and hour != 12:
-            hour += 12
-        if "am" in ampm and hour == 12:
-            hour = 0
-
-    now = datetime.datetime.now()
-    alarm = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-    if alarm < now:
-        alarm += datetime.timedelta(days=1)
-
-    delay = (alarm - now).total_seconds()
-
-    msg = f"Alarm set for {alarm.strftime('%I:%M %p')}."
-    speak(msg)
-    threading.Timer(delay, lambda: (alarm_beep(), speak("Wake up! Your alarm is ringing!"))).start()
-    return msg
 
 
 # ======================================================
@@ -465,6 +498,21 @@ def set_alarm(text):
 # ======================================================
 
 def solve_math(text):
+    """Solve math using canonical skills_utilities math solver with safe AST fallback."""
+    try:
+        from legacy.skills_utilities import solve_math as canonical_solve_math
+        canonical_res = canonical_solve_math(text)
+        if canonical_res:
+            res_str = str(canonical_res).strip()
+            if any(res_str.lower().startswith(p) for p in ("the result", "the answer", "result")) or "=" in res_str:
+                msg = res_str
+            else:
+                msg = f"The result is {res_str}."
+            speak(msg)
+            return msg
+    except Exception as e:
+        print(f"[LEGACY MATH] Canonical delegation error: {e}")
+
     try:
         text = text.lower()
 
@@ -1196,9 +1244,31 @@ def show_done_notes():
 # REMINDERS
 # ======================================================
 
-def set_reminder(task, minutes):
-    speak(f"I'll remind you to {task} in {minutes} minutes.")
-    threading.Timer(minutes * 60, lambda: speak(f"Reminder: {task}")).start()
+def set_reminder(task, minutes, user_id=None):
+    """Set a reminder using canonical ReminderScheduler and DatabaseManager."""
+    from instance.config import settings
+    uid = int(user_id or getattr(settings, 'CURRENT_USER_ID', None) or (settings.get_last_user() if hasattr(settings, 'get_last_user') else None) or 1)
+    try:
+        mins_f = float(minutes)
+    except (ValueError, TypeError):
+        mins_f = 1.0
+    delay_seconds = max(1, int(mins_f * 60))
+    try:
+        from extensions.reminder_engine.reminder_scheduler import get_reminder_scheduler
+        from extensions.database_manager import DatabaseManager
+        import datetime
+        now = datetime.datetime.now()
+        due_at = now + datetime.timedelta(seconds=delay_seconds)
+        db = DatabaseManager()
+        db_id = db.add_reminder(uid, task, due_at.strftime("%Y-%m-%d %H:%M:%S"))
+        sched = get_reminder_scheduler(db_manager=db, user_id=uid)
+        sched.add_reminder(task, delay_seconds, reminder_id=str(db_id) if db_id else None, user_id=uid)
+    except Exception as e:
+        print(f"[LEGACY REMINDER] Scheduler delegation fallback: {e}")
+        threading.Timer(delay_seconds, lambda: speak(f"Reminder: {task}")).start()
+    msg = f"I'll remind you to {task} in {minutes} minutes."
+    speak(msg)
+    return msg
 
 
 # ======================================================
@@ -1236,11 +1306,17 @@ def next_song(query: str = ""):
 
 def pause_music():
     """Pause music"""
+    ctrl = _get_music_controller()
+    if ctrl and ctrl.is_playing:
+        ctrl.toggle_play_pause()
     speak("Music paused.")
     return True
 
 def resume_music():
     """Resume music"""
+    ctrl = _get_music_controller()
+    if ctrl and not ctrl.is_playing:
+        ctrl.toggle_play_pause()
     speak("Music resumed.")
     return True
 
@@ -1257,33 +1333,61 @@ def previous_song():
 
 
 def increase_volume():
-    """Increase volume - YouTube player control"""
-    speak("Increase volume in YouTube player")
+    """Increase music playback volume"""
+    ctrl = _get_music_controller()
+    if ctrl:
+        msg = ctrl.volume_up()
+        speak(msg)
+        return True
+    speak("Increase volume in player")
     return True
 
 def lower_volume():
-    """Lower volume - YouTube player control"""
-    speak("Lower volume in YouTube player")
+    """Lower music playback volume"""
+    ctrl = _get_music_controller()
+    if ctrl:
+        msg = ctrl.volume_down()
+        speak(msg)
+        return True
+    speak("Lower volume in player")
     return True
 
 def mute_volume():
-    """Mute volume - YouTube player control"""
+    """Mute music playback volume"""
+    ctrl = _get_music_controller()
+    if ctrl:
+        msg = ctrl.volume_mute()
+        speak(msg)
+        return True
     speak("Volume muted")
     return True
 
 def unmute_volume():
-    """Unmute volume - YouTube player control"""
+    """Unmute music playback volume"""
+    ctrl = _get_music_controller()
+    if ctrl:
+        msg = ctrl.volume_mute()
+        speak(msg)
+        return True
     speak("Volume unmuted")
     return True
 
 def restore_volume():
-    """Restore volume to default level - YouTube player control"""
+    """Restore music volume to default/user level"""
+    ctrl = _get_music_controller()
+    if ctrl:
+        ctrl.restore_volume()
+        speak(f"Music volume restored to {ctrl.get_volume()}%.")
+        return True
     speak("Volume restored to default level")
     return True
 
 def stop_music():
-    """Stop music - user handles in YouTube"""
-    speak("Stop music in YouTube player")
+    """Stop music playback"""
+    ctrl = _get_music_controller()
+    if ctrl:
+        ctrl.media_stop()
+    speak("Music stopped.")
     return True
 
 # Local music playback functions
@@ -1552,34 +1656,20 @@ def create_file(name, location="Downloads", content=""):
         speak("I couldn't create the file.")
 
 def create_folder(name, location="Downloads"):
-    """Create a folder with conflict handling."""
+    """Create a folder with conflict handling using canonical FolderManager."""
     try:
-        # Resolve location
-        base_dir = get_location_path(location)
-        
-        # Build full path
-        folder_path = os.path.join(base_dir, name)
-        
-        # Check for conflicts
-        if os.path.exists(folder_path):
-            action = ask_replace_or_rename(folder_path, "folder")
-            if action == "replace":
-                # Remove existing folder
-                import shutil
-                shutil.rmtree(folder_path)
-                speak("Replacing existing folder.")
-            else:
-                folder_path = get_unique_name(folder_path)
-                speak(f"Creating {os.path.basename(folder_path)} instead.")
-        
-        # Create folder
-        os.makedirs(folder_path, exist_ok=True)
-        
-        speak(f"Folder created at {os.path.basename(folder_path)}.")
-        
+        from modules.system_controller.folder_manager import create_folder as canonical_create_folder
+        res = canonical_create_folder(name, location=location)
+        if isinstance(res, dict):
+            msg = res.get("message") or f"Folder created at {name}."
+        else:
+            msg = str(res)
+        speak(msg)
+        return msg
     except Exception as e:
         print(f"[Folder Creation Error] {e}")
         speak("I couldn't create the folder.")
+        return "I couldn't create the folder."
 
 
 # ======================================================
@@ -1913,14 +2003,19 @@ def detect_and_store_fact(user_id=None, text=None):
         resp = f"Understood. I'll remember that your {raw_entity} is {val}."
         return True, resp
 
-    # Pattern 2: "remember that X is Y" / "remember X is Y" / "remember that X" (both with and without "my")
+    # Pattern 2: "remember that X is Y" / "remember this test phrase: Y" / "remember X is Y"
     match = re.search(r"^(?:please\s+)?(?:remember|note)\s+(?:that\s+)?(.+)$", text_lower)
     if match:
         fact = match.group(1).strip().rstrip(".!?")
-        sub_m = re.search(r"^(?:my\s+|the\s+)?([a-zA-Z0-9_\s]+?)\s+(?:is|was|=)\s+(.+)$", fact)
+        sub_colon = re.search(r"^(?:(?:this|my|the)\s+)?([a-zA-Z0-9_\s]+?)\s*:\s*(.+)$", fact)
+        sub_is = re.search(r"^(?:my\s+|the\s+)?([a-zA-Z0-9_\s]+?)\s+(?:is|was|=)\s+(.+)$", fact)
+        sub_m = sub_colon or sub_is
         if sub_m:
             raw_entity = sub_m.group(1).strip()
-            val = sub_m.group(2).strip().rstrip(".!?")
+            if sub_colon and ":" in text_clean:
+                val = text_clean.split(":", 1)[1].strip().rstrip(".!?")
+            else:
+                val = sub_m.group(2).strip().rstrip(".!?")
             entity_words = raw_entity.split()
             if len(entity_words) <= 6 and not any(w in entity_words for w in ["what", "now", "it", "when", "how", "why"]):
                 key = raw_entity.replace(" ", "_")

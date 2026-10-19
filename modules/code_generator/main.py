@@ -11,6 +11,7 @@ from .utils import (
     detect_language,
     save_file_smart,
     validate_code_syntax,
+    validate_generated_artifact_requirements,
     extract_filename_from_command,
     normalize_extension,
     clean_code
@@ -91,11 +92,9 @@ def save_project(files: List[Tuple[str, str]], base_name: Optional[str] = None, 
     if output_dir:
         project_path = os.path.abspath(output_dir)
     else:
-        safe_base = re.sub(r'[^a-zA-Z0-9_\-]', '_', base_name or "assistant_project").strip('_')
-        if not safe_base:
-            safe_base = "assistant_project"
-        folder_name = f"{safe_base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        project_path = os.path.abspath(os.path.join(GENERATED_CODE_DIR, folder_name))
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        namer = get_semantic_file_naming_service()
+        project_path = namer.derive_project_directory(command=base_name or "assistant_project", parent_dir=GENERATED_CODE_DIR)
     os.makedirs(project_path, exist_ok=True)
 
     saved_files = []
@@ -241,11 +240,69 @@ def process_request(command: str, user_id: Optional[Any] = None) -> Dict[str, An
 
     print(f"[Code Generator] Code generated successfully ({len(code)} characters).")
 
-    # Save code to file
+    # Save code to file with honest validation and bounded repair
     try:
+        val_res = validate_code_syntax(code, language=language)
+        req_res = validate_generated_artifact_requirements(code, command)
+
+        # 1. Bounded repair succeeded
+        if val_res.get("repaired"):
+            final_code = val_res.get("repaired_code", code)
+            file_path = save_file_smart(command, final_code, language)
+            orig_path = save_file_smart(command + "_original_unrepaired", code, language)
+            print(f"[Code Generator] Code repaired and saved to: {file_path} (original preserved at {orig_path})")
+            opened = open_in_vscode(file_path)
+            req_res = validate_generated_artifact_requirements(final_code, command)
+            return {
+                "status": "success",
+                "message": f"Generated and validated {language} code saved to {file_path}. ({val_res.get('message', '')})",
+                "code": final_code,
+                "file_path": file_path,
+                "language": language,
+                "validation": val_res,
+                "requirements": req_res,
+                "artifact_state": {
+                    "generated": True,
+                    "saved": True,
+                    "syntax_checked": bool(val_res.get("valid")),
+                    "compiled": bool(val_res.get("compiled", False)),
+                    "executed": False,
+                    "missing_tools": val_res.get("missing_tools", []),
+                    "requirements_satisfied": req_res.get("satisfied", True),
+                    "missing_requirements": req_res.get("missing_requirements", [])
+                },
+                "opened_in_editor": opened,
+                "is_project": False
+            }
+
+        # 2. Validation failed and could not be repaired
+        if not val_res.get("valid"):
+            invalid_path = save_file_smart(command + "_invalid", code, language)
+            print(f"[Code Generator] Validation failed. Preserved invalid artifact at: {invalid_path}")
+            return {
+                "status": "error",
+                "message": f"Generated {language} code failed syntax validation: {val_res.get('message')}. Artifact preserved for diagnosis at {invalid_path}.",
+                "code": code,
+                "file_path": invalid_path,
+                "language": language,
+                "validation": val_res,
+                "requirements": req_res,
+                "artifact_state": {
+                    "generated": True,
+                    "saved": True,
+                    "syntax_checked": False,
+                    "compiled": False,
+                    "executed": False,
+                    "missing_tools": val_res.get("missing_tools", []),
+                    "requirements_satisfied": req_res.get("satisfied", True),
+                    "missing_requirements": req_res.get("missing_requirements", [])
+                },
+                "is_project": False
+            }
+
+        # 3. Code is fully valid
         file_path = save_file_smart(command, code, language)
         print(f"[Code Generator] Code saved to: {file_path}")
-        val_res = validate_code_syntax(code, language=language)
         opened = open_in_vscode(file_path)
 
         return {
@@ -255,14 +312,25 @@ def process_request(command: str, user_id: Optional[Any] = None) -> Dict[str, An
             "file_path": file_path,
             "language": language,
             "validation": val_res,
+            "requirements": req_res,
+            "artifact_state": {
+                "generated": True,
+                "saved": True,
+                "syntax_checked": True,
+                "compiled": bool(val_res.get("compiled", False)),
+                "executed": False,
+                "missing_tools": val_res.get("missing_tools", []),
+                "requirements_satisfied": req_res.get("satisfied", True),
+                "missing_requirements": req_res.get("missing_requirements", [])
+            },
             "opened_in_editor": opened,
             "is_project": False
         }
     except Exception as e:
         print(f"[Code Generator] Error saving file: {e}")
         return {
-            "status": "success",
-            "message": f"Generated {language} code (could not save file: {e}).",
+            "status": "error",
+            "message": f"Generated {language} code but failed saving file: {e}.",
             "code": code,
             "file_path": None,
             "language": language,

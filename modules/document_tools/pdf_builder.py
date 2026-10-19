@@ -1,11 +1,12 @@
 """
-PDF Document Generator & Utilities for Nova Smart Assistant.
+PDF Document Generator & Utilities for Smart Assistant.
 Generates styled PDF files with ReportLab (Page X of Y numbering, running headers)
 and provides PDF reading, merging, splitting, and inspection via pypdf.
 """
 
 import os
 import logging
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
@@ -13,13 +14,16 @@ logger = logging.getLogger(__name__)
 
 
 def get_default_output_dir() -> str:
+    """
+    Get user Desktop directory, checking OneDrive Desktop first then standard Desktop.
+    """
     home = os.path.expanduser("~")
-    docs = os.path.join(home, "Documents")
-    if os.path.exists(docs):
-        return docs
-    desktop = os.path.join(home, "Desktop")
-    if os.path.exists(desktop):
-        return desktop
+    onedrive_desktop = os.path.join(home, "OneDrive", "Desktop")
+    if os.path.exists(onedrive_desktop) and os.path.isdir(onedrive_desktop):
+        return onedrive_desktop
+    standard_desktop = os.path.join(home, "Desktop")
+    if os.path.exists(standard_desktop) and os.path.isdir(standard_desktop):
+        return standard_desktop
     return home
 
 
@@ -75,35 +79,99 @@ def _make_numbered_canvas(canvas_cls, doc_title: str, doc_author: str):
     return NumberedCanvas
 
 
+def markdown_to_platypus_xml(text: str) -> str:
+    """
+    Safely convert Markdown formatting into ReportLab Platypus XML markup,
+    escaping XML entities and normalizing mathematical/scientific symbols to latin-1 safe text.
+    """
+    import re
+    if not text:
+        return ""
+
+    # 1. Map Unicode mathematical / Greek symbols to ASCII/latin-1 equivalents
+    unicode_map = {
+        'ℝ': 'R', '∈': ' in ', '∑': 'sum', '‖': '||', 'ŷ': 'y_hat', 'δ': 'delta',
+        '∇': 'grad', '⊙': '*', 'η': 'eta', 'λ': 'lambda', 'σ': 'sigma', 'π': 'pi',
+        '≈': '~=', '≤': '<=', '≥': '>=', '≠': '!=', '→': '->', '←': '<-',
+        'ᵀ': '^T', 'ⁿ': '^n', 'ᵢ': '_i', 'ʲ': '_j', 'ᶜ': '_c', '²': '^2', '³': '^3',
+        '±': '+/-', '·': '*', '—': '--', '–': '-', '“': '"', '”': '"', '‘': "'", '’': "'"
+    }
+    for char, rep in unicode_map.items():
+        if char in text:
+            text = text.replace(char, rep)
+
+    # 2. Extract code blocks / backtick content temporarily to avoid entity double-escaping
+    code_placeholders = []
+    def code_sub(m):
+        code_placeholders.append(m.group(1))
+        return f"__CODE_PH_{len(code_placeholders)-1}__"
+
+    text = re.sub(r'`(.*?)`', code_sub, text)
+
+    # 3. Escape XML entities: & first, then < and >
+    text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    # 4. Bold and Italic Markdown conversions
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'(?<![a-zA-Z0-9])\*(.*?)\*(?![a-zA-Z0-9])', r'<i>\1</i>', text)
+
+    # 5. Restore code placeholders formatted with Courier and dark text
+    for i, code_val in enumerate(code_placeholders):
+        safe_code = code_val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        text = text.replace(f"__CODE_PH_{i}__", f'<b><font face="Courier" color="#0F172A">{safe_code}</font></b>')
+
+    # 6. Ensure latin-1 safe encoding
+    try:
+        text.encode('latin-1')
+    except UnicodeEncodeError:
+        text = text.encode('latin-1', 'replace').decode('latin-1')
+
+    return text
+
+
 def create_pdf_document(
     title: str,
     content: str or List[Dict[str, Any]],
     filename: Optional[str] = None,
-    author: Optional[str] = "Nova Assistant"
+    author: Optional[str] = None,
+    images: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Create a styled PDF document using ReportLab with running headers & Page X of Y footers.
     """
     try:
+        import re
         from reportlab.lib.pagesizes import letter
         from reportlab.lib import colors
         from reportlab.pdfgen import canvas
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from instance.config import get_branding_author
+
+        author = get_branding_author(author)
+
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        namer = get_semantic_file_naming_service()
 
         if not filename:
-            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '_', '-')).rstrip()
-            filename = f"{safe_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        elif not filename.endswith(".pdf"):
-            filename += ".pdf"
-
-        if os.path.isabs(filename):
-            target_path = filename
+            target_path, _ = namer.resolve_output_path(
+                task_description=title,
+                title=title,
+                artifact_type="document",
+                extension=".pdf"
+            )
             out_dir = os.path.dirname(target_path)
         else:
-            out_dir = get_default_output_dir()
-            target_path = os.path.join(out_dir, filename)
+            clean_name = namer.sanitize_filename(filename)
+            if not clean_name.endswith(".pdf"):
+                clean_name += ".pdf"
+            if os.path.isabs(filename):
+                target_path = filename
+                out_dir = os.path.dirname(target_path)
+            else:
+                out_dir = namer.get_default_output_dir()
+                target_path = namer.get_unique_path(out_dir, os.path.splitext(clean_name)[0], ".pdf")
 
         os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
 
@@ -113,12 +181,14 @@ def create_pdf_document(
             rightMargin=54,
             leftMargin=54,
             topMargin=60,
-            bottomMargin=60
+            bottomMargin=60,
+            title=title,
+            author=author
         )
 
         styles = getSampleStyleSheet()
         
-        # Custom styles
+        # Professional Custom Styles
         title_style = ParagraphStyle(
             'DocTitle',
             parent=styles['Heading1'],
@@ -127,38 +197,75 @@ def create_pdf_document(
             leading=26,
             textColor=colors.HexColor('#1F497D'),
             alignment=TA_CENTER,
-            spaceAfter=8
+            spaceAfter=6
         )
         
         subtitle_style = ParagraphStyle(
             'DocSubtitle',
             parent=styles['Normal'],
             fontName='Helvetica-Oblique',
-            fontSize=10,
-            leading=14,
-            textColor=colors.HexColor('#666666'),
+            fontSize=9.5,
+            leading=13,
+            textColor=colors.HexColor('#64748B'),
             alignment=TA_CENTER,
-            spaceAfter=18
+            spaceAfter=14
         )
         
         h1_style = ParagraphStyle(
             'CustomH1',
             parent=styles['Heading2'],
             fontName='Helvetica-Bold',
-            fontSize=14,
-            leading=18,
+            fontSize=15,
+            leading=19,
+            textColor=colors.HexColor('#1F497D'),
+            spaceBefore=16,
+            spaceAfter=6,
+            keepWithNext=True
+        )
+
+        h2_style = ParagraphStyle(
+            'CustomH2',
+            parent=styles['Heading3'],
+            fontName='Helvetica-Bold',
+            fontSize=12.5,
+            leading=16,
             textColor=colors.HexColor('#2E75B6'),
-            spaceBefore=14,
-            spaceAfter=6
+            spaceBefore=12,
+            spaceAfter=4,
+            keepWithNext=True
+        )
+
+        h3_style = ParagraphStyle(
+            'CustomH3',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=11,
+            leading=14.5,
+            textColor=colors.HexColor('#1E293B'),
+            spaceBefore=9,
+            spaceAfter=3,
+            keepWithNext=True
+        )
+
+        h4_style = ParagraphStyle(
+            'CustomH4',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=10,
+            leading=13,
+            textColor=colors.HexColor('#475569'),
+            spaceBefore=7,
+            spaceAfter=2,
+            keepWithNext=True
         )
 
         body_style = ParagraphStyle(
             'CustomBody',
             parent=styles['Normal'],
             fontName='Helvetica',
-            fontSize=10.5,
-            leading=15,
-            textColor=colors.HexColor('#262626'),
+            fontSize=10,
+            leading=14.5,
+            textColor=colors.HexColor('#1E293B'),
             spaceAfter=6
         )
 
@@ -166,11 +273,11 @@ def create_pdf_document(
             'CustomQuote',
             parent=body_style,
             fontName='Helvetica-Oblique',
-            leftIndent=20,
-            rightIndent=20,
+            leftIndent=18,
+            rightIndent=18,
             textColor=colors.HexColor('#1F497D'),
-            spaceBefore=8,
-            spaceAfter=8
+            spaceBefore=6,
+            spaceAfter=6
         )
 
         bullet_style = ParagraphStyle(
@@ -178,69 +285,270 @@ def create_pdf_document(
             parent=body_style,
             leftIndent=15,
             firstLineIndent=-10,
-            spaceAfter=4
+            spaceAfter=3
+        )
+
+        code_style = ParagraphStyle(
+            'CustomCode',
+            parent=body_style,
+            fontName='Courier',
+            fontSize=8.5,
+            leading=11.5,
+            textColor=colors.HexColor('#0F172A'),
+            leftIndent=14,
+            rightIndent=14,
+            spaceBefore=4,
+            spaceAfter=6
+        )
+
+        table_header_style = ParagraphStyle(
+            'TableHeader',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=8.5,
+            leading=11.5,
+            textColor=colors.whitesmoke,
+            alignment=TA_LEFT
+        )
+
+        table_cell_style = ParagraphStyle(
+            'TableCell',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=8.5,
+            leading=11.5,
+            textColor=colors.HexColor('#1E293B'),
+            alignment=TA_LEFT
         )
 
         story = []
         # Title & Subtitle
-        story.append(Paragraph(title, title_style))
+        story.append(Paragraph(markdown_to_platypus_xml(title), title_style))
         story.append(Paragraph(f"Generated by {author} • {datetime.now().strftime('%B %d, %Y')}", subtitle_style))
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 10))
+
+        printable_width = 504.0  # letter width 612 - 54 left - 54 right
 
         if isinstance(content, str):
-            for line in content.splitlines():
-                line_str = line.strip()
+            lines = content.splitlines()
+            idx = 0
+            while idx < len(lines):
+                line_str = lines[idx].strip()
                 if not line_str:
+                    idx += 1
+                    continue
+
+                # Code block detection (```)
+                if line_str.startswith("```"):
+                    idx += 1
+                    code_lines = []
+                    while idx < len(lines) and not lines[idx].strip().startswith("```"):
+                        code_lines.append(lines[idx])
+                        idx += 1
+                    if idx < len(lines):
+                        idx += 1  # Skip closing ```
+                    
+                    code_text = "\n".join(code_lines)
+                    code_p = Paragraph(markdown_to_platypus_xml(code_text).replace('\n', '<br/>'), code_style)
+                    code_table = Table([[code_p]], colWidths=[printable_width])
+                    code_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#F8FAFC')),
+                        ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+                        ('TOPPADDING', (0, 0), (-1, -1), 6),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                    ]))
+                    story.append(Spacer(1, 4))
+                    story.append(code_table)
                     story.append(Spacer(1, 6))
                     continue
-                if line_str.startswith("# ") or line_str.startswith("## "):
-                    clean_h = line_str.lstrip("#").strip()
-                    story.append(Paragraph(clean_h, h1_style))
+
+                # Markdown table detection
+                if line_str.startswith("|") and line_str.endswith("|"):
+                    table_lines = []
+                    while idx < len(lines) and lines[idx].strip().startswith("|") and lines[idx].strip().endswith("|"):
+                        table_lines.append(lines[idx].strip())
+                        idx += 1
+                    
+                    parsed_rows = []
+                    for t_line in table_lines:
+                        cells = [c.strip() for c in t_line.strip('|').split('|')]
+                        if all(set(c).issubset({'-', ':', ' '}) for c in cells):
+                            continue
+                        parsed_rows.append(cells)
+                    
+                    if parsed_rows:
+                        col_count = len(parsed_rows[0])
+                        col_w = printable_width / max(1, col_count)
+                        col_widths = [col_w] * col_count
+                        
+                        table_data = []
+                        # Header row
+                        table_data.append([
+                            Paragraph(markdown_to_platypus_xml(str(c)), table_header_style)
+                            for c in parsed_rows[0]
+                        ])
+                        # Data rows
+                        for r in parsed_rows[1:]:
+                            padded_r = r[:col_count] + [""] * max(0, col_count - len(r))
+                            table_data.append([
+                                Paragraph(markdown_to_platypus_xml(str(c)), table_cell_style)
+                                for c in padded_r
+                            ])
+                        
+                        t = Table(table_data, colWidths=col_widths, repeatRows=1)
+                        t.setStyle(TableStyle([
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F497D')),
+                            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+                            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')]),
+                            ('TOPPADDING', (0, 0), (-1, -1), 4),
+                            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                            ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                            ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+                        ]))
+                        story.append(Spacer(1, 4))
+                        story.append(t)
+                        story.append(Spacer(1, 6))
+                    continue
+
+                if line_str.startswith("# "):
+                    clean_h = line_str[2:].strip()
+                    story.append(Paragraph(markdown_to_platypus_xml(clean_h), h1_style))
+                    idx += 1
+                elif line_str.startswith("## "):
+                    clean_h = line_str[3:].strip()
+                    story.append(Paragraph(markdown_to_platypus_xml(clean_h), h2_style))
+                    idx += 1
+                elif line_str.startswith("### "):
+                    clean_h = line_str[4:].strip()
+                    story.append(Paragraph(markdown_to_platypus_xml(clean_h), h3_style))
+                    idx += 1
+                elif line_str.startswith("#### "):
+                    clean_h = line_str[5:].strip()
+                    story.append(Paragraph(markdown_to_platypus_xml(clean_h), h4_style))
+                    idx += 1
                 elif line_str.startswith("> "):
-                    story.append(Paragraph(line_str[2:].strip(), quote_style))
-                elif line_str.startswith("- ") or line_str.startswith("* ") or line_str.startswith("• "):
-                    clean_b = line_str.lstrip("-*• ").strip()
-                    story.append(Paragraph(f"&bull; {clean_b}", bullet_style))
+                    story.append(Paragraph(markdown_to_platypus_xml(line_str[2:].strip()), quote_style))
+                    idx += 1
+                elif line_str.startswith(("- ", "* ", "• ")):
+                    clean_b = re.sub(r'^[-*•]\s*', '', line_str).strip()
+                    story.append(Paragraph(f"&bull; {markdown_to_platypus_xml(clean_b)}", bullet_style))
+                    idx += 1
+                elif re.match(r'^\d+[\.\)]\s+', line_str):
+                    num_match = re.match(r'^(\d+[\.\)])\s+(.*)$', line_str)
+                    if num_match:
+                        prefix = num_match.group(1)
+                        clean_num = num_match.group(2)
+                        story.append(Paragraph(f"<b>{prefix}</b> {markdown_to_platypus_xml(clean_num)}", bullet_style))
+                    else:
+                        story.append(Paragraph(markdown_to_platypus_xml(line_str), bullet_style))
+                    idx += 1
                 elif line_str in ("---", "***"):
+                    # Thematic divider: subtle line rather than a blank-page-inducing PageBreak
+                    t_rule = Table([[""]], colWidths=[printable_width], rowHeights=[1])
+                    t_rule.setStyle(TableStyle([
+                        ('LINEBELOW', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+                        ('TOPPADDING', (0, 0), (-1, -1), 0),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+                    ]))
+                    story.append(Spacer(1, 3))
+                    story.append(t_rule)
+                    story.append(Spacer(1, 5))
+                    idx += 1
+                elif line_str in ("<!-- pagebreak -->", "\\pagebreak"):
                     story.append(PageBreak())
+                    idx += 1
                 else:
-                    story.append(Paragraph(line_str, body_style))
+                    # Group contiguous regular text lines into a single coherent paragraph
+                    para_lines = [line_str]
+                    idx += 1
+                    while idx < len(lines):
+                        next_line = lines[idx].strip()
+                        if (not next_line or 
+                            next_line.startswith(("#", ">", "-", "*", "•", "|", "```", "---", "***")) or 
+                            re.match(r'^\d+[\.\)]\s+', next_line) or
+                            next_line in ("<!-- pagebreak -->", "\\pagebreak")):
+                            break
+                        para_lines.append(next_line)
+                        idx += 1
+                    full_para = " ".join(para_lines)
+                    story.append(Paragraph(markdown_to_platypus_xml(full_para), body_style))
         elif isinstance(content, list):
             for block in content:
                 b_type = block.get("type", "paragraph")
                 if b_type == "heading":
-                    story.append(Paragraph(block.get("text", ""), h1_style))
+                    lvl = block.get("level", 1)
+                    st = h1_style if lvl == 1 else (h2_style if lvl == 2 else (h3_style if lvl == 3 else h4_style))
+                    story.append(Paragraph(markdown_to_platypus_xml(block.get("text", "")), st))
                 elif b_type == "paragraph":
-                    story.append(Paragraph(block.get("text", ""), body_style))
+                    story.append(Paragraph(markdown_to_platypus_xml(block.get("text", "")), body_style))
                 elif b_type in ("quote", "callout"):
-                    story.append(Paragraph(f"“{block.get('text', '')}”", quote_style))
+                    story.append(Paragraph(f"“{markdown_to_platypus_xml(block.get('text', ''))}”", quote_style))
+                    if block.get("author"):
+                        auth_style = ParagraphStyle('QuoteAuth', parent=quote_style, fontName='Helvetica-Bold', fontSize=9, alignment=TA_LEFT)
+                        story.append(Paragraph(f"— {markdown_to_platypus_xml(block.get('author'))}", auth_style))
                 elif b_type == "bullet":
                     for item in block.get("items", []):
-                        story.append(Paragraph(f"&bull; {item}", bullet_style))
+                        story.append(Paragraph(f"&bull; {markdown_to_platypus_xml(str(item))}", bullet_style))
+                elif b_type == "number":
+                    for idx_item, item in enumerate(block.get("items", []), start=1):
+                        story.append(Paragraph(f"<b>{idx_item}.</b> {markdown_to_platypus_xml(str(item))}", bullet_style))
                 elif b_type == "page_break":
                     story.append(PageBreak())
                 elif b_type == "table":
                     headers = block.get("headers", [])
                     rows = block.get("rows", [])
-                    table_data = []
-                    if headers:
-                        table_data.append([str(h) for h in headers])
-                    for row in rows:
-                        table_data.append([str(c) for c in row])
-                    if table_data:
-                        t = Table(table_data)
-                        t.setStyle(TableStyle([
-                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F497D')),
-                            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                            ('FONTSIZE', (0, 0), (-1, -1), 9),
-                            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-                            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F2F5F9')]),
-                            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D9D9D9')),
-                        ]))
-                        story.append(t)
+                    if headers or rows:
+                        col_count = len(headers) if headers else len(rows[0])
+                        col_w = printable_width / max(1, col_count)
+                        col_widths = [col_w] * col_count
+                        
+                        table_data = []
+                        if headers:
+                            table_data.append([
+                                Paragraph(markdown_to_platypus_xml(str(h)), table_header_style)
+                                for h in headers
+                            ])
+                        for row in rows:
+                            padded_r = row[:col_count] + [""] * max(0, col_count - len(row))
+                            table_data.append([
+                                Paragraph(markdown_to_platypus_xml(str(c)), table_cell_style)
+                                for c in padded_r
+                            ])
+                        if table_data:
+                            t = Table(table_data, colWidths=col_widths, repeatRows=1 if headers else 0)
+                            t.setStyle(TableStyle([
+                                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1F497D')),
+                                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+                                ('ROWBACKGROUNDS', (0, 1 if headers else 0), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')]),
+                                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                                ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                                ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+                            ]))
+                            story.append(t)
+                            story.append(Spacer(1, 8))
+
+        # Embed visual assets / diagrams if provided
+        if images:
+            from reportlab.platypus import Image as RLImage
+            caption_style = ParagraphStyle('Caption', parent=styles['Normal'], fontName='Helvetica-Oblique', fontSize=9, textColor=colors.HexColor('#64748B'), alignment=TA_CENTER, spaceBefore=4, spaceAfter=10)
+            for img_path in images:
+                if img_path and os.path.exists(img_path):
+                    try:
                         story.append(Spacer(1, 10))
+                        # Scale image cleanly to fit printable width
+                        story.append(RLImage(img_path, width=480, height=270))
+                        cap_text = f"Figure: {Path(img_path).stem.replace('_', ' ').title()}"
+                        story.append(Paragraph(cap_text, caption_style))
+                        story.append(Spacer(1, 8))
+                    except Exception as img_err:
+                        logger.warning(f"[PDF] Could not embed image {img_path}: {img_err}")
 
         numbered_canvas_class = _make_numbered_canvas(canvas.Canvas, title, author)
         doc.build(story, canvasmaker=numbered_canvas_class)

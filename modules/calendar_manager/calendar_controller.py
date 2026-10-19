@@ -21,6 +21,26 @@ from .sync_adapters import calendar_sync_manager
 logger = logging.getLogger(__name__)
 
 
+def format_time_12hr(time_val: Optional[str]) -> str:
+    """Format time string into user-friendly 12-hour format e.g. '3:00 PM'."""
+    if not time_val:
+        return ""
+    t_str = str(time_val).strip()
+    if re.search(r'\b[AP]M\b', t_str, re.I):
+        return t_str
+    try:
+        parts = t_str.split(":")
+        h = int(parts[0])
+        m = int(parts[1]) if len(parts) > 1 else 0
+        ampm = "PM" if h >= 12 else "AM"
+        h12 = h % 12
+        if h12 == 0:
+            h12 = 12
+        return f"{h12}:{m:02d} {ampm}"
+    except Exception:
+        return t_str
+
+
 class CalendarController:
     """
     Fully Dynamic Calendar Intelligence System.
@@ -92,7 +112,23 @@ class CalendarController:
             temporal = data.get("temporal_context", {})
             
             # Resolve Country / Region
-            country = entities.get("location") if entities.get("location") and len(entities.get("location")) == 2 else get_user_country()
+            loc_ent = entities.get("location")
+            if loc_ent:
+                loc_clean = str(loc_ent).upper().strip()
+                if loc_clean in ("US", "USA", "UNITED STATES", "AMERICA"):
+                    country = "US"
+                elif loc_clean in ("RU", "RUSSIA"):
+                    country = "RU"
+                elif loc_clean in ("IN", "INDIA"):
+                    country = "IN"
+                elif loc_clean in ("GB", "UK", "UNITED KINGDOM", "BRITAIN"):
+                    country = "GB"
+                elif len(loc_clean) == 2:
+                    country = loc_clean
+                else:
+                    country = get_user_country()
+            else:
+                country = get_user_country()
             service = get_special_days_service(region=country, user_id=user_id)
             
             # 3. Resolve Dates & Ranges
@@ -350,6 +386,103 @@ class CalendarController:
                     return results
 
             # ─────────────────────────────────────────────────────────────────
+            # Check Public Holiday / Working Day Status
+            # ─────────────────────────────────────────────────────────────────
+            elif action == "check_holiday":
+                t_dt = datetime.strptime(target_start, "%Y-%m-%d")
+                weekday_name = t_dt.strftime("%A")
+                is_weekend = t_dt.weekday() >= 5
+                date_label = "today" if target_start == now.strftime("%Y-%m-%d") else ("tomorrow" if target_start == (now + timedelta(days=1)).strftime("%Y-%m-%d") else f"{weekday_name} ({target_start})")
+                is_public_q = bool(entities.get("is_public_holiday_query"))
+                check_work_q = bool(entities.get("check_working_day"))
+                inquire_name = bool(entities.get("inquire_name"))
+                country_name = "India" if country == "IN" else ("the United States" if country == "US" else ("Russia" if country == "RU" else country))
+
+                # Weekday ambiguity check (e.g. "Is Monday a public holiday?" when today is Monday)
+                if entities.get("is_ambiguous_weekday"):
+                    results["status"] = "clarification"
+                    results["speech_response"] = f"Did you mean today ({weekday_name}, {target_start}) or next {weekday_name}?"
+                    return results
+
+                try:
+                    h = service.get_special_day(target_start)
+                except Exception as ex:
+                    self.logger.warning(f"[CalendarController] Holiday service error: {ex}")
+                    results["status"] = "service_unavailable"
+                    results["speech_response"] = f"Holiday verification is currently unavailable for {country_name}. Unable to confirm holiday status at this time."
+                    return results
+
+                if h:
+                    h_name = h.get("name", "Holiday")
+                    h_type = h.get("type", "Holiday")
+                    results["holidays"] = [h]
+                    h_type_low = str(h_type).lower()
+                    is_official_public = any(p in h_type_low for p in ("public holiday", "gazetted national holiday", "federal holiday")) and not any(p in h_type_low for p in ("observance", "optional", "restricted"))
+                    results["is_public_holiday"] = is_official_public
+                    results["is_holiday"] = True
+
+                    if is_official_public:
+                        if check_work_q:
+                            results["speech_response"] = f"No, {date_label} is not a regular working day; it is an official public holiday in {country_name}: {h_name}."
+                        else:
+                            results["speech_response"] = f"Yes, {date_label} is an official public holiday: {h_name}."
+                    elif inquire_name:
+                        results["speech_response"] = f"Today is observed as {h_name} ({h_type}), but it is not an official public holiday."
+                    elif is_public_q:
+                        weekend_note = f" (falling on a weekend, {weekday_name})" if is_weekend else ""
+                        results["speech_response"] = f"No, {date_label} is not an official public holiday. It is observed as {h_name} ({h_type}){weekend_note}, so it is a regular working day for most offices and services."
+                    elif check_work_q:
+                        if is_weekend:
+                            results["speech_response"] = f"{date_label.capitalize()} is observed as {h_name} ({h_type}), but it is not an official public holiday. Since it falls on a weekend ({weekday_name}), it is not a regular working day."
+                        else:
+                            results["speech_response"] = f"No, {date_label} is not an official public holiday. It is observed as {h_name} ({h_type}), so it is a regular working day for most offices and services."
+                    else:
+                        weekend_note = f" on {weekday_name}" if is_weekend else ""
+                        results["speech_response"] = f"{date_label.capitalize()} is observed as {h_name} ({h_type}){weekend_note}, but it is not an official gazetted public holiday."
+                else:
+                    results["is_public_holiday"] = False
+                    results["is_holiday"] = False
+                    if inquire_name:
+                        results["speech_response"] = f"There are no official public holidays or special observances for {date_label} in {country_name}."
+                    elif is_weekend:
+                        results["speech_response"] = f"No, {date_label} is not a public holiday; it is a regular weekend ({weekday_name})."
+                    else:
+                        results["speech_response"] = f"No, {date_label} is not a public holiday; it is a regular working day ({weekday_name})."
+
+            # ─────────────────────────────────────────────────────────────────
+            # View Holidays in Range
+            # ─────────────────────────────────────────────────────────────────
+            elif action == "view_holidays":
+                try:
+                    h_list = service.get_special_days_in_range(target_start, target_end, region=country)
+                except Exception as ex:
+                    self.logger.warning(f"[CalendarController] Range holidays error: {ex}")
+                    h_list = []
+
+                results["holidays"] = h_list
+                country_name = "India" if country == "IN" else ("the United States" if country == "US" else ("Russia" if country == "RU" else country))
+                range_label = f"from {target_start} to {target_end}" if target_start != target_end else f"on {target_start}"
+                if not h_list:
+                    results["speech_response"] = f"There are no public holidays or observances scheduled in {country_name} {range_label}."
+                else:
+                    pub_holidays = [
+                        h for h in h_list 
+                        if any(p in str(h.get('type', '')).lower() for p in ("public", "gazetted national", "federal")) 
+                        and not any(p in str(h.get('type', '')).lower() for p in ("observance", "optional", "restricted"))
+                    ]
+                    observances = [h for h in h_list if h not in pub_holidays]
+                    
+                    parts = []
+                    if pub_holidays:
+                        pub_strs = [f"{h['name']} ({h['date']})" for h in pub_holidays]
+                        parts.append(f"Public Holidays: {', '.join(pub_strs)}")
+                    if observances:
+                        obs_strs = [f"{h['name']} ({h['date']}, {h.get('type', 'Observance')})" for h in observances]
+                        parts.append(f"Cultural Observances: {', '.join(obs_strs)}")
+                        
+                    results["speech_response"] = f"Holidays in {country_name} {range_label}: " + "; ".join(parts) + "."
+
+            # ─────────────────────────────────────────────────────────────────
             # Next Public Holiday Query
             # ─────────────────────────────────────────────────────────────────
             elif action == "next_holiday":
@@ -464,7 +597,21 @@ class CalendarController:
             elif action == "ics_export":
                 ics_str = self.ics_handler.export_calendar_to_ics(user_id, target_start, target_end)
                 results["ics_data"] = ics_str
-                results["speech_response"] = f"Your calendar events from {target_start} to {target_end} have been exported in RFC 5545 iCalendar format."
+                try:
+                    from core.semantic_file_naming import get_semantic_file_naming_service
+                    namer = get_semantic_file_naming_service()
+                    ics_path, ics_name = namer.resolve_output_path(
+                        task_description=f"export calendar {text or 'events'}",
+                        artifact_type="calendar",
+                        extension=".ics",
+                    )
+                    with open(ics_path, "w", encoding="utf-8") as f:
+                        f.write(ics_str)
+                    results["exported_filepath"] = ics_path
+                    results["speech_response"] = f"Your calendar events from {target_start} to {target_end} have been exported to {ics_name} in RFC 5545 iCalendar format."
+                except Exception as ex:
+                    self.logger.warning(f"Error saving ICS export to disk: {ex}")
+                    results["speech_response"] = f"Your calendar events from {target_start} to {target_end} have been exported in RFC 5545 iCalendar format."
 
             elif action == "ics_import":
                 src = entities.get("source", "")
@@ -525,17 +672,19 @@ class CalendarController:
                         if isinstance(results["personal_events"], dict):
                             for d, ev_list in sorted(results["personal_events"].items()):
                                 for ev in ev_list:
-                                    time_str = f" at {ev['time']}" if ev.get('time') else " (all day)"
+                                    t12 = format_time_12hr(ev.get('time'))
+                                    time_str = f" at {t12}" if t12 else " (all day)"
                                     loc_str = f" ({ev['location']})" if ev.get('location') else ""
                                     dur_str = f" [{ev['duration_minutes']}m]" if ev.get('duration_minutes') and not ev.get('is_all_day') else ""
                                     if target_start != target_end:
-                                        event_names.append(f"{ev['title']} on {d}{time_str}{loc_str}{dur_str}")
+                                        event_names.append(f"'{ev['title']}' on {d}{time_str}{loc_str}{dur_str}")
                                     else:
-                                        event_names.append(f"{ev['title']}{time_str}{loc_str}{dur_str}")
+                                        event_names.append(f"'{ev['title']}'{time_str}{loc_str}{dur_str}")
                         elif isinstance(results["personal_events"], list):
                             for ev in results["personal_events"]:
-                                time_str = f" at {ev['time']}" if ev.get('time') else " (all day)"
-                                event_names.append(f"{ev['title']}{time_str}")
+                                t12 = format_time_12hr(ev.get('time'))
+                                time_str = f" at {t12}" if t12 else " (all day)"
+                                event_names.append(f"'{ev['title']}'{time_str}")
                         speech_parts.append(f"You have {total_events} event(s){cat_str} {date_range_str}: {', '.join(event_names[:5])}")
                     else:
                         if is_meeting_query:
@@ -543,7 +692,7 @@ class CalendarController:
                         else:
                             speech_parts.append(f"You have no scheduled personal events{cat_str} {date_range_str}")
 
-                    if results["holidays"] and not any(w in text.lower() for w in ["meeting", "meetings", "appointment", "appointments", "agenda"]):
+                    if results["holidays"] and not any(w in text.lower() for w in ["meeting", "meetings", "appointment", "appointments", "agenda", "events", "event"]):
                         h_names = [h.get("name", "Holiday") for h in results["holidays"][:2]]
                         speech_parts.append(f"Holidays: {', '.join(h_names)}")
 
@@ -669,28 +818,37 @@ class CalendarController:
                             else:
                                 conflict_note = f" Note: this overlaps with '{c_title}' as requested."
 
+                is_all_day = bool(entities.get("is_all_day")) or (event_time is None)
+                attendees = entities.get("attendees") or []
+                explicit_desc = entities.get("description")
+                final_desc = explicit_desc if explicit_desc else f"Added via assistant: {text}"
+                metadata = {"attendees": attendees} if attendees else {}
+
                 event_data = {
                     "title": title,
                     "date": target_start,
                     "time": event_time,
-                    "duration_minutes": duration_minutes,
+                    "duration_minutes": None if is_all_day else duration_minutes,
+                    "is_all_day": is_all_day,
                     "location": location,
                     "category": category,
                     "recurrence": recurrence,
                     "reminder_minutes": reminder_minutes,
-                    "description": f"Added via assistant: {text}"
+                    "description": final_desc,
+                    "metadata": metadata
                 }
                 event_id = self.storage.add_event(user_id, event_data)
                 self._last_event[user_id] = {**event_data, "id": event_id}
                 
-                time_str = f" at {event_time}" if event_time else ""
+                time_str = f" at {event_time}" if event_time else (" (all day)" if is_all_day else "")
                 loc_str = f" in {location}" if location else ""
-                dur_str = f" for {duration_minutes} minutes" if duration_minutes and duration_minutes != 60 and event_time else ""
+                att_str = f" with {', '.join(attendees)}" if attendees else ""
+                dur_str = f" for {duration_minutes} minutes" if duration_minutes and duration_minutes != 60 and event_time and not is_all_day else ""
                 rec_str = f" (recurring {recurrence['frequency']})" if recurrence else ""
                 
                 results["status"] = "Event added successfully" if not conflict_note else "Event added successfully (overlap preserved)"
                 results["event_id"] = event_id
-                results["speech_response"] = f"Added '{title}' to your calendar for {target_start}{time_str}{dur_str}{loc_str}{rec_str}{roll_forward_note}.{conflict_note}"
+                results["speech_response"] = f"Added '{title}' to your calendar for {target_start}{time_str}{dur_str}{loc_str}{att_str}{rec_str}{roll_forward_note}.{conflict_note}"
 
             # ─────────────────────────────────────────────────────────────────
             # Update / Reschedule / Rename
@@ -825,11 +983,17 @@ class CalendarController:
                     if location: updates["location"] = location
                     if category: updates["category"] = category
 
+                    scope = entities.get("scope")
+                    if scope == "occurrence" and target_ev.get("is_recurring"):
+                        updates["occurrence_date"] = target_ev.get("date")
+
                     success = self.storage.update_event(user_id, target_ev["id"], updates)
                     if success:
                         self._last_event[user_id] = {**target_ev, **updates}
                         results["status"] = "Event updated"
-                        if duration_delta:
+                        if scope == "occurrence" and target_ev.get("is_recurring"):
+                            results["speech_response"] = f"Updated this occurrence of '{target_ev['title']}' on {target_ev.get('date')}."
+                        elif duration_delta:
                             dir_str = "longer" if duration_delta > 0 else "shorter"
                             results["speech_response"] = f"Made '{target_ev['title']}' {abs(duration_delta)} minutes {dir_str} (now {final_dur} minutes)."
                         elif new_title and not start_time and not new_date:
@@ -860,20 +1024,34 @@ class CalendarController:
                 clean_title = re.sub(r'^(?:the\s+|my\s+)?(?:calendar\s+)?', '', title, flags=re.IGNORECASE).strip(" '\". ,") if title else ""
                 
                 # Check if cancelling a pending conflict
-                if clean_title and clean_title.lower() in ["change", "the change", "request", "the request", "new request"] and self._pending_conflicts.get(user_id):
+                if clean_title and clean_title.lower() in ["change", "the change", "request", "the request", "new request", "it", "that"] and self._pending_conflicts.get(user_id):
                     pending = self._pending_conflicts.pop(user_id, None)
                     results["status"] = "Cancelled"
                     p_title = pending.get("event_data", {}).get("title", "event")
                     results["speech_response"] = f"Cancelled the requested change to '{p_title}'."
                     return results
 
-                is_specific_title = bool(clean_title and clean_title.lower() not in ["meeting", "appointment", "event", "my meeting", "the meeting", "my appointment", "all meetings", "one", "the one", "the one at", "one at", ""])
+                is_pronoun_or_generic = not clean_title or clean_title.lower() in [
+                    "it", "that", "the meeting", "that meeting", "the event", "that event",
+                    "meeting", "appointment", "event", "my meeting", "the meeting", "my appointment",
+                    "all meetings", "one", "the one", "the one at", "one at", ""
+                ]
 
                 candidates = []
-                if is_specific_title:
+                if not is_pronoun_or_generic:
                     candidates = self.storage.find_events_by_title(user_id, clean_title, event_date=search_date)
                     if not candidates and not search_date:
                         candidates = self.storage.find_events_by_title(user_id, clean_title)
+                else:
+                    last_ev = self._last_event.get(user_id)
+                    if last_ev:
+                        candidates = [last_ev]
+                    elif search_date:
+                        candidates = self.storage.get_events(user_id, search_date)
+                    else:
+                        next_ev = self.storage.get_next_event(user_id)
+                        if next_ev:
+                            candidates = [next_ev]
                     
                     if not candidates:
                         # Check fuzzy match against events to avoid silently deleting or failing
@@ -886,7 +1064,6 @@ class CalendarController:
                         elif isinstance(all_evs, list):
                             flattened = all_evs
 
-                        import difflib
                         best_match = None
                         best_ratio = 0.0
                         for ev in flattened:
@@ -905,9 +1082,6 @@ class CalendarController:
                             results["status"] = "Event not found"
                             results["speech_response"] = f"I couldn't find an event matching '{title}'{date_str} to cancel."
                             return results
-                else:
-                    if search_date:
-                        candidates = self.storage.get_events(user_id, search_date)
 
                 if not candidates:
                     date_str = f" on {search_date}" if search_date else ""
@@ -949,7 +1123,17 @@ class CalendarController:
             # ─────────────────────────────────────────────────────────────────
             elif action == "explain":
                 h_name = entities.get("holiday_name") or entities.get("festival_name")
-                if h_name:
+                target_date = entities.get("target_date")
+                if not h_name or target_date == "today":
+                    h = service.get_special_day(target_start)
+                    if h:
+                        h_name = h.get("name")
+                        h_desc = h.get("description")
+                        results["explanation"] = h_desc
+                        results["speech_response"] = f"Today is observed as {h_name}: {h_desc}."
+                    else:
+                        results["speech_response"] = "There is no special holiday or cultural observance recorded for today."
+                else:
                     results["explanation"] = explain_holiday_intelligence(h_name, country)
                     results["speech_response"] = str(results["explanation"])
                     
@@ -965,11 +1149,23 @@ class CalendarController:
                     year = now.year
                 c_count, h_list = service.get_holidays_count(year, country=country)
                 country_name = "India" if country == "IN" else ("the United States" if country == "US" else ("Russia" if country == "RU" else country))
-                results["count"] = c_count
-                results["holidays"] = h_list
-                sample_names = ", ".join([h["name"] for h in h_list[:4]])
-                results["speech_response"] = f"There are {c_count} official public holidays in {country_name} in {year}, including {sample_names}."
-                
+                is_rem = bool(entities.get("is_remaining"))
+                if is_rem and year == now.year:
+                    today_iso = now.strftime("%Y-%m-%d")
+                    rem_holidays = [h for h in h_list if h['date'] >= today_iso]
+                    c_count = len(rem_holidays)
+                    h_list = rem_holidays
+                    results["count"] = c_count
+                    results["holidays"] = h_list
+                    sample_names = ", ".join([h["name"] for h in h_list[:4]]) if h_list else "None"
+                    results["speech_response"] = f"There are {c_count} official public holiday(s) remaining in {country_name} in {year}" + (f", including {sample_names}." if h_list else ".")
+                else:
+                    results["count"] = c_count
+                    results["holidays"] = h_list
+                    sample_names = ", ".join([h["name"] for h in h_list[:4]]) if h_list else "None"
+                    results["speech_response"] = f"There are {c_count} official public holidays in {country_name} in {year}, including {sample_names}."
+            if not results.get("speech_response"):
+                results["speech_response"] = "I checked your calendar, but there are no matching events or details for that request."
             return results
 
         except Exception as e:

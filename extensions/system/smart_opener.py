@@ -190,8 +190,9 @@ class SmartOpener:
 
         if not is_running:
             try:
-                from core.os_gateway.process_ops import _get_cached_process_list
-                for p in _get_cached_process_list():
+                from core.os_gateway.process_ops import _get_cached_process_list, invalidate_process_cache
+                plist = _get_cached_process_list()
+                for p in plist:
                     p_name = (p.get('name') or "").lower()
                     if target_exes and p_name in target_exes:
                         is_running = True
@@ -205,6 +206,24 @@ class SmartOpener:
                         if found_pid == fg_pid and fg_pid > 0:
                             is_foreground = True
                         break
+
+                if not is_running:
+                    # Invalidate short-lived cache and scan once more in case process just started
+                    invalidate_process_cache()
+                    for p in _get_cached_process_list():
+                        p_name = (p.get('name') or "").lower()
+                        if target_exes and p_name in target_exes:
+                            is_running = True
+                            found_pid = p.get('pid')
+                            if found_pid == fg_pid and fg_pid > 0:
+                                is_foreground = True
+                            break
+                        elif any(t in p_name for t in terms_to_match if t and len(t) > 2):
+                            is_running = True
+                            found_pid = p.get('pid')
+                            if found_pid == fg_pid and fg_pid > 0:
+                                is_foreground = True
+                            break
             except Exception:
                 pass
 

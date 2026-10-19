@@ -18,7 +18,7 @@ def generate_code(
     prompt: str,
     language: str = "python",
     user_id: Optional[Any] = None,
-    max_tokens: int = 3000,
+    max_tokens: int = 4096,
     is_project: bool = False
 ) -> str:
     """

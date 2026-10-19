@@ -218,6 +218,16 @@ class AssistantApp(QObject):
         except Exception as e:
             print(f"[APP] Core registration notice: {e}")
 
+        # Synchronize and pre-load capability consents for authenticated user
+        try:
+            from core.capability_consent_manager import get_capability_consent_manager
+            cm = get_capability_consent_manager()
+            cm.clear_user_cache()  # Invalidate prior user session cache to prevent cross-account pollution
+            cm.load_user_consents(self._user_id)
+            print(f"[CAPABILITY] Capability consents initialized and loaded for user {self._user_id}")
+        except Exception as e:
+            print(f"[CAPABILITY] Capability consents notice: {e}")
+
         # 3. Build UI components first so visual interface appears immediately
         t_ui0 = time.perf_counter()
         self._build_ui()
@@ -664,6 +674,8 @@ class AssistantApp(QObject):
         self._win.show_animated()
         self._win.raise_()
         self._win.activateWindow()
+        if self._launcher:
+            self._launcher.raise_()
 
     def _toggle_main_window(self):
         if self._win:
@@ -671,10 +683,14 @@ class AssistantApp(QObject):
                 self._win.hide()
             else:
                 self._win.show_animated()
+            if self._launcher:
+                self._launcher.raise_()
 
     def _show_main_window(self):
         if self._win:
             self._win.show_on_chat()
+            if self._launcher:
+                self._launcher.raise_()
 
     def _on_task_cancel_requested(self):
         self._toasts.show("Task cancellation requested", "warning", 2000)
@@ -1110,6 +1126,7 @@ class AssistantApp(QObject):
         # Close windows
         if self._launcher:
             try:
+                self._launcher._allow_close = True
                 self._launcher.close()
             except Exception:
                 pass
@@ -1253,7 +1270,11 @@ class AssistantApp(QObject):
 
         # Hide active UI components
         if self._launcher:
-            self._launcher.hide()
+            try:
+                self._launcher._allow_close = True
+                self._launcher.hide()
+            except Exception:
+                pass
             self._launcher = None
         if self._win:
             self._win.hide()

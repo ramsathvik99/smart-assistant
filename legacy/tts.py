@@ -396,6 +396,29 @@ def _tts_worker():
             _tts_queue.task_done()
             break
 
+        # Automatically detect script if lang_hint is default English/omitted
+        if text and (not lang_hint or str(lang_hint).lower() in ("en", "auto", "en-us", "en-gb", "en-in")):
+            for _ch in text:
+                _cp = ord(_ch)
+                if 0x0C00 <= _cp <= 0x0C7F:
+                    lang_hint = 'te'
+                    break
+                elif 0x0900 <= _cp <= 0x097F:
+                    lang_hint = 'hi'
+                    break
+                elif 0x0B80 <= _cp <= 0x0BFF:
+                    lang_hint = 'ta'
+                    break
+                elif 0x0C80 <= _cp <= 0x0CFF:
+                    lang_hint = 'kn'
+                    break
+                elif 0x0D00 <= _cp <= 0x0D7F:
+                    lang_hint = 'ml'
+                    break
+                elif 0x0980 <= _cp <= 0x09FF:
+                    lang_hint = 'bn'
+                    break
+
         _tts_interrupted.clear()
         with _tts_state_lock:
             global _active_tts_text
@@ -461,7 +484,13 @@ def _tts_worker():
 
             # ── 2. Fallback to native Windows SAPI / OneCore (English) ──
             if not success and not _tts_interrupted.is_set():
-                playback_backend = "sapi_fallback"
+                primary_prov = ""
+                try:
+                    from extensions.system.tts_backend import get_tts_backend_manager
+                    primary_prov = getattr(get_tts_backend_manager(), "primary_provider", "").lower()
+                except Exception:
+                    pass
+                playback_backend = "sapi" if primary_prov == "sapi" else "sapi_fallback"
                 if lang_hint == 'en':
                     success = _speak_pyttsx3(text)
                     if not success and not _tts_interrupted.is_set():
@@ -480,6 +509,7 @@ def _tts_worker():
         finally:
             duration = max(0.001, time.monotonic() - t_start)
             ui_text = (meta.get("ui_text") or meta.get("text") or text) if isinstance(meta, dict) else text
+            was_interrupted = bool(_tts_interrupted.is_set() or (locals().get("res") and getattr(locals()["res"], "interrupted", False)))
             metrics = {
                 "ui_text": ui_text,
                 "speech_text": text,
@@ -487,9 +517,11 @@ def _tts_worker():
                 "char_count": len(text),
                 "duration": duration,
                 "playback_duration_sec": duration,
-                "success": bool(success),
-                "interrupted": bool(_tts_interrupted.is_set()),
+                "success": bool(success and not was_interrupted),
+                "interrupted": was_interrupted,
                 "backend_used": playback_backend,
+                "actual_engine": "sapi5" if "sapi" in playback_backend else playback_backend,
+                "is_fallback": "fallback" in playback_backend,
                 "voice_used": playback_voice,
                 "sentences_played": sentences_played,
                 "byte_count": byte_count,
@@ -498,9 +530,9 @@ def _tts_worker():
             global _last_playback_metrics
             _last_playback_metrics = metrics
             try:
-                if success:
+                if success and not was_interrupted:
                     print(f"[TTS METRICS] UI text: {ui_text[:100]!r} | Speech text: {text!r} | Words: {metrics['word_count']} | Chars: {metrics['char_count']} | Duration: {duration:.2f}s | Backend: {playback_backend}")
-                elif _tts_interrupted.is_set():
+                elif was_interrupted:
                     print(f"[TTS METRICS] INTERRUPTED: UI text: {ui_text[:60]!r} | Duration: {duration:.2f}s")
                 else:
                     print(f"[TTS METRICS] PLAYBACK FAILED: UI text: {ui_text[:60]!r} | Duration: {duration:.2f}s | Backend: {playback_backend}")
@@ -684,8 +716,50 @@ def _speak_gtts(text: str, lang: str) -> bool:
         )
         tts_obj = gTTS(text=text, lang=lang)
         tts_obj.save(temp_file)
-        playsound(temp_file)
-        return True
+
+        # High-performance interruptible playback via soundfile + sounddevice
+        try:
+            import soundfile as sf
+            import sounddevice as sd
+            import numpy as np
+
+            pcm_data, sr = sf.read(temp_file, dtype="int16")
+            if len(pcm_data.shape) > 1 and pcm_data.shape[1] > 1:
+                pcm_data = np.mean(pcm_data, axis=1).astype(np.int16)
+
+            stream = sd.OutputStream(
+                samplerate=sr,
+                channels=1,
+                dtype='int16',
+                blocksize=2048,
+            )
+            stream.start()
+            chunk_size = 2048
+            try:
+                for offset in range(0, len(pcm_data), chunk_size):
+                    if _tts_interrupted.is_set():
+                        break
+                    chunk = pcm_data[offset:offset + chunk_size]
+                    if not chunk.flags['C_CONTIGUOUS']:
+                        chunk = np.ascontiguousarray(chunk)
+                    stream.write(chunk)
+            finally:
+                try:
+                    if _tts_interrupted.is_set():
+                        stream.abort()
+                    else:
+                        stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+            return not _tts_interrupted.is_set()
+
+        except Exception:
+            # Fallback to playsound if sounddevice/soundfile fails
+            if not _tts_interrupted.is_set():
+                playsound(temp_file)
+                return True
+            return False
 
     except Exception as e:
         print(f"[TTS gTTS Error] {e}")

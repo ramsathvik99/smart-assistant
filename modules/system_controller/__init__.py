@@ -23,7 +23,14 @@ from .file_manager import (
     profile_file_content
 )
 from .app_launcher import launch_application, discover_installed_games, launch_game
-from .action_executor import execute_action, SystemActionExecutor, get_action_history, clear_action_log
+from .action_executor import (
+    execute_action,
+    execute_plan,
+    SystemActionExecutor,
+    SystemActionResult,
+    get_action_history,
+    clear_action_log
+)
 from .system_controller import (
     get_battery_status,
     get_disk_space,
@@ -76,8 +83,14 @@ from .system_controller import (
     get_detailed_cpu_info,
     get_detailed_ram_metrics,
     get_gpu_memory,
+    list_installed_software,
+    install_software_package,
+    uninstall_software_package,
 )
 from .desktop_organizer import organize_directory, scan_unorganized_files
+from .universal_app_controller import UniversalAppController, get_universal_app_controller
+from .universal_computer_access import universal_computer_access, get_universal_computer_access
+from core.capability_consent_manager import CapabilityConsentManager, get_capability_consent_manager
 
 __all__ = [
     'create_folder',
@@ -103,7 +116,9 @@ __all__ = [
     'discover_installed_games',
     'launch_game',
     'execute_action',
+    'execute_plan',
     'SystemActionExecutor',
+    'SystemActionResult',
     'get_action_history',
     'clear_action_log',
     'get_battery_status',
@@ -154,7 +169,14 @@ __all__ = [
     'get_desktop_statistics',
     'get_system_telemetry_summary',
     'organize_directory',
-    'scan_unorganized_files'
+    'scan_unorganized_files',
+    'list_installed_software',
+    'install_software_package',
+    'uninstall_software_package',
+    'UniversalAppController',
+    'get_universal_app_controller',
+    'universal_computer_access',
+    'get_universal_computer_access',
+    'CapabilityConsentManager',
+    'get_capability_consent_manager',
 ]
-
-

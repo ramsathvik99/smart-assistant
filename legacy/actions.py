@@ -14,27 +14,15 @@ import psutil
 import ctypes
 
 
-def speak(text: str, **kwargs) -> None:
-    """Route speech through the TTS coordinator (COMMAND priority).
+import logging
+logger = logging.getLogger("Actions")
 
-    This shim replaces the old module-level `from legacy.tts import speak`
-    so that actions.py respects the coordinator's priority queue.
-    Import is lazy to avoid initialization-order problems.
+def speak(text: str, **kwargs) -> None:
+    """Action results are returned to the canonical execution pipeline (assistant.py),
+    which performs outcome verification and speaks the single authoritative response.
+    Direct speech is suppressed here to eliminate duplicate TTS responses.
     """
-    try:
-        from extensions.system.tts_coordinator import speak as _coord_speak, TTSPriority
-        _coord_speak(text, priority=TTSPriority.COMMAND)
-    except Exception:
-        try:
-            from legacy.tts import speak as _direct_speak
-            _direct_speak(text, **kwargs)
-        except Exception:
-            try:
-                from instance.config import settings as _cfg
-                _asst = _cfg.get_assistant_name() or "Assistant"
-            except Exception:
-                _asst = "Assistant"
-            print(f"{_asst}: {text}")
+    logger.debug(f"[ACTIONS] Suppressed redundant direct TTS: {text}")
 
 try:
     import pyautogui

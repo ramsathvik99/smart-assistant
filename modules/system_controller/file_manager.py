@@ -96,19 +96,9 @@ def resolve_directory_name(name_or_path: Optional[str] = None) -> str:
 def is_safe_file_path(file_path: str) -> bool:
     """Check if file path is within allowed user directories and free from path traversal."""
     try:
-        resolved = Path(file_path).resolve()
-        # Disallow access to Windows system directories
-        sys_root = Path(os.environ.get("SystemRoot", "C:\\Windows")).resolve()
-        prog_files = Path(os.environ.get("ProgramFiles", "C:\\Program Files")).resolve()
-        prog_files_x86 = Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")).resolve()
-
-        if resolved.is_relative_to(sys_root) or resolved.is_relative_to(prog_files) or resolved.is_relative_to(prog_files_x86):
-            return False
-
-        # Allow user home directory and any user-owned folders
-        user_home = Path.home().resolve()
-        return resolved.is_relative_to(user_home) or str(resolved).startswith(str(Path.cwd()))
-    except (ValueError, OSError):
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        return get_semantic_file_naming_service().is_safe_path(file_path)
+    except Exception:
         return False
 
 
@@ -518,9 +508,18 @@ def find_duplicate_files(dir_path: Optional[str] = None, sample_size_kb: int = 6
 
 def create_text_file(file_path: str, content: str = "", overwrite: bool = False) -> Dict[str, Any]:
     """
-    Create a new text file safely.
+    Create a new text file safely. Uses SemanticFileNamingService to sanitize filename and prevent path traversal.
     """
     try:
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        namer = get_semantic_file_naming_service()
+
+        parent = os.path.dirname(file_path) or get_default_workspace()
+        raw_basename = os.path.basename(file_path)
+        ext = os.path.splitext(raw_basename)[1] or ".txt"
+        safe_base = namer.sanitize_filename(raw_basename, default_name="notes", target_extension=ext)
+        file_path = os.path.join(parent, safe_base)
+
         if not is_safe_file_path(file_path):
             return {"success": False, "status": "error", "message": "Destination path is outside allowed directories."}
 
@@ -657,7 +656,9 @@ def rename_file(file_path: str, new_name: str, user_id: Optional[int] = None) ->
             return {"success": False, "message": "Target is outside allowed directories."}
 
         parent = os.path.dirname(os.path.abspath(actual_path))
-        clean_new = os.path.basename(new_name.strip())
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        namer = get_semantic_file_naming_service()
+        clean_new = namer.sanitize_filename(os.path.basename(new_name.strip()))
         new_path = os.path.join(parent, clean_new)
 
         if os.path.exists(new_path):

@@ -606,18 +606,19 @@ class FloatingLauncher(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(148, 114)
+        self.setFixedSize(104, 104)
 
         # State
         self._state = "idle"
         self._status_message = ""
-        self._assistant_name = "Trevon"
+        self._assistant_name = "Friday"
         self._username = "User"
-        self._initial_letter = "T"
+        self._initial_letter = "F"
         self._hovered = False
         self._dragging = False
         self._drag_start_pos = QPoint()
         self._audio_lvl = 0.0
+        self._allow_close = False
 
         # Animation parameters
         self._t = 0.0
@@ -647,16 +648,24 @@ class FloatingLauncher(QWidget):
         self._visual_panel = VisualResponsePanel()
 
         # Initial placement: Bottom-Right screen
-        screen = QApplication.primaryScreen().availableGeometry()
-        self.move(screen.width() - 170, screen.height() - 150)
+        primary = QApplication.primaryScreen()
+        if primary:
+            try:
+                primary.availableGeometryChanged.connect(lambda _: self._constrain_to_screen())
+            except Exception:
+                pass
+            screen = primary.availableGeometry()
+            self.move(screen.width() - 148, screen.height() - 158)
+        else:
+            self.move(100, 100)
 
     def set_assistant_name(self, name: str):
         """Update assistant identity while maintaining the centered initial."""
-        clean_name = name or "Trevon"
+        clean_name = name or "Friday"
         if getattr(self, '_assistant_name', None) == clean_name:
             return
         self._assistant_name = clean_name
-        self._initial_letter = self._assistant_name[0].upper() if self._assistant_name else "T"
+        self._initial_letter = self._assistant_name[0].upper() if self._assistant_name else "F"
         self.setToolTip(f"{self._assistant_name} (Click: Focus | Double-click: Quick Actions | Right-click: Controls)")
         if hasattr(self, '_quick_hud') and self._quick_hud:
             self._quick_hud.set_assistant_name(self._assistant_name)
@@ -733,6 +742,16 @@ class FloatingLauncher(QWidget):
     def _tick(self):
         self._t += 0.05
         self._glow_phase = (math.sin(self._t * 2.0) + 1.0) / 2.0
+
+        # Periodically ensure the floating button stays visible and on top on the screen
+        if not getattr(self, '_allow_close', False):
+            # Check every ~90 ticks (approx 2.7s)
+            if int(self._t * 20) % 90 == 0:
+                if not self.isVisible() or self.isMinimized():
+                    self._ensure_on_screen()
+                else:
+                    self.raise_()
+
         self.update()
 
     # ── Paint Event: Pulse Ring Design (Option 10) ───────────────────────────
@@ -742,7 +761,7 @@ class FloatingLauncher(QWidget):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
         w, h = float(self.width()), float(self.height())
-        cx, cy = w / 2.0, 44.0
+        cx, cy = w / 2.0, h / 2.0
         r, g, b = self._state_rgb()
 
         # Dynamic size with audio reactivity and hover boost
@@ -884,79 +903,6 @@ class FloatingLauncher(QWidget):
             # Stem and base
             p.drawLine(QPointF(mic_x, mic_y + 3.5), QPointF(mic_x, mic_y + 6.0))
             p.drawLine(QPointF(mic_x - 2.5, mic_y + 6.0), QPointF(mic_x + 2.5, mic_y + 6.0))
-
-        # 9. Clear, Reliable Runtime Status Pill
-        show_pill = (self._state != "idle") or self._hovered
-        if show_pill:
-            pill_w = 126.0
-            pill_h = 22.0
-            pill_x = cx - (pill_w / 2.0)
-            pill_y = 88.0
-            pill_rect = QRectF(pill_x, pill_y, pill_w, pill_h)
-
-            # Dark cybernetic translucent glass pill
-            pill_grad = QLinearGradient(pill_x, pill_y, pill_x, pill_y + pill_h)
-            pill_grad.setColorAt(0.0, QColor(10, 16, 26, 235))
-            pill_grad.setColorAt(1.0, QColor(6, 10, 18, 245))
-            p.setBrush(QBrush(pill_grad))
-            p.setPen(QPen(QColor(r, g, b, 140), 1.0))
-            p.drawRoundedRect(pill_rect, 9.0, 9.0)
-
-            # Determine icon & label
-            if self._state == "listening":
-                label = "Listening…"
-                dot_alpha = int(180 + 75 * math.sin(self._t * 7.0))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(QColor(r, g, b, dot_alpha)))
-                p.drawEllipse(QPointF(pill_x + 14.0, pill_y + 11.0), 3.5, 3.5)
-            elif self._state in ("processing", "thinking"):
-                label = "Processing…"
-                spin_angle = (self._t * 6.0) % (2.0 * math.pi)
-                sx = pill_x + 14.0 + 3.0 * math.cos(spin_angle)
-                sy = pill_y + 11.0 + 3.0 * math.sin(spin_angle)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(QColor(168, 85, 247, 240)))
-                p.drawEllipse(QPointF(sx, sy), 2.8, 2.8)
-            elif self._state == "speaking":
-                label = "Responding…"
-                p.setPen(QPen(QColor(0, 229, 107), 1.2))
-                p.setBrush(QBrush(QColor(0, 229, 107)))
-                p.drawRect(QRectF(pill_x + 10.0, pill_y + 8.5, 3.0, 5.0))
-                p.drawPolygon([
-                    QPointF(pill_x + 13.0, pill_y + 8.5),
-                    QPointF(pill_x + 16.5, pill_y + 6.0),
-                    QPointF(pill_x + 16.5, pill_y + 16.0),
-                    QPointF(pill_x + 13.0, pill_y + 13.5),
-                ])
-            elif self._state == "error":
-                label = self._status_message if self._status_message else "Error"
-                if len(label) > 17:
-                    label = label[:15] + "…"
-                p.setPen(QPen(QColor(255, 71, 87), 1.2))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawPolygon([
-                    QPointF(pill_x + 14.0, pill_y + 6.5),
-                    QPointF(pill_x + 8.5, pill_y + 16.0),
-                    QPointF(pill_x + 19.5, pill_y + 16.0),
-                ])
-                p.setPen(QPen(QColor(255, 255, 255), 1.2))
-                p.drawPoint(QPointF(pill_x + 14.0, pill_y + 13.5))
-            elif self._state == "idle" and self._hovered:
-                label = "Ready"
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(QColor(0, 212, 255, 200)))
-                p.drawEllipse(QPointF(pill_x + 14.0, pill_y + 11.0), 3.0, 3.0)
-            else:
-                label = self._status_message if self._status_message else self._state.capitalize()
-
-            # Render text
-            pill_font = QFont(F.MONO, 7, QFont.Weight.Bold)
-            pill_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-            p.setFont(pill_font)
-            p.setPen(QPen(QColor(r, g, b)))
-            text_rect = QRectF(pill_x + 22.0, pill_y, pill_w - 26.0, pill_h)
-            p.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
-
         p.end()
 
     # ── Mouse Interaction: Single / Double Click & Dragging ───────────────────
@@ -1089,9 +1035,46 @@ class FloatingLauncher(QWidget):
         self._hovered = False
         self.update()
 
+    # ── Screen Persistence & Lifecycle ───────────────────────────────────────
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.raise_()
+
+    def changeEvent(self, event):
+        """Ensure the floating button restores immediately if minimized or affected by OS window state change."""
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.isMinimized():
+                self.showNormal()
+                self.raise_()
+        super().changeEvent(event)
+
+    def closeEvent(self, event):
+        """The floating button always stays on the screen; prevent closing unless explicitly terminating."""
+        if getattr(self, '_allow_close', False):
+            super().closeEvent(event)
+        else:
+            event.ignore()
+
+    def hideEvent(self, event):
+        """The floating button always stays on the screen; prevent hiding unless explicitly terminating."""
+        super().hideEvent(event)
+        if not getattr(self, '_allow_close', False):
+            QTimer.singleShot(0, self._ensure_on_screen)
+
+    def _ensure_on_screen(self):
+        """Restore and re-position the floating button safely on screen."""
+        if not getattr(self, '_allow_close', False):
+            if self.isMinimized():
+                self.showNormal()
+            if not self.isVisible():
+                self.show()
+            self._constrain_to_screen()
+            self.raise_()
+
     # ── TTS Bridge Methods ───────────────────────────────────────────────────
     def start_anim(self):
         self.set_state("speaking")
 
     def stop_anim(self):
         self.set_state("idle")
+

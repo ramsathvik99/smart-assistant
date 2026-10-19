@@ -88,10 +88,23 @@ class RequestLatencyTracker:
         tts_first_audio_lat = self._diff_ms("utterance_end_timestamp", "tts_first_audio_timestamp") or tts_synth_lat
         playback_dur = self._diff_ms("tts_playback_start_timestamp", "tts_playback_end_timestamp")
         
-        # End-to-end: utterance_end to playback_end (or first_audio if playback ongoing)
-        total_e2e = self._diff_ms("utterance_end_timestamp", "tts_playback_end_timestamp")
-        if total_e2e is None:
-            total_e2e = self._diff_ms("utterance_end_timestamp", "tts_first_audio_timestamp")
+        # End-to-end: start of request (utterance_end, transcription_complete, routing_start, or capture_start)
+        # to end of interaction (tts_playback_end, tts_first_audio, text_answer_available, or routing_complete)
+        e2e_start = (
+            self.timestamps.get("utterance_end_timestamp")
+            or self.timestamps.get("transcription_complete_timestamp")
+            or self.timestamps.get("routing_start_timestamp")
+            or self.timestamps.get("capture_start_timestamp")
+        )
+        e2e_end = (
+            self.timestamps.get("tts_playback_end_timestamp")
+            or self.timestamps.get("tts_first_audio_timestamp")
+            or self.timestamps.get("text_answer_available_timestamp")
+            or self.timestamps.get("routing_complete_timestamp")
+        )
+        total_e2e = None
+        if e2e_start is not None and e2e_end is not None:
+            total_e2e = max(0.0, (e2e_end - e2e_start) * 1000.0)
 
         return {
             "utterance capture & EOS latency": eos_lat,
