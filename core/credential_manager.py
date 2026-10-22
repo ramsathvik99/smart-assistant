@@ -242,6 +242,23 @@ def mask_credential(val: Optional[str]) -> str:
     return f"{s[:4]}••••••••{s[-4:]}"
 
 
+def is_masked_credential(val: Optional[str]) -> bool:
+    """
+    Returns True if the string represents a masked credential or placeholder
+    (e.g., contains masking bullets, ellipses, or placeholder tags).
+    """
+    if not val:
+        return False
+    s = str(val).strip()
+    if not s:
+        return False
+    if "•" in s or "..." in s or "***" in s:
+        return True
+    if s.lower() in ("[protected]", "protected", "[masked]", "masked", "••••••••"):
+        return True
+    return False
+
+
 def sanitize_log_message(msg: str) -> str:
     """
     Redacts any potential API keys, authorization tokens, or sensitive URL params from string messages.
@@ -349,11 +366,19 @@ class CredentialManager:
             except Exception:
                 pass
 
-        # Check runtime context
+        # Check runtime context for authenticated user ID
         try:
             from instance.config import settings
             curr = getattr(settings, "CURRENT_USER_ID", None)
-            if curr:
+            if curr and int(curr) > 0:
+                return int(curr)
+        except Exception:
+            pass
+
+        try:
+            from core.assistant_core import assistant_core
+            curr = assistant_core.get_current_user_id()
+            if curr and int(curr) > 0:
                 return int(curr)
         except Exception:
             pass
@@ -474,9 +499,18 @@ class CredentialManager:
         """
         Cross-thread and cross-process lock manager for a user's vault.
         Combines process-level threading.RLock with OS-level file locking.
+        Prevents inner nested calls on the same thread from timing out on OS file locks.
         """
         thread_lock = self._get_user_lock(user_id)
         with thread_lock:
+            if not hasattr(self, "_active_file_locks"):
+                self._active_file_locks = threading.local()
+
+            held = getattr(self._active_file_locks, "held_users", set())
+            if user_id in held:
+                yield
+                return
+
             lock_path = os.path.join(self._vault_dir, f"user_{user_id}.lock")
             fd = None
             start_t = time.time()
@@ -502,9 +536,12 @@ class CredentialManager:
             if not acquired and fd is None:
                 logger.debug(f"Vault inter-process lock acquisition timed out for user {user_id}; proceeding under thread lock.")
 
+            held.add(user_id)
+            self._active_file_locks.held_users = held
             try:
                 yield
             finally:
+                held.discard(user_id)
                 if fd is not None:
                     try:
                         if os.name == "nt":
@@ -772,6 +809,30 @@ class CredentialManager:
                 results[prov] = val
         return results
 
+    def get_credential_status(self, user_context: Any, provider_name: str) -> str:
+        """
+        Returns the verified status of a user's credential (e.g. valid, insufficient_balance, etc.).
+        """
+        uid = self._resolve_user_id(user_context)
+        if not uid or uid <= 0:
+            return "unconfigured"
+        prov = provider_name.strip().lower()
+        try:
+            from core.db_pool import get_db_pool
+            pool = get_db_pool()
+            if pool and pool.is_healthy():
+                with pool.get_cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM user_api_credentials WHERE user_id = %s AND provider = %s LIMIT 1;",
+                        (uid, prov)
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        return str(row[0]).strip().lower()
+        except Exception:
+            pass
+        return "untested"
+
     def save_credential(self, user_context: Any, provider_name: str, credential_value: str) -> bool:
         """
         Encrypts and persists an API key or credential for the given user.
@@ -786,6 +847,10 @@ class CredentialManager:
         clean_val = str(credential_value or "").strip()
         if not clean_val:
             return self.delete_credential(user_context, provider_name)
+
+        if is_masked_credential(clean_val):
+            logger.warning(f"Refusing to overwrite credential with masked placeholder for user {uid} provider {prov}.")
+            return True
 
         encrypted = self._encrypt_for_user(clean_val, uid)
         masked = mask_credential(clean_val)
@@ -1029,10 +1094,50 @@ class CredentialManager:
     ) -> Dict[str, Any]:
         """
         Validates connectivity and credentials with a bounded, safe HTTP probe.
-        Does not perform consequential actions or leak keys.
+        Persists status when validating a stored credential.
+        """
+        result = self._probe_provider_endpoint(user_context, provider_name, candidate_key)
+        if candidate_key is None:
+            uid = self._resolve_user_id(user_context)
+            if uid > 0:
+                new_status = result.get("status", "error")
+                prov = provider_name.strip().lower()
+                try:
+                    from core.db_pool import get_db_pool
+                    pool = get_db_pool()
+                    if pool and pool.is_healthy():
+                        with pool.get_cursor() as cur:
+                            cur.execute(
+                                "UPDATE user_api_credentials SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s AND provider = %s;",
+                                (new_status, uid, prov)
+                            )
+                except Exception:
+                    pass
+                try:
+                    with self._user_file_lock(uid):
+                        vault = self._load_vault_for_user(uid)
+                        vault[f"{prov}_status"] = new_status
+                        self._save_vault_unlocked(uid, vault)
+                except Exception:
+                    pass
+        return result
+
+    def _probe_provider_endpoint(
+        self,
+        user_context: Any,
+        provider_name: str,
+        candidate_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Internal probe engine across providers.
         """
         import requests
         prov = provider_name.strip().lower()
+
+        # Guard against masked candidates being tested as raw keys
+        if candidate_key is not None and is_masked_credential(candidate_key):
+            candidate_key = None
+
         raw_key = str(candidate_key or "").strip() if candidate_key is not None else str(self.get_credential(user_context, prov) or "").strip()
 
         if prov != "ollama":
@@ -1090,12 +1195,31 @@ class CredentialManager:
             elif prov == "openai":
                 headers = {"Authorization": f"Bearer {key_to_test}", "Content-Type": "application/json"}
                 resp = requests.get("https://api.openai.com/v1/models", headers=headers, timeout=5.0)
-                if resp.status_code == 200:
-                    return {"success": True, "status": "valid", "message": "OpenAI connection verified."}
-                elif resp.status_code in (401, 403):
+                if resp.status_code in (401, 403):
                     return {"success": False, "status": "invalid_key", "message": "OpenAI rejected key (Invalid API Key)."}
                 elif resp.status_code == 429:
                     return {"success": False, "status": "rate_limited", "message": "OpenAI quota exhausted (HTTP 429)."}
+                elif resp.status_code == 200:
+                    # Minimal chat completion probe to verify quota / credit balance
+                    try:
+                        probe_resp = requests.post(
+                            "https://api.openai.com/v1/chat/completions",
+                            headers=headers,
+                            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
+                            timeout=6.0
+                        )
+                        if probe_resp.status_code == 200:
+                            return {"success": True, "status": "valid", "message": "OpenAI connection and balance verified."}
+                        p_text = probe_resp.text.lower()
+                        if "insufficient_quota" in p_text or "exceeded your current quota" in p_text or "billing" in p_text or "no credits" in p_text:
+                            return {"success": False, "status": "insufficient_balance", "message": "OpenAI account quota/credit balance exhausted. Please add credits at platform.openai.com/billing."}
+                        elif probe_resp.status_code == 429:
+                            return {"success": False, "status": "rate_limited", "message": "OpenAI rate limit reached (HTTP 429). Please retry later."}
+                        elif probe_resp.status_code in (401, 403):
+                            return {"success": False, "status": "invalid_key", "message": "OpenAI rejected key (Invalid API Key)."}
+                    except Exception:
+                        pass
+                    return {"success": True, "status": "valid", "message": "OpenAI connection verified."}
                 else:
                     return {"success": False, "status": "error", "message": f"OpenAI HTTP {resp.status_code}."}
 
@@ -1103,55 +1227,255 @@ class CredentialManager:
                 url = "https://generativelanguage.googleapis.com/v1beta/models"
                 headers = {"x-goog-api-key": key_to_test}
                 resp = requests.get(url, headers=headers, timeout=5.0)
-                if resp.status_code == 200:
-                    return {"success": True, "status": "valid", "message": "Google Gemini connection verified."}
-                elif resp.status_code in (400, 401, 403):
+                if resp.status_code in (400, 401, 403):
                     return {"success": False, "status": "invalid_key", "message": "Gemini rejected API key."}
                 elif resp.status_code == 429:
-                    return {"success": False, "status": "rate_limited", "message": "Gemini quota or rate limit reached."}
+                    return {"success": False, "status": "rate_limited", "message": "Gemini quota or rate limit reached (HTTP 429)."}
+                elif resp.status_code == 200:
+                    # Minimal generation probe with adequate token budget to test inference
+                    try:
+                        p_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
+                        p_res = requests.post(
+                            p_url,
+                            headers={"Content-Type": "application/json", "x-goog-api-key": key_to_test},
+                            json={"contents": [{"parts": [{"text": "ping"}]}], "generationConfig": {"temperature": 0.1, "maxOutputTokens": 800}},
+                            timeout=6.0
+                        )
+                        if p_res.status_code == 200:
+                            return {"success": True, "status": "valid", "message": "Google Gemini connection and inference verified."}
+                        p_text = p_res.text.lower()
+                        if p_res.status_code == 429:
+                            if "quota" in p_text or "billing" in p_text or "exceeded your current quota" in p_text:
+                                return {"success": False, "status": "quota_exhausted", "message": "Gemini free-tier request quota exhausted for today. Please retry later or upgrade at ai.google.dev."}
+                            return {"success": False, "status": "rate_limited", "message": "Gemini rate limit reached (HTTP 429)."}
+                    except Exception:
+                        pass
+                    return {"success": True, "status": "valid", "message": "Google Gemini connection verified."}
                 else:
                     return {"success": False, "status": "error", "message": f"Gemini HTTP {resp.status_code}."}
 
             elif prov == "deepseek":
                 headers = {"Authorization": f"Bearer {key_to_test}", "Content-Type": "application/json"}
                 resp = requests.get("https://api.deepseek.com/models", headers=headers, timeout=5.0)
-                if resp.status_code == 200:
-                    return {"success": True, "status": "valid", "message": "DeepSeek connection verified."}
-                elif resp.status_code in (401, 403):
+                if resp.status_code in (401, 403):
                     return {"success": False, "status": "invalid_key", "message": "DeepSeek rejected API key."}
-                elif resp.status_code == 402:
-                    return {"success": False, "status": "quota_exhausted", "message": "DeepSeek insufficient balance."}
+                elif resp.status_code == 402 or "insufficient" in resp.text.lower():
+                    return {"success": False, "status": "insufficient_balance", "message": "DeepSeek insufficient balance (HTTP 402). Please top up credits at platform.deepseek.com."}
+                elif resp.status_code == 200:
+                    # Minimal chat probe to check actual balance
+                    try:
+                        probe_resp = requests.post(
+                            "https://api.deepseek.com/chat/completions",
+                            headers=headers,
+                            json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
+                            timeout=6.0
+                        )
+                        if probe_resp.status_code == 200:
+                            return {"success": True, "status": "valid", "message": "DeepSeek connection and balance verified."}
+                        p_text = probe_resp.text.lower()
+                        if probe_resp.status_code == 402 or "insufficient balance" in p_text:
+                            return {"success": False, "status": "insufficient_balance", "message": "DeepSeek account balance is insufficient (HTTP 402). Please top up credits at platform.deepseek.com."}
+                        elif probe_resp.status_code in (401, 403):
+                            return {"success": False, "status": "invalid_key", "message": "DeepSeek rejected API key."}
+                        elif probe_resp.status_code == 429:
+                            return {"success": False, "status": "rate_limited", "message": "DeepSeek rate limit reached (HTTP 429)."}
+                    except Exception:
+                        pass
+                    return {"success": True, "status": "valid", "message": "DeepSeek connection verified."}
                 else:
                     return {"success": False, "status": "error", "message": f"DeepSeek HTTP {resp.status_code}."}
 
             elif prov == "anthropic":
-                headers = {
+                anthropic_headers = {
                     "x-api-key": key_to_test,
                     "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
+                    "User-Agent": "Friday-SmartAssistant/2.0"
                 }
+
+                def _extract_anthropic_err(resp_obj: Any) -> Tuple[str, str]:
+                    try:
+                        data = resp_obj.json()
+                        err = data.get("error", {})
+                        if isinstance(err, dict):
+                            e_type = str(err.get("type") or "")
+                            e_msg = str(err.get("message") or "")
+                            return e_type, sanitize_log_message(e_msg)
+                        return "", sanitize_log_message(str(err))
+                    except Exception:
+                        return "", sanitize_log_message(resp_obj.text[:200])
+
+                # 1. First probe models catalog to verify authentication & retrieve available models
+                models_resp = None
+                available_models: List[str] = []
+                try:
+                    models_resp = requests.get(
+                        "https://api.anthropic.com/v1/models",
+                        headers=anthropic_headers,
+                        timeout=5.0
+                    )
+                except Exception as ex:
+                    logger.debug(f"Anthropic /v1/models probe network error: {ex}")
+
+                if models_resp is not None:
+                    if models_resp.status_code == 200:
+                        try:
+                            m_data = models_resp.json().get("data", [])
+                            available_models = [
+                                str(m.get("id")) for m in m_data if isinstance(m, dict) and m.get("id")
+                            ]
+                        except Exception:
+                            pass
+                    elif models_resp.status_code in (401, 403):
+                        e_type, e_msg = _extract_anthropic_err(models_resp)
+                        return {
+                            "success": False,
+                            "status": "invalid_key",
+                            "message": f"Anthropic rejected API key: {e_msg or 'Invalid x-api-key.'}"
+                        }
+                    elif models_resp.status_code == 429:
+                        e_type, e_msg = _extract_anthropic_err(models_resp)
+                        return {
+                            "success": False,
+                            "status": "rate_limited",
+                            "message": f"Anthropic rate limit reached: {e_msg or 'Rate limited.'}"
+                        }
+
+                # Resolve model to probe
+                pref_model = ""
+                try:
+                    from core.configuration_service import get_configuration_service
+                    pref_model = str(get_configuration_service().get_preference(self._resolve_user_id(user_context), "anthropic_model", "") or "").strip()
+                except Exception:
+                    pref_model = ""
+                if not pref_model:
+                    try:
+                        from instance.config import settings
+                        pref_model = str(getattr(settings, "ANTHROPIC_MODEL", "")).strip()
+                    except Exception:
+                        pref_model = ""
+                if not pref_model:
+                    pref_model = "claude-3-5-sonnet-20241022"
+
+                selected_model = pref_model
+                if available_models:
+                    if pref_model not in available_models:
+                        # Find compatible fallback from available models
+                        compatibles = [
+                            m for m in available_models
+                            if "claude-3-5-sonnet" in m or "claude-3-5-haiku" in m or "claude-3-haiku" in m or "claude-3-opus" in m or "claude" in m
+                        ]
+                        if compatibles:
+                            selected_model = compatibles[0]
+                        else:
+                            selected_model = available_models[0]
+                        try:
+                            from core.configuration_service import get_configuration_service
+                            get_configuration_service().set_preference(self._resolve_user_id(user_context), "anthropic_model", selected_model)
+                        except Exception:
+                            pass
+
+                # 2. Probe /v1/messages with the resolved model
+                msg_headers = dict(anthropic_headers)
+                msg_headers["content-type"] = "application/json"
                 resp = requests.post(
                     "https://api.anthropic.com/v1/messages",
-                    headers=headers,
+                    headers=msg_headers,
                     json={
-                        "model": "claude-3-5-sonnet-20241022",
-                        "max_tokens": 1,
+                        "model": selected_model,
+                        "max_tokens": 10,
                         "messages": [{"role": "user", "content": "ping"}]
                     },
                     timeout=5.0
                 )
+
                 if resp.status_code == 200:
-                    return {"success": True, "status": "valid", "message": "Anthropic Claude connection verified."}
-                elif resp.status_code in (401, 403):
-                    return {"success": False, "status": "invalid_key", "message": "Anthropic rejected API key."}
-                elif resp.status_code == 429:
-                    return {"success": False, "status": "rate_limited", "message": "Anthropic rate limit reached."}
+                    model_note = f" (Model: {selected_model})" if selected_model else ""
+                    return {
+                        "success": True,
+                        "status": "valid",
+                        "message": f"Anthropic Claude connection verified{model_note}.",
+                        "model": selected_model,
+                        "available_models": available_models
+                    }
+
+                e_type, e_msg = _extract_anthropic_err(resp)
+                low_msg = e_msg.lower()
+
+                if resp.status_code in (401, 403) or "authentication" in e_type.lower():
+                    return {
+                        "success": False,
+                        "status": "invalid_key",
+                        "message": f"Anthropic rejected API key: {e_msg or 'Invalid x-api-key.'}"
+                    }
+                elif resp.status_code == 429 or "rate_limit" in e_type.lower():
+                    return {
+                        "success": False,
+                        "status": "rate_limited",
+                        "message": f"Anthropic rate limit reached: {e_msg or 'HTTP 429 rate limit.'}"
+                    }
+                elif "credit balance" in low_msg or "billing" in low_msg or "too low" in low_msg or "plans & billing" in low_msg:
+                    return {
+                        "success": False,
+                        "status": "insufficient_balance",
+                        "message": f"Anthropic account error: {e_msg}",
+                        "model": selected_model
+                    }
+                elif resp.status_code in (400, 404) and ("model" in low_msg and ("not found" in low_msg or "not available" in low_msg or "access" in low_msg)):
+                    avail_hint = f" Available models: {', '.join(available_models[:3])}" if available_models else ""
+                    return {
+                        "success": False,
+                        "status": "model_unavailable",
+                        "message": f"Anthropic model '{selected_model}' is not available for this account.{avail_hint}",
+                        "model": selected_model,
+                        "available_models": available_models
+                    }
+                elif resp.status_code == 400:
+                    return {
+                        "success": False,
+                        "status": "bad_request",
+                        "message": f"Anthropic error ({e_type or 'invalid_request'}): {e_msg or 'HTTP 400 bad request.'}",
+                        "model": selected_model
+                    }
                 else:
-                    return {"success": False, "status": "error", "message": f"Anthropic HTTP {resp.status_code}."}
+                    return {
+                        "success": False,
+                        "status": "error",
+                        "message": f"Anthropic HTTP {resp.status_code}: {e_msg or 'Request failed.'}"
+                    }
 
             elif prov == "huggingface":
-                headers = {"Authorization": f"Bearer {key_to_test}"}
-                resp = requests.get("https://huggingface.co/api/whoami-v2", headers=headers, timeout=5.0)
+                headers = {"Authorization": f"Bearer {key_to_test}", "Content-Type": "application/json"}
+                # Check Inference Provider router access
+                router_resp = None
+                try:
+                    router_resp = requests.post(
+                        "https://router.huggingface.co/v1/chat/completions",
+                        headers=headers,
+                        json={"model": "mistralai/Mistral-7B-Instruct-v0.2", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
+                        timeout=5.0
+                    )
+                except Exception:
+                    router_resp = None
+
+                if router_resp is not None:
+                    if router_resp.status_code == 200:
+                        return {"success": True, "status": "valid", "message": "Hugging Face token and inference verified."}
+                    r_text = router_resp.text.lower()
+                    if "does not have sufficient permissions to call inference providers" in r_text or (router_resp.status_code == 403 and "permission" in r_text):
+                        return {
+                            "success": False,
+                            "status": "insufficient_permissions",
+                            "message": "Hugging Face token lacks Inference Provider permissions. Please generate a token with 'Make calls to Inference Providers' permission enabled at huggingface.co/settings/tokens."
+                        }
+                    elif router_resp.status_code in (401, 403):
+                        return {"success": False, "status": "invalid_key", "message": "Hugging Face rejected token (HTTP 401 Unauthorized)."}
+                    elif router_resp.status_code == 402 or "no remaining credits" in r_text:
+                        return {"success": False, "status": "insufficient_balance", "message": "Hugging Face account has no remaining credits (HTTP 402)."}
+                    elif router_resp.status_code == 429:
+                        return {"success": False, "status": "rate_limited", "message": "Hugging Face rate limit reached (HTTP 429)."}
+
+                # Secondary probe: check account whoami
+                resp = requests.get("https://huggingface.co/api/whoami-v2", headers={"Authorization": f"Bearer {key_to_test}"}, timeout=5.0)
                 if resp.status_code == 200:
                     return {"success": True, "status": "valid", "message": "Hugging Face token verified."}
                 else:

@@ -36,6 +36,7 @@ from core.environment_observer import (
 class OutcomeStatus(str, Enum):
     VERIFIED_SUCCESS = "VERIFIED_SUCCESS"
     VERIFIED_FAILURE = "VERIFIED_FAILURE"
+    PARTIAL_COMPLETION = "PARTIAL_COMPLETION"
     UNCERTAIN = "UNCERTAIN"
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
@@ -1500,6 +1501,531 @@ class VerificationAdapters:
                 verification_method="chatgpt_memory_inspection"
             )
 
+    @staticmethod
+    def verify_browser_action(
+        expected: ExpectedOutcome,
+        post_obs: Dict[str, Any],
+        state_diff: Optional[StateDifference] = None,
+        action_result: Optional[Dict[str, Any]] = None
+    ) -> OutcomeVerificationResult:
+        """
+        Verify browser automation, scenarios, inspections, and visual diffs.
+        Distinguishes VERIFIED_SUCCESS, VERIFIED_FAILURE, PARTIAL_COMPLETION, and UNCERTAIN.
+        """
+        if not action_result:
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.UNCERTAIN,
+                verified=False,
+                confidence=ConfidenceLevel.UNKNOWN,
+                failure_reason="No action result evidence available to verify browser outcome.",
+                verification_method="browser_verification"
+            )
+
+        # 1. Multi-Step Browser Scenario
+        if "action_count" in action_result or action_result.get("action") == "execute_browser_scenario":
+            total = action_result.get("action_count", 0)
+            completed = action_result.get("completed_steps", 0)
+            status_str = action_result.get("status", "")
+            err = action_result.get("error")
+
+            if status_str == "completed" and completed == total and total > 0:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"completed_steps": total, "total_steps": total},
+                    observed_state={"status": "completed", "completed_steps": completed, "final_url": action_result.get("final_url")},
+                    verification_method="browser_scenario_verification"
+                )
+            elif status_str == "partial" or (0 < completed < total):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.PARTIAL_COMPLETION,
+                    verified=False,
+                    confidence=ConfidenceLevel.MEDIUM,
+                    expected_state={"total_steps": total},
+                    observed_state={"completed_steps": completed, "error": err},
+                    failure_reason=f"Scenario partially completed ({completed}/{total} steps): {err}",
+                    verification_method="browser_scenario_verification",
+                    retry_possible=True
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"total_steps": total},
+                    observed_state={"completed_steps": completed, "error": err},
+                    failure_reason=f"Browser scenario failed: {err or 'No steps completed.'}",
+                    verification_method="browser_scenario_verification",
+                    retry_possible=(status_str != "validation_error")
+                )
+
+        # 2. Visual Diff / Screenshot Comparison
+        if "compared_pixels" in action_result or "channel_threshold" in action_result:
+            diff_status = action_result.get("status")
+            if diff_status in ("identical", "different"):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"comparison_performed": True},
+                    observed_state={
+                        "diff_status": diff_status,
+                        "compared_pixels": action_result.get("compared_pixels"),
+                        "changed_pixels": action_result.get("changed_pixels"),
+                        "changed_ratio": action_result.get("changed_ratio")
+                    },
+                    verification_method="visual_diff_verification"
+                )
+            elif diff_status == "dimension_mismatch":
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason="Visual diff failed: screenshot dimensions mismatched.",
+                    observed_state={"diff_status": "dimension_mismatch"},
+                    verification_method="visual_diff_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.MEDIUM,
+                    failure_reason=action_result.get("error", "Visual diff failed."),
+                    verification_method="visual_diff_verification"
+                )
+
+        # 3. Web Page Inspection
+        if "metadata" in action_result and "text_preview" in action_result:
+            if action_result.get("success") is True and action_result.get("title"):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"inspected_url": expected.target},
+                    observed_state={"title": action_result.get("title"), "final_url": action_result.get("final_url")},
+                    verification_method="web_inspection_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("error") or "Web page inspection failed.",
+                    verification_method="web_inspection_verification",
+                    retry_possible=True
+                )
+
+        # 3b. Offline Web Network Capture (HAR) Inspection (REA Integration)
+        if action_result.get("format") == "har" or "total_requests" in action_result:
+            if action_result.get("success") is True:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"har_inspected": True},
+                    observed_state={
+                        "format": "har",
+                        "total_requests": action_result.get("total_requests"),
+                        "status_distribution": action_result.get("status_distribution"),
+                        "artifact_sha": action_result.get("artifact", {}).get("sha256")
+                    },
+                    verification_method="har_network_capture_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or "Offline HAR network capture inspection failed.",
+                    verification_method="har_network_capture_verification",
+                    retry_possible=False
+                )
+
+        # 3c. Read-only SQLite Database Inspection (REA Integration)
+        if action_result.get("engine") == "sqlite" or ("schema" in action_result and "database_encoding" in action_result):
+            if action_result.get("success") is True:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"sqlite_inspected": True},
+                    observed_state={
+                        "engine": "sqlite",
+                        "tables_count": len(action_result.get("schema", {}).get("tables", [])),
+                        "artifact_sha": action_result.get("artifact", {}).get("sha256")
+                    },
+                    verification_method="sqlite_database_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or "Read-only SQLite database inspection failed.",
+                    verification_method="sqlite_database_verification",
+                    retry_possible=False
+                )
+
+        # 3d. Electron Security Fuse Inspection (REA Integration)
+        if "classification" in action_result and ("fuses" in action_result or "wire_version" in action_result):
+            if action_result.get("success") is True and action_result.get("classification") in ("CONFIRMED", "ABSENT", "INCONCLUSIVE"):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"electron_fuses_inspected": True},
+                    observed_state={
+                        "classification": action_result.get("classification"),
+                        "sentinel_count": action_result.get("sentinel_count"),
+                        "artifact_format": action_result.get("artifact", {}).get("format")
+                    },
+                    verification_method="electron_fuses_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or "Electron security fuse inspection failed.",
+                    verification_method="electron_fuses_verification",
+                    retry_possible=False
+                )
+
+        # 3e. Browser Event Listeners Inspection (REA Integration)
+        if "selected_node" in action_result and "listeners" in action_result:
+            if action_result.get("success") is True:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"event_listeners_inspected": True},
+                    observed_state={
+                        "selected_node": action_result.get("selected_node"),
+                        "listener_count": len(action_result.get("listeners", [])),
+                        "sources_count": len(action_result.get("sources", []))
+                    },
+                    verification_method="web_event_listeners_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or action_result.get("error") or "Web event listener inspection failed.",
+                    verification_method="web_event_listeners_verification",
+                    retry_possible=False
+                )
+
+        # 3f. Browser Runtime Execution Observation (REA Integration)
+        if "coverage" in action_result and "console_messages" in action_result:
+            if action_result.get("success") is True:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"web_execution_observed": True},
+                    observed_state={
+                        "coverage_state": action_result.get("coverage", {}).get("state"),
+                        "console_count": len(action_result.get("console_messages", [])),
+                        "errors_count": len(action_result.get("page_errors", [])),
+                        "requests_count": len(action_result.get("network_requests", []))
+                    },
+                    verification_method="web_execution_observation_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or action_result.get("error") or "Web execution observation failed.",
+                    verification_method="web_execution_observation_verification",
+                    retry_possible=False
+                )
+
+        # 3g. Browser Script Inspection (REA Integration)
+        if "scripts" in action_result and "source_maps_detected" in action_result:
+            if action_result.get("success") is True:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"web_scripts_inspected": True},
+                    observed_state={
+                        "scripts_count": action_result.get("scripts_count", len(action_result.get("scripts", []))),
+                        "source_maps_count": len(action_result.get("source_maps_detected", []))
+                    },
+                    verification_method="web_scripts_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or action_result.get("error") or "Web scripts inspection failed.",
+                    verification_method="web_scripts_verification",
+                    retry_possible=False
+                )
+
+        # 3h. Browser Source Location Tracing & Error Stack Correlation (REA Integration)
+        if ("mapped_position" in action_result and "requested_position" in action_result) or ("correlated_frames" in action_result and "reconstructed_stack" in action_result):
+            if action_result.get("success") is True:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"source_location_verified": True},
+                    observed_state={
+                        "state": action_result.get("state"),
+                        "mapped_position": action_result.get("mapped_position"),
+                        "frames_mapped": action_result.get("frames_mapped")
+                    },
+                    verification_method="web_source_location_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or action_result.get("error") or "Web source location tracing failed.",
+                    verification_method="web_source_location_verification",
+                    retry_possible=False
+                )
+
+        # 3i. Source-Grounded Browser Execution Diagnostics (REA Integration)
+        if "reconciled_exceptions" in action_result and "reconciled_requests" in action_result:
+            if action_result.get("success") is True:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"execution_diagnostics_verified": True},
+                    observed_state={
+                        "assessment": action_result.get("assessment"),
+                        "exceptions_count": len(action_result.get("reconciled_exceptions", [])),
+                        "requests_count": len(action_result.get("reconciled_requests", [])),
+                        "executed_functions_count": len(action_result.get("executed_functions", []))
+                    },
+                    verification_method="web_execution_diagnostics_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or action_result.get("error") or "Web execution diagnostics failed.",
+                    verification_method="web_execution_diagnostics_verification",
+                    retry_possible=False
+                )
+
+        # 3j. Grounded Browser Interaction Planning & Verified Actions (REA Integration)
+        if (
+            action_result.get("action") in ("execute_verified_browser_action", "execute_adaptive_browser_action")
+            or "recovery_trace" in action_result
+            or "diff" in action_result
+            or action_result.get("status") in ("verified_success", "verified_failure", "unchanged_already_satisfied", "confirmation_required", "intervention_required", "ambiguous", "inconclusive", "recovery_exhausted", "retry_suppressed")
+            or (isinstance(action_result.get("data"), dict) and action_result.get("data", {}).get("status") in ("verified_success", "verified_failure", "unchanged_already_satisfied", "confirmation_required", "intervention_required", "ambiguous", "inconclusive", "recovery_exhausted", "retry_suppressed"))
+        ):
+            inner_data = action_result.get("data") if isinstance(action_result.get("data"), dict) else {}
+            act_status = inner_data.get("status") or action_result.get("status")
+            eff_msg = inner_data.get("message") or action_result.get("message") or action_result.get("response")
+
+            if act_status in ("verified_success", "success"):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"post_action_verified": True},
+                    observed_state={
+                        "action": action_result.get("action"),
+                        "status": "verified_success",
+                        "diff": inner_data.get("diff") or action_result.get("diff", "changed"),
+                        "final_url": inner_data.get("final_url") or action_result.get("final_url")
+                    },
+                    verification_method="verified_browser_action_verification"
+                )
+            elif act_status == "unchanged_already_satisfied":
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"already_satisfied": True},
+                    observed_state={
+                        "action": action_result.get("action"),
+                        "status": "unchanged_already_satisfied",
+                        "action_skipped": True,
+                        "diff": "unchanged"
+                    },
+                    verification_method="verified_browser_action_verification"
+                )
+            elif act_status == "confirmation_required":
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.UNCERTAIN,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"user_confirmation": True},
+                    observed_state={"status": "confirmation_required", "consequential": True},
+                    failure_reason=eff_msg or "Consequential browser action requires user confirmation.",
+                    verification_method="verified_browser_action_verification",
+                    retry_possible=True
+                )
+            elif act_status in ("ambiguous", "inconclusive", "retry_suppressed"):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.UNCERTAIN,
+                    verified=False,
+                    confidence=ConfidenceLevel.LOW,
+                    expected_state={"verifiable_outcome": True},
+                    observed_state={"status": act_status, "diff": inner_data.get("diff") or action_result.get("diff", "unknown")},
+                    failure_reason=eff_msg or f"Action executed with status '{act_status}'.",
+                    verification_method="verified_browser_action_verification",
+                    retry_possible=(act_status != "retry_suppressed")
+                )
+            elif act_status in ("intervention_required", "recovery_exhausted"):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"unrestricted_access": True},
+                    observed_state={
+                        "status": act_status,
+                        "barrier": inner_data.get("barrier_type") or action_result.get("barrier_type"),
+                        "barrier_detection": inner_data.get("barrier_detection") or action_result.get("barrier_detection")
+                    },
+                    failure_reason=eff_msg or f"Adaptive recovery halted: {act_status}.",
+                    verification_method="verified_browser_action_verification",
+                    retry_possible=False
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=inner_data.get("error") or action_result.get("error") or eff_msg or "Verified browser action failed.",
+                    verification_method="verified_browser_action_verification",
+                    retry_possible=True
+                )
+
+        # 3k. Web Script Export & Manifest Verification (REA Phase 7)
+        if (
+            expected.action == "export_web_scripts"
+            or action_result.get("action") == "export_web_scripts"
+            or ("manifest_path" in action_result and "total_scripts" in action_result)
+        ):
+            act_status = action_result.get("status")
+            unavailable = action_result.get("unavailable_count") or 0
+            exported = action_result.get("exported_count") or 0
+            if act_status == "partial" or (unavailable > 0 and exported > 0):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.PARTIAL_COMPLETION,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"scripts_exported": True, "manifest_generated": True},
+                    observed_state={
+                        "manifest_path": action_result.get("manifest_path"),
+                        "total_scripts": action_result.get("total_scripts"),
+                        "exported_count": action_result.get("exported_count"),
+                        "unavailable_count": action_result.get("unavailable_count"),
+                        "output_directory": action_result.get("output_directory")
+                    },
+                    failure_reason=action_result.get("message") or "Partial web script export: some assets were unavailable.",
+                    verification_method="web_script_export_verification",
+                    retry_possible=False
+                )
+            elif action_result.get("success") is True and action_result.get("manifest_path") and act_status in ("success", "exported"):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"scripts_exported": True, "manifest_generated": True},
+                    observed_state={
+                        "manifest_path": action_result.get("manifest_path"),
+                        "total_scripts": action_result.get("total_scripts"),
+                        "total_bytes": action_result.get("total_bytes"),
+                        "output_directory": action_result.get("output_directory")
+                    },
+                    verification_method="web_script_export_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or action_result.get("error") or "Web script export failed.",
+                    verification_method="web_script_export_verification",
+                    retry_possible=False
+                )
+
+        # 3l. Web Module Trace Verification (REA Phase 8)
+        if (
+            expected.action == "trace_web_module_imports"
+            or action_result.get("action") == "trace_web_module_imports"
+            or ("total_imports" in action_result and "source_file" in action_result)
+        ):
+            act_status = action_result.get("status")
+            if action_result.get("success") is True and act_status in ("success", "no_imports"):
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_SUCCESS,
+                    verified=True,
+                    confidence=ConfidenceLevel.HIGH,
+                    expected_state={"module_imports_traced": True},
+                    observed_state={
+                        "manifest_path": action_result.get("manifest_path"),
+                        "script_index": action_result.get("script_index"),
+                        "total_imports": action_result.get("total_imports"),
+                        "resolved_count": action_result.get("resolved_count"),
+                        "candidate_count": action_result.get("candidate_count"),
+                        "importer_url": action_result.get("importer_url")
+                    },
+                    verification_method="web_module_trace_verification"
+                )
+            else:
+                return OutcomeVerificationResult(
+                    status=OutcomeStatus.VERIFIED_FAILURE,
+                    verified=False,
+                    confidence=ConfidenceLevel.HIGH,
+                    failure_reason=action_result.get("message") or action_result.get("error") or "Web module trace failed.",
+                    verification_method="web_module_trace_verification",
+                    retry_possible=False
+                )
+
+        # 4. Standard Browser Interaction (click, fill, search, navigate)
+        is_ok = bool(action_result.get("status") in ("success", True) or action_result.get("success") is True)
+        if not is_ok:
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_FAILURE,
+                verified=False,
+                confidence=ConfidenceLevel.HIGH,
+                failure_reason=action_result.get("message") or action_result.get("response") or action_result.get("error") or "Browser action failed.",
+                verification_method="browser_interaction_verification",
+                retry_possible=True
+            )
+
+        # Verify real observable change
+        has_nav_change = bool(state_diff and "BROWSER_PAGE_CHANGED" in state_diff.changes)
+        final_url = action_result.get("final_url") or action_result.get("url")
+        clicked = action_result.get("clicked")
+
+        if clicked is not None or has_nav_change or final_url:
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_SUCCESS,
+                verified=True,
+                confidence=ConfidenceLevel.HIGH if (has_nav_change or clicked) else ConfidenceLevel.MEDIUM,
+                expected_state=expected.expected_state,
+                observed_state={"final_url": final_url, "clicked": clicked, "nav_changed": has_nav_change},
+                verification_method="browser_observable_state_verification"
+            )
+
+        # If only dispatched without proof of state change
+        return OutcomeVerificationResult(
+            status=OutcomeStatus.UNCERTAIN,
+            verified=True,
+            confidence=ConfidenceLevel.LOW,
+            expected_state=expected.expected_state,
+            observed_state={"status": action_result.get("status")},
+            failure_reason="Action dispatched, but real-world browser state change could not be confirmed.",
+            verification_method="browser_unconfirmed_dispatch"
+        )
+
 
 # ============================================================================
 # Central Outcome Verifier
@@ -1987,25 +2513,26 @@ class OutcomeVerifier:
     ) -> OutcomeVerificationResult:
         intent = expected.intent
 
-        if expected.action in ("open_browser_result", "open_link", "search_web") or action_result.get("action") in ("open_browser_result", "OPEN_BROWSER_RESULT", "open_link", "SEARCH") or action_result.get("is_website"):
-            if action_result.get("status") in ("success", True) or action_result.get("success") is True:
-                return OutcomeVerificationResult(
-                    status=OutcomeStatus.VERIFIED_SUCCESS,
-                    verified=True,
-                    confidence=ConfidenceLevel.HIGH,
-                    expected_state=expected.expected_state,
-                    observed_state={"action": expected.action, "url": action_result.get("url"), "query": action_result.get("query")},
-                    verification_method="browser_result_verification"
-                )
-            else:
-                return OutcomeVerificationResult(
-                    status=OutcomeStatus.FAILED,
-                    verified=False,
-                    confidence=ConfidenceLevel.HIGH,
-                    expected_state=expected.expected_state,
-                    observed_state={"action": expected.action, "error": action_result.get("response")},
-                    verification_method="browser_result_verification"
-                )
+        # Browser action verification
+        if (
+            expected.action in ("open_browser_result", "open_link", "search_web", "inspect_web_page", "browser_scenario", "compare_screenshots", "inspect_web_network_capture", "inspect_sqlite_database", "inspect_electron_fuses", "inspect_web_event_listeners", "observe_web_execution", "inspect_web_scripts", "trace_web_source_location", "correlate_browser_error_stack", "diagnose_web_execution", "execute_verified_browser_action", "execute_adaptive_browser_action", "export_web_scripts")
+            or action_result.get("action") in ("open_browser_result", "OPEN_BROWSER_RESULT", "open_link", "SEARCH", "search_web", "inspect_web_page", "execute_browser_scenario", "compare_png_screenshots", "inspect_web_network_capture", "inspect_sqlite_database", "inspect_electron_fuses", "inspect_web_event_listeners", "observe_web_execution", "inspect_web_scripts", "trace_web_source_location", "correlate_browser_error_stack", "diagnose_web_execution", "execute_verified_browser_action", "execute_adaptive_browser_action", "export_web_scripts")
+            or action_result.get("is_website")
+            or "action_count" in action_result
+            or "compared_pixels" in action_result
+            or action_result.get("format") == "har"
+            or action_result.get("engine") == "sqlite"
+            or "classification" in action_result
+            or "selected_node" in action_result
+            or "coverage" in action_result
+            or "source_maps_detected" in action_result
+            or "mapped_position" in action_result
+            or "correlated_frames" in action_result
+            or "reconciled_requests" in action_result
+            or "diff" in action_result
+            or "manifest_path" in action_result
+        ):
+            return VerificationAdapters.verify_browser_action(expected, obs_dict, state_diff, action_result)
 
         elif expected.action == "type_text":
             if action_result.get("status") in ("success", True) or action_result.get("success") is True:

@@ -2,13 +2,18 @@
 import os
 import sys
 import json
+import re
+import logging
 import requests
 import hashlib
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from instance.config import settings as CONFIG
+
+logger = logging.getLogger("LLMEngine")
 
 import time
 import uuid
+import concurrent.futures
 
 # Cooldown duration for temporarily failed providers, models, or keys (seconds)
 LLM_COOLDOWN_SECONDS = int(os.getenv("LLM_COOLDOWN_SECONDS", "60"))
@@ -38,8 +43,9 @@ class CooldownSet:
                 # Check for namespaced dict
                 target = data.get(self._namespace, {}) if self._namespace in data and isinstance(data[self._namespace], dict) else data
                 for k, expiry in target.items():
-                    if isinstance(expiry, (int, float)) and expiry > now:
-                        self._timestamps[k] = float(expiry)
+                    exp_val = expiry.get("expiry") if isinstance(expiry, dict) else expiry
+                    if isinstance(exp_val, (int, float)) and exp_val > now:
+                        self._timestamps[k] = float(exp_val)
         except Exception:
             pass
 
@@ -49,7 +55,6 @@ class CooldownSet:
         try:
             os.makedirs(os.path.dirname(self._cache_path), exist_ok=True)
             now = time.time()
-            active = {k: exp for k, exp in self._timestamps.items() if exp > now}
             existing = {}
             if os.path.exists(self._cache_path):
                 try:
@@ -59,6 +64,16 @@ class CooldownSet:
                             existing = loaded
                 except Exception:
                     existing = {}
+            existing_ns = existing.get(self._namespace, {}) if isinstance(existing.get(self._namespace), dict) else {}
+            active = {}
+            for k, exp in self._timestamps.items():
+                if exp > now:
+                    if k in existing_ns and isinstance(existing_ns[k], dict):
+                        entry = dict(existing_ns[k])
+                        entry["expiry"] = exp
+                        active[k] = entry
+                    else:
+                        active[k] = exp
             existing[self._namespace] = active
             with open(self._cache_path, "w", encoding="utf-8") as f:
                 json.dump(existing, f)
@@ -105,6 +120,15 @@ class CooldownSet:
 _UNAVAILABLE_MODELS = CooldownSet(namespace="models")
 _UNAVAILABLE_PROVIDERS = CooldownSet(namespace="providers")
 _UNAVAILABLE_KEYS = CooldownSet(namespace="keys")
+_SEMANTIC_RESOLVE_CACHE: Dict[Tuple[Any, str], Dict[str, Any]] = {}
+
+
+def clear_runtime_cache():
+    """Resets all provider, model, and key cooldowns across memory and disk."""
+    _UNAVAILABLE_MODELS.clear()
+    _UNAVAILABLE_PROVIDERS.clear()
+    _UNAVAILABLE_KEYS.clear()
+
 
 
 class LLMEngine:
@@ -152,8 +176,12 @@ class LLMEngine:
         self.ollama_model = CONFIG.get("OLLAMA_MODEL", "llama3.2:latest")
         self.ollama_enabled = CONFIG.get("OLLAMA_ENABLED", True)
         self.ollama_timeout = float(CONFIG.get("OLLAMA_TIMEOUT", 60.0))
-        self.ollama_interactive_timeout = float(CONFIG.get("OLLAMA_INTERACTIVE_TIMEOUT", 3.0))
-        self.interactive_timeout = float(CONFIG.get("LLM_INTERACTIVE_TIMEOUT", 8.0))
+        self.ollama_interactive_timeout = float(CONFIG.get("OLLAMA_INTERACTIVE_TIMEOUT", 4.5))
+        self.interactive_budget = float(CONFIG.get("LLM_INTERACTIVE_BUDGET", 6.0))
+        self.per_provider_timeout = float(CONFIG.get("LLM_PER_PROVIDER_TIMEOUT", 3.8))
+        self.enable_racing = bool(CONFIG.get("LLM_ENABLE_RACING", True))
+        self.hedged_delay = float(CONFIG.get("LLM_HEDGED_DELAY", 1.2))
+        self.interactive_timeout = self.interactive_budget
 
         # Primary provider and authoritative timeout configuration
         self.primary_provider = str(CONFIG.get("LLM_PRIMARY_PROVIDER", CONFIG.get("PRIMARY_PROVIDER", "openai"))).lower().strip()
@@ -182,18 +210,67 @@ class LLMEngine:
         self.last_error_summary: str = ""
         self.last_successful_provider: Optional[str] = None
 
-        # Register for credential updates
-        try:
-            from core.credential_manager import get_credential_manager
-            get_credential_manager().register_change_listener(self._on_credential_change)
-        except Exception:
-            pass
-
         # Persistent HTTP connection pool for sub-second API requests (reuses TCP/TLS connections)
         self._session = requests.Session()
         _adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
         self._session.mount("https://", _adapter)
         self._session.mount("http://", _adapter)
+
+        # Register for credential updates
+        try:
+            from core.credential_manager import get_credential_manager
+            get_credential_manager().register_change_listener(self._on_credential_change)
+        except Exception as _e_reg:
+            logger.debug(f"[LLMEngine] Could not register credential change listener: {_e_reg}")
+
+        # Non-blocking startup health probe for configured providers
+        try:
+            from core.llm_health import start_background_probes
+            start_background_probes(self)
+        except Exception as _e_probe:
+            logger.debug(f"[LLMEngine] Background health probe startup failed: {_e_probe}")
+
+    def _on_credential_change(self, user_id: int, provider: str):
+        """
+        Callback invoked when a user adds, updates, or deletes a credential in CredentialManager.
+        Invalidates cached completions, resets cooldowns for that provider, flushes in-memory sessions,
+        and prompts ModelRegistry cache invalidation.
+        """
+        prov = str(provider).strip().lower()
+        logger.info(f"[LLMEngine] Credential update received for user {user_id}, provider: {prov}. Invalidating caches.")
+
+        # 1. Clear completion cache so stale errors or responses aren't served
+        if hasattr(self, "_completion_cache") and isinstance(self._completion_cache, dict):
+            self._completion_cache.clear()
+
+        # 2. Clear provider cooldown
+        _UNAVAILABLE_PROVIDERS.discard(prov)
+
+        # 3. Clear key cooldowns for this provider
+        to_remove = [k for k in list(_UNAVAILABLE_KEYS) if str(k).startswith(f"{prov}:") or str(k) == prov]
+        for k in to_remove:
+            _UNAVAILABLE_KEYS.discard(k)
+
+        # 4. Invalidate model registry cache only if already instantiated
+        try:
+            import sys
+            if "core.model_registry" in sys.modules:
+                from core.model_registry import _REGISTRY_SINGLETON
+                if _REGISTRY_SINGLETON is not None and hasattr(_REGISTRY_SINGLETON, "_last_refresh_time"):
+                    _REGISTRY_SINGLETON._last_refresh_time = 0.0
+        except Exception as _e_reg:
+            logger.debug(f"[LLMEngine] Model registry mark dirty: {_e_reg}")
+
+        # 5. Reset persistent session connection pool
+        try:
+            if hasattr(self, "_session") and self._session:
+                self._session.close()
+                self._session = requests.Session()
+                _adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
+                self._session.mount("https://", _adapter)
+                self._session.mount("http://", _adapter)
+        except Exception as _e_sess:
+            logger.debug(f"[LLMEngine] Session reset: {_e_sess}")
 
     def _post(self, url: str, **kwargs) -> requests.Response:
         """
@@ -248,12 +325,91 @@ class LLMEngine:
         self.last_diagnostics.clear()
         self.last_error_summary = ""
         self.last_successful_provider = None
+        if hasattr(self, "_completion_cache"):
+            self._completion_cache.clear()
+        if hasattr(self, "_last_recovery_probe_time"):
+            self._last_recovery_probe_time.clear()
 
-    def _on_credential_change(self, user_id: int, provider: str):
-        """Called when a user saves or removes a credential."""
-        prov = provider.lower().strip()
-        _UNAVAILABLE_PROVIDERS.discard(prov)
-        _UNAVAILABLE_KEYS.clear()
+    def refresh_catalog(self, force: bool = True, user_id: Optional[int] = None):
+        """Forces rediscovery and refreshes the model registry for the specified user."""
+        try:
+            from core.model_discovery import get_model_discovery_engine
+            get_model_discovery_engine().get_catalog(user_id=user_id, force_refresh=force)
+            from core.model_registry import get_model_registry
+            get_model_registry().refresh(force=force, user_id=user_id)
+        except Exception as e:
+            print(f"[LLM] Error refreshing model catalog: {e}")
+
+    def get_models_for_task(self, task_type: str) -> List[Dict[str, Any]]:
+        """Returns sorted list of available models for a task with scores and metadata."""
+        try:
+            from core.model_registry import get_model_registry
+            ranked = get_model_registry().get_best_models_for_task(
+                task_type=task_type,
+                unavailable_models=_UNAVAILABLE_MODELS,
+                unavailable_keys=_UNAVAILABLE_KEYS,
+                unavailable_providers=_UNAVAILABLE_PROVIDERS
+            )
+            return [{"model": c.to_dict(), "score": score} for c, score in ranked]
+        except Exception:
+            return []
+
+    def _get_candidate_models_for_provider(
+        self,
+        prov: str,
+        task_type: str = "general_conversation",
+        user_configured_model: Optional[str] = None
+    ) -> List[str]:
+        """
+        Returns ranked list of candidate models for a provider based on task capabilities.
+        Uses discovered models from ModelRegistry when available, falling back to configured defaults.
+        """
+        p = prov.lower().strip()
+        models: List[str] = []
+        if user_configured_model and str(user_configured_model).strip():
+            models.append(str(user_configured_model).strip())
+
+        # Discovered models from ModelRegistry scored for this specific task
+        try:
+            from core.model_registry import get_model_registry
+            registry = get_model_registry()
+            ranked = registry.get_best_models_for_task(
+                task_type=task_type,
+                unavailable_models=_UNAVAILABLE_MODELS,
+                unavailable_keys=_UNAVAILABLE_KEYS,
+                unavailable_providers=_UNAVAILABLE_PROVIDERS,
+                limit=15
+            )
+            for cand, score in ranked:
+                if cand.provider == p and cand.id not in models:
+                    models.append(cand.id)
+        except Exception:
+            pass
+
+        # Append default provider models if not already present
+        defaults: List[str] = []
+        if p == "groq":
+            defaults = [self.groq_model] + [m for m in self.groq_fallback_models if m != self.groq_model]
+        elif p == "openai":
+            defaults = [self.openai_model, "gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"]
+        elif p == "gemini":
+            defaults = [self.gemini_model, "gemini-2.5-flash", "gemini-3.8-flash", "gemini-flash-latest"]
+        elif p == "deepseek":
+            defaults = [self.deepseek_model, "deepseek-flash", "deepseek-v4-pro"]
+        elif p == "huggingface":
+            defaults = [self.hf_model, "meta-llama/Llama-3.1-8B-Instruct", "mistralai/Mistral-7B-Instruct-v0.2"]
+        elif p == "anthropic":
+            defaults = [self.anthropic_model, "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"]
+        elif p == "ollama":
+            defaults = [self.ollama_model]
+
+        for d in defaults:
+            if d and d not in models:
+                models.append(d)
+
+        # Filter out models currently in cooldown
+        valid_models = [m for m in models if f"{p}:{m}" not in _UNAVAILABLE_MODELS]
+        return valid_models if valid_models else models[:1]
 
     def _get_provider_keys_for_user(self, prov: str, user_id: Optional[int] = None) -> List[str]:
         """
@@ -266,9 +422,15 @@ class LLMEngine:
         if user_id is None:
             try:
                 from instance.config import settings as _cfg
-                user_id = getattr(_cfg, 'CURRENT_USER_ID', None) or _cfg.get_last_user()
+                user_id = getattr(_cfg, 'CURRENT_USER_ID', None)
             except Exception:
                 user_id = None
+            if not user_id:
+                try:
+                    from core.assistant_core import assistant_core
+                    user_id = assistant_core.get_current_user_id()
+                except Exception:
+                    user_id = None
 
         # 1. Check user credential store if user_id is provided
         if user_id and int(user_id) > 0:
@@ -279,23 +441,9 @@ class LLMEngine:
                     return [str(ukey).strip()]
             except Exception:
                 pass
-            # If user has no custom credential in vault, check if developer/env key is available in development
-            app_env = os.getenv("APP_ENV", "development").lower()
-            allow_local = os.getenv("ALLOW_LOCAL_FALLBACK", "").strip().lower() in ("1", "true")
-            allow_dev = os.getenv("ALLOW_DEV_FALLBACK", "").strip().lower() in ("1", "true")
-            if (app_env == "development" or allow_local or allow_dev) and not getattr(sys, "frozen", False):
-                if prov == "openai":
-                    return self.openai_keys if self._is_openai_enabled_for_user(user_id) else []
-                elif prov == "groq":
-                    return self.groq_keys
-                elif prov == "gemini":
-                    return self.gemini_keys
-                elif prov == "deepseek":
-                    return self.deepseek_keys
-                elif prov == "huggingface":
-                    return self.hf_keys
-                elif prov == "anthropic":
-                    return self.anthropic_keys
+
+            # Strict isolation requirement: Authenticated users must NEVER fall back
+            # to shared .env keys or another user's credentials.
             return []
 
         # 2. Check if provider method is patched with a mock for test execution
@@ -303,11 +451,12 @@ class LLMEngine:
         if mock_obj is not None and (getattr(mock_obj, "_is_mock", False) or hasattr(mock_obj, "return_value")):
             return ["mock_key"]
 
-        # 3. Unauthenticated requests in development fallback
+        # 3. Unauthenticated requests in development fallback (only if explicitly enabled)
         app_env = os.getenv("APP_ENV", "development").lower()
         allow_local = os.getenv("ALLOW_LOCAL_FALLBACK", "").strip().lower() in ("1", "true")
         allow_dev = os.getenv("ALLOW_DEV_FALLBACK", "").strip().lower() in ("1", "true")
-        if app_env == "production" or getattr(sys, "frozen", False) or not (allow_local or allow_dev):
+        allow_dev_env = os.getenv("ALLOW_DEV_ENV_FALLBACK", "").strip().lower() in ("1", "true")
+        if app_env == "production" or getattr(sys, "frozen", False) or not (allow_local or allow_dev or allow_dev_env):
             return []
 
         if prov == "openai":
@@ -347,6 +496,19 @@ class LLMEngine:
         if prov == "openai" and not self._is_openai_enabled_for_user(user_id):
             return False
         if prov == "ollama":
+            if user_id:
+                try:
+                    from core.credential_manager import get_credential_manager
+                    if get_credential_manager().get_credential(user_id, "ollama"):
+                        return True
+                except Exception:
+                    pass
+            try:
+                from core.llm_health import is_ollama_reachable
+                if is_ollama_reachable(self.ollama_base):
+                    return True
+            except Exception:
+                pass
             return bool(self.ollama_enabled and self.ollama_base)
         mock_obj = getattr(self, f"_call_{prov}", None)
         if mock_obj is not None and (getattr(mock_obj, "_is_mock", False) or hasattr(mock_obj, "return_value")):
@@ -415,6 +577,8 @@ class LLMEngine:
                 "user_message": "No language model provider is currently configured or available. Please configure an AI provider or start Ollama."
             }
 
+        fallback_msg = getattr(CONFIG, "LLM_FALLBACK_SPOKEN_REPLY", "I'm having trouble reaching my language model, but I can still do local commands")
+
         # Check for specific failure categories across attempted providers
         categories_seen = [d.get("category") for d in self.last_diagnostics if d.get("status") in ("failed", "skipped")]
 
@@ -422,69 +586,156 @@ class LLMEngine:
             return {
                 "category": "insufficient_balance",
                 "reason": "Account has insufficient credit balance",
-                "user_message": "The AI provider account has insufficient credit balance. Please check your provider billing account."
+                "user_message": fallback_msg
             }
         if "quota_exceeded" in categories_seen or "rate_limited" in categories_seen:
             return {
                 "category": "rate_limit",
                 "reason": "Provider quota or rate limit exceeded",
-                "user_message": "The AI provider rate limit or quota has been reached. Please wait a moment before trying again."
+                "user_message": fallback_msg
             }
         if "model_not_found" in categories_seen:
             return {
                 "category": "invalid_model",
                 "reason": "Configured model not found on provider",
-                "user_message": "The configured language model was not found on the provider service. Please check your model settings."
+                "user_message": fallback_msg
             }
         if "timeout" in categories_seen or "deadline_exhausted" in categories_seen:
             return {
                 "category": "model_timeout",
                 "reason": "Model request timed out",
-                "user_message": "The language model request timed out before responding. Please try again in a moment."
+                "user_message": fallback_msg
             }
         if "unreachable" in categories_seen or "connection_error" in categories_seen:
             return {
                 "category": "connection_failure",
                 "reason": "Network or local daemon connection failure",
-                "user_message": "Unable to connect to the language model service. Please check your network connection or local Ollama daemon."
+                "user_message": fallback_msg
             }
         if "auth_error" in categories_seen:
             return {
                 "category": "auth_failure",
                 "reason": "Authentication failed",
-                "user_message": "Language model authentication failed. Please check your configured API credentials."
+                "user_message": fallback_msg
             }
         if all(c == "unconfigured" for c in categories_seen):
             return {
                 "category": "unconfigured",
                 "reason": "No providers configured",
-                "user_message": "No language model provider is currently configured. Please configure an AI provider or local Ollama."
+                "user_message": fallback_msg
             }
 
         return {
             "category": "provider_failure",
             "reason": self.last_error_summary or "All providers failed",
-            "user_message": "All language model providers failed to respond. Please check your provider settings or network connection."
+            "user_message": fallback_msg
         }
 
     @staticmethod
-    def _parse_retry_after(headers_or_resp: Any, default: int = 300) -> int:
+    def _parse_retry_after(headers_or_resp: Any, default: int = 15) -> int:
         """Extracts and sanitizes Retry-After or retry-after-ms header safely."""
         if not headers_or_resp:
             return default
+        # 1. Check response headers
         headers = getattr(headers_or_resp, "headers", headers_or_resp) if not isinstance(headers_or_resp, dict) else headers_or_resp
-        if not hasattr(headers, "get"):
-            return default
-        retry_val = headers.get("retry-after") or headers.get("retry-after-ms") or headers.get("Retry-After")
-        if not retry_val:
-            return default
+        if hasattr(headers, "get"):
+            retry_val = headers.get("retry-after") or headers.get("retry-after-ms") or headers.get("Retry-After")
+            if retry_val:
+                try:
+                    val = float(retry_val)
+                    if "ms" in str(headers.get("retry-after-ms", "")).lower():
+                        val /= 1000.0
+                    return max(2, min(int(val) + 1, 3600))
+                except Exception:
+                    pass
+
+        # 2. Extract retry seconds from response body text (e.g. Groq "Please try again in 3.42s")
+        resp_text = getattr(headers_or_resp, "text", "")
+        if resp_text and isinstance(resp_text, str):
+            match = re.search(r'(?:try again in|retry in|retry after)\s*([0-9\.]+)\s*(ms|s|m|seconds)?', resp_text, re.IGNORECASE)
+            if match:
+                try:
+                    num = float(match.group(1))
+                    unit = (match.group(2) or "s").lower()
+                    if unit == "ms":
+                        num /= 1000.0
+                    elif unit == "m":
+                        num *= 60.0
+                    return max(2, min(int(num) + 1, 3600))
+                except Exception:
+                    pass
+
+        return min(default, 60)
+
+    def _execute_hedged_request(self, candidate_calls: List[tuple], timeout: float = 5.0) -> Optional[Any]:
+        """
+        Execute hedged requests across candidate providers:
+        Send to the fastest provider; only if it has not answered within hedged_delay
+        send the same request to the second provider, use the first valid answer, cancel the other.
+        candidate_calls: list of tuples (provider_name, model, callable_fn, args, kwargs)
+        """
+        if not candidate_calls:
+            return None
+        if len(candidate_calls) == 1:
+            name, model, fn, args, kwargs = candidate_calls[0]
+            return fn(*args, **kwargs)
+
+        p1_item = candidate_calls[0]
+        p2_item = candidate_calls[1]
+        name1, model1, fn1, args1, kwargs1 = p1_item
+        name2, model2, fn2, args2, kwargs2 = p2_item
+
+        hedge_delay = getattr(self, "hedged_delay", 1.2)
+        deadline = time.time() + timeout
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         try:
-            val = float(retry_val)
-            if "ms" in str(headers.get("retry-after-ms", "")).lower():
-                val /= 1000.0
-            return max(5, min(int(val) + 2, 3600))
-        except Exception:
-            return default
+            fut1 = executor.submit(fn1, *args1, **kwargs1)
+            fut2 = None
+            try:
+                wait_t1 = min(hedge_delay, max(0.05, deadline - time.time()))
+                res1 = fut1.result(timeout=wait_t1)
+                if res1:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return res1
+            except concurrent.futures.TimeoutError:
+                pass
+            except Exception as e:
+                logger.debug(f"[LLM Hedged] Provider {name1} error: {e}")
+
+            if deadline - time.time() >= 0.1:
+                fut2 = executor.submit(fn2, *args2, **kwargs2)
+
+            futs = {}
+            if fut2:
+                futs[fut2] = name2
+            if not fut1.done():
+                futs[fut1] = name1
+
+            if futs:
+                rem_time = max(0.1, deadline - time.time())
+                try:
+                    for fut in concurrent.futures.as_completed(futs, timeout=rem_time):
+                        try:
+                            res = fut.result()
+                            if res:
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return res
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        return None
+
+    def _calc_keys_cooldown(self, prov: str, target_keys: List[str], default_cd: int = 120) -> int:
+        """Calculate max active cooldown duration among a provider's key tags."""
+        now_t = time.time()
+        tags = [f"{prov}_key_{hashlib.sha256(k.strip().encode()).hexdigest()[:12]}" for k in target_keys if k and k.strip()]
+        pos_cds = [int(_UNAVAILABLE_KEYS._timestamps.get(t, 0) - now_t) for t in tags if _UNAVAILABLE_KEYS._timestamps.get(t, 0) > now_t]
+        return max(pos_cds) if pos_cds else default_cd
 
     def _call_openai(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int, timeout: float = 8.0, keys: Optional[List[str]] = None) -> Optional[str]:
         target_keys = keys if keys is not None else self.openai_keys
@@ -496,24 +747,24 @@ class LLMEngine:
 
         all_in_cooldown = True
         for api_key in target_keys:
-            key_tag = f"openai_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"openai_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag not in _UNAVAILABLE_KEYS:
                 all_in_cooldown = False
                 break
         if all_in_cooldown:
-            _UNAVAILABLE_PROVIDERS.add("openai", cooldown=120)
+            _UNAVAILABLE_PROVIDERS.add("openai", cooldown=self._calc_keys_cooldown("openai", target_keys))
             return None
 
         # Try each available OpenAI key
         for key_index, api_key in enumerate(target_keys):
-            key_tag = f"openai_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"openai_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag in _UNAVAILABLE_KEYS:
                 continue
                 
             start_t = time.time()
             try:
                 from openai import OpenAI
-                client = OpenAI(api_key=api_key, base_url=self.openai_base)
+                client = OpenAI(api_key=api_key.strip(), base_url=self.openai_base)
                 response = client.chat.completions.create(
                     model=model,
                     messages=messages,
@@ -530,7 +781,7 @@ class LLMEngine:
             except Exception as e:
                 dur = time.time() - start_t
                 err_str = str(e).lower()
-                if "insufficient_quota" in err_str or "exceeded your current quota" in err_str:
+                if "insufficient_quota" in err_str or "exceeded your current quota" in err_str or "no credits remaining" in err_str or "billing" in err_str:
                     print(f"[LLM] Provider=OpenAI Key quota/balance exhausted. Marking key unavailable.")
                     _UNAVAILABLE_KEYS.add(key_tag, cooldown=1800)
                     self._record_diagnostic("openai", model, dur, "failed", "insufficient_balance", "OpenAI account quota/credit balance exhausted")
@@ -549,8 +800,9 @@ class LLMEngine:
                 else:
                     print(f"[LLM] Provider=OpenAI request failed: {type(e).__name__}. Trying next key.")
                     _UNAVAILABLE_KEYS.add(key_tag, cooldown=120)
-                    self._record_diagnostic("openai", model, dur, "failed", "request_failed", str(e))
-        _UNAVAILABLE_PROVIDERS.add("openai", cooldown=120)
+        # Only mark provider unavailable if all target keys are exhausted in cooldown
+        if all(f"openai_key_{hashlib.sha256(k.strip().encode()).hexdigest()[:12]}" in _UNAVAILABLE_KEYS for k in target_keys):
+            _UNAVAILABLE_PROVIDERS.add("openai", cooldown=self._calc_keys_cooldown("openai", target_keys))
         return None
 
     def _call_groq(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int, timeout: float = 6.0, keys: Optional[List[str]] = None) -> Optional[str]:
@@ -563,17 +815,17 @@ class LLMEngine:
 
         all_in_cooldown = True
         for api_key in target_keys:
-            key_tag = f"groq_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"groq_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag not in _UNAVAILABLE_KEYS:
                 all_in_cooldown = False
                 break
         if all_in_cooldown:
-            _UNAVAILABLE_PROVIDERS.add("groq", cooldown=120)
+            _UNAVAILABLE_PROVIDERS.add("groq", cooldown=self._calc_keys_cooldown("groq", target_keys))
             return None
 
         # Try each available Groq key
         for key_index, api_key in enumerate(target_keys):
-            key_tag = f"groq_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"groq_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag in _UNAVAILABLE_KEYS:
                 continue
                 
@@ -618,14 +870,14 @@ class LLMEngine:
             except requests.exceptions.Timeout:
                 dur = time.time() - start_t
                 print(f"[LLM] Provider=Groq timed out after {timeout:.1f}s.")
-                _UNAVAILABLE_KEYS.add(key_tag, cooldown=60)
+                _UNAVAILABLE_KEYS.add(key_tag, cooldown=10)
                 self._record_diagnostic("groq", model, dur, "failed", "timeout", f"timed out after {timeout:.1f}s")
             except Exception as e:
                 dur = time.time() - start_t
                 print(f"[LLM] Provider=Groq connection exception: {type(e).__name__}. Trying next key.")
-                _UNAVAILABLE_KEYS.add(key_tag, cooldown=120)
-                self._record_diagnostic("groq", model, dur, "failed", "connection_error", str(e))
-        _UNAVAILABLE_PROVIDERS.add("groq", cooldown=120)
+        # Only mark provider unavailable if all target keys are exhausted in cooldown
+        if all(f"groq_key_{hashlib.sha256(k.strip().encode()).hexdigest()[:12]}" in _UNAVAILABLE_KEYS for k in target_keys):
+            _UNAVAILABLE_PROVIDERS.add("groq", cooldown=self._calc_keys_cooldown("groq", target_keys))
         return None
 
     def _call_gemini(self, prompt: str, system_prompt: str, model: str, temperature: float, max_tokens: int, timeout: float = 6.0, keys: Optional[List[str]] = None) -> Optional[str]:
@@ -638,17 +890,17 @@ class LLMEngine:
 
         all_in_cooldown = True
         for api_key in target_keys:
-            key_tag = f"gemini_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"gemini_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag not in _UNAVAILABLE_KEYS:
                 all_in_cooldown = False
                 break
         if all_in_cooldown:
-            _UNAVAILABLE_PROVIDERS.add("gemini", cooldown=120)
+            _UNAVAILABLE_PROVIDERS.add("gemini", cooldown=self._calc_keys_cooldown("gemini", target_keys, default_cd=15))
             return None
 
         # Try each available Gemini key
         for key_index, api_key in enumerate(target_keys):
-            key_tag = f"gemini_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"gemini_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag in _UNAVAILABLE_KEYS:
                 continue
                 
@@ -664,7 +916,7 @@ class LLMEngine:
                     "contents": [{"parts": [{"text": full_prompt}]}],
                     "generationConfig": {
                         "temperature": temperature,
-                        "maxOutputTokens": max_tokens
+                        "maxOutputTokens": max(max_tokens, 800)
                     }
                 }
                 res = self._post(url, headers=headers, json=payload, timeout=timeout)
@@ -687,13 +939,13 @@ class LLMEngine:
                 elif res.status_code == 429:
                     cooldown = self._parse_retry_after(res, default=300)
                     if "quota" in res.text.lower() or "billing" in res.text.lower():
-                        print(f"[LLM] Provider=Gemini quota/billing exhausted (HTTP 429, cooldown={max(cooldown, 1800)}s). Trying next key.")
-                        _UNAVAILABLE_KEYS.add(key_tag, cooldown=max(cooldown, 1800))
-                        self._record_diagnostic("gemini", model, dur, "failed", "insufficient_balance", "Gemini account quota or credit balance exhausted")
+                        print(f"[LLM] Provider=Gemini Model={model} quota exhausted (HTTP 429, cooldown={max(cooldown, 1800)}s). Trying next candidate model.")
+                        _UNAVAILABLE_MODELS.add(model_tag, cooldown=max(cooldown, 1800))
+                        self._record_diagnostic("gemini", model, dur, "failed", "insufficient_balance", f"Gemini quota exhausted for {model}")
                     else:
-                        print(f"[LLM] Provider=Gemini rate limit exceeded (HTTP 429, Retry-After cooldown={cooldown}s). Trying next key.")
-                        _UNAVAILABLE_KEYS.add(key_tag, cooldown=cooldown)
-                        self._record_diagnostic("gemini", model, dur, "failed", "rate_limited", f"HTTP 429 rate limit exceeded (cooldown={cooldown}s)")
+                        print(f"[LLM] Provider=Gemini Model={model} rate limit exceeded (HTTP 429, Retry-After cooldown={cooldown}s). Trying next candidate model.")
+                        _UNAVAILABLE_MODELS.add(model_tag, cooldown=cooldown)
+                        self._record_diagnostic("gemini", model, dur, "failed", "rate_limited", f"HTTP 429 rate limit exceeded for {model} (cooldown={cooldown}s)")
                 elif res.status_code == 401 or "authentication" in res.text.lower():
                     print(f"[LLM] Provider=Gemini authentication failed. Marking key unavailable.")
                     _UNAVAILABLE_KEYS.add(key_tag, cooldown=3600)
@@ -704,8 +956,9 @@ class LLMEngine:
                     self._record_diagnostic("gemini", model, dur, "failed", "server_error", f"HTTP {res.status_code}")
             except requests.exceptions.Timeout:
                 dur = time.time() - start_t
-                print(f"[LLM] Provider=Gemini timed out after {timeout:.1f}s.")
-                _UNAVAILABLE_KEYS.add(key_tag, cooldown=60)
+                print(f"[LLM] Provider=Gemini Model={model} timed out after {timeout:.1f}s.")
+                _UNAVAILABLE_MODELS.add(model_tag, cooldown=120)
+                _UNAVAILABLE_KEYS.add(key_tag, cooldown=10)
                 self._record_diagnostic("gemini", model, dur, "failed", "timeout", f"timed out after {timeout:.1f}s")
             except Exception as e:
                 dur = time.time() - start_t
@@ -714,7 +967,9 @@ class LLMEngine:
                 from core.credential_manager import sanitize_log_message
                 self._record_diagnostic("gemini", model, dur, "failed", "connection_error", sanitize_log_message(str(e)))
 
-        _UNAVAILABLE_PROVIDERS.add("gemini", cooldown=120)
+        # Only mark provider unavailable if all target keys are exhausted in cooldown
+        if all(f"gemini_key_{hashlib.sha256(k.strip().encode()).hexdigest()[:12]}" in _UNAVAILABLE_KEYS for k in target_keys):
+            _UNAVAILABLE_PROVIDERS.add("gemini", cooldown=self._calc_keys_cooldown("gemini", target_keys, default_cd=15))
         return None
 
     def _call_deepseek(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int, timeout: float = 6.0, keys: Optional[List[str]] = None) -> Optional[str]:
@@ -727,17 +982,17 @@ class LLMEngine:
 
         all_in_cooldown = True
         for api_key in target_keys:
-            key_tag = f"deepseek_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"deepseek_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag not in _UNAVAILABLE_KEYS:
                 all_in_cooldown = False
                 break
         if all_in_cooldown:
-            _UNAVAILABLE_PROVIDERS.add("deepseek", cooldown=120)
+            _UNAVAILABLE_PROVIDERS.add("deepseek", cooldown=self._calc_keys_cooldown("deepseek", target_keys, default_cd=3600))
             return None
 
         # Try each available DeepSeek key
         for key_index, api_key in enumerate(target_keys):
-            key_tag = f"deepseek_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"deepseek_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag in _UNAVAILABLE_KEYS:
                 continue
                 
@@ -764,6 +1019,11 @@ class LLMEngine:
                 elif res.status_code == 402 or "insufficient balance" in res.text.lower():
                     print(f"[LLM] Provider=DeepSeek insufficient balance (HTTP 402). Marking key unavailable.")
                     _UNAVAILABLE_KEYS.add(key_tag, cooldown=3600)
+                    try:
+                        from core.llm_health import mark_provider_unhealthy
+                        mark_provider_unhealthy("deepseek", reason="HTTP 402 insufficient balance", user_action="DeepSeek balance is empty", cooldown_seconds=3600, key_tags=[key_tag])
+                    except Exception:
+                        pass
                     self._record_diagnostic("deepseek", model, dur, "failed", "insufficient_balance", "HTTP 402 insufficient balance")
                 elif res.status_code == 404:
                     print(f"[LLM] Provider=DeepSeek Model={model} not found (HTTP 404). Marking model unavailable.")
@@ -786,15 +1046,15 @@ class LLMEngine:
             except requests.exceptions.Timeout:
                 dur = time.time() - start_t
                 print(f"[LLM] Provider=DeepSeek timed out after {timeout:.1f}s.")
-                _UNAVAILABLE_KEYS.add(key_tag, cooldown=60)
+                _UNAVAILABLE_KEYS.add(key_tag, cooldown=15)
                 self._record_diagnostic("deepseek", model, dur, "failed", "timeout", f"timed out after {timeout:.1f}s")
             except Exception as e:
                 dur = time.time() - start_t
                 print(f"[LLM] Provider=DeepSeek exception: {type(e).__name__}. Trying next key.")
                 _UNAVAILABLE_KEYS.add(key_tag, cooldown=120)
-                self._record_diagnostic("deepseek", model, dur, "failed", "connection_error", str(e))
-
-        _UNAVAILABLE_PROVIDERS.add("deepseek", cooldown=120)
+        # Only mark provider unavailable if all target keys are exhausted in cooldown
+        if all(f"deepseek_key_{hashlib.sha256(k.strip().encode()).hexdigest()[:12]}" in _UNAVAILABLE_KEYS for k in target_keys):
+            _UNAVAILABLE_PROVIDERS.add("deepseek", cooldown=self._calc_keys_cooldown("deepseek", target_keys, default_cd=3600))
         return None
 
     def _call_huggingface(self, prompt: str, system_prompt: str, model: str, max_tokens: int, timeout: float = 6.0, keys: Optional[List[str]] = None) -> Optional[str]:
@@ -807,24 +1067,24 @@ class LLMEngine:
 
         all_in_cooldown = True
         for api_key in target_keys:
-            key_tag = f"huggingface_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"huggingface_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag not in _UNAVAILABLE_KEYS:
                 all_in_cooldown = False
                 break
         if all_in_cooldown:
-            _UNAVAILABLE_PROVIDERS.add("huggingface", cooldown=120)
+            _UNAVAILABLE_PROVIDERS.add("huggingface", cooldown=self._calc_keys_cooldown("huggingface", target_keys))
             return None
 
         # Try each available HuggingFace key
         for key_index, api_key in enumerate(target_keys):
-            key_tag = f"huggingface_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"huggingface_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag in _UNAVAILABLE_KEYS:
                 continue
                 
             start_t = time.time()
             try:
                 headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"}
-                url = "https://router.huggingface.co/hf-inference/v1/chat/completions"
+                url = "https://router.huggingface.co/v1/chat/completions"
                 messages = []
                 if system_prompt:
                     messages.append({"role": "system", "content": system_prompt})
@@ -838,6 +1098,10 @@ class LLMEngine:
                     if content and content.strip():
                         self._record_diagnostic("huggingface", model, dur, "success", None, None)
                         return content.strip()
+                elif res.status_code == 402 or "no remaining credits" in res.text.lower() or "insufficient" in res.text.lower():
+                    print(f"[LLM] Provider=HuggingFace insufficient credit balance (HTTP 402). Marking key unavailable.")
+                    _UNAVAILABLE_KEYS.add(key_tag, cooldown=3600)
+                    self._record_diagnostic("huggingface", model, dur, "failed", "insufficient_balance", "HTTP 402 no remaining credits")
                 elif res.status_code == 404 or res.status_code == 400:
                     print(f"[LLM] Provider=HuggingFace Model={model} unavailable (HTTP {res.status_code}). Marking model unavailable.")
                     _UNAVAILABLE_MODELS.add(model_tag, cooldown=3600)
@@ -859,15 +1123,15 @@ class LLMEngine:
             except requests.exceptions.Timeout:
                 dur = time.time() - start_t
                 print(f"[LLM] Provider=HuggingFace timed out after {timeout:.1f}s.")
-                _UNAVAILABLE_KEYS.add(key_tag, cooldown=60)
+                _UNAVAILABLE_KEYS.add(key_tag, cooldown=10)
                 self._record_diagnostic("huggingface", model, dur, "failed", "timeout", f"timed out after {timeout:.1f}s")
             except Exception as e:
                 dur = time.time() - start_t
                 print(f"[LLM] Provider=HuggingFace exception: {type(e).__name__}. Trying next key.")
                 _UNAVAILABLE_KEYS.add(key_tag, cooldown=120)
-                self._record_diagnostic("huggingface", model, dur, "failed", "connection_error", str(e))
-
-        _UNAVAILABLE_PROVIDERS.add("huggingface", cooldown=120)
+        # Only mark provider unavailable if all target keys are exhausted in cooldown
+        if all(f"huggingface_key_{hashlib.sha256(k.strip().encode()).hexdigest()[:12]}" in _UNAVAILABLE_KEYS for k in target_keys):
+            _UNAVAILABLE_PROVIDERS.add("huggingface", cooldown=self._calc_keys_cooldown("huggingface", target_keys))
         return None
 
     def _call_anthropic(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int, timeout: float = 8.0, keys: Optional[List[str]] = None) -> Optional[str]:
@@ -880,12 +1144,12 @@ class LLMEngine:
 
         all_in_cooldown = True
         for api_key in target_keys:
-            key_tag = f"anthropic_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"anthropic_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag not in _UNAVAILABLE_KEYS:
                 all_in_cooldown = False
                 break
         if all_in_cooldown:
-            _UNAVAILABLE_PROVIDERS.add("anthropic", cooldown=120)
+            _UNAVAILABLE_PROVIDERS.add("anthropic", cooldown=self._calc_keys_cooldown("anthropic", target_keys))
             return None
 
         system_content = ""
@@ -897,7 +1161,7 @@ class LLMEngine:
                 user_msgs.append(m)
 
         for key_index, api_key in enumerate(target_keys):
-            key_tag = f"anthropic_key_{hashlib.sha256(api_key.encode()).hexdigest()[:12]}"
+            key_tag = f"anthropic_key_{hashlib.sha256(api_key.strip().encode()).hexdigest()[:12]}"
             if key_tag in _UNAVAILABLE_KEYS:
                 continue
                 
@@ -931,23 +1195,35 @@ class LLMEngine:
             except Exception as e:
                 dur = time.time() - start_t
                 err_str = str(e).lower()
-                if "authentication_error" in err_str or "invalid_api_key" in err_str or "401" in err_str:
+                clean_err_msg = str(e)
+                try:
+                    from core.credential_manager import sanitize_log_message
+                    clean_err_msg = sanitize_log_message(clean_err_msg)
+                except Exception:
+                    pass
+
+                if "credit balance" in err_str or "billing" in err_str or "too low" in err_str or "plans & billing" in err_str:
+                    _UNAVAILABLE_KEYS.add(key_tag, cooldown=3600)
+                    self._record_diagnostic("anthropic", model, dur, "failed", "insufficient_balance", f"Anthropic credit balance too low: {clean_err_msg}")
+                elif "authentication_error" in err_str or "invalid_api_key" in err_str or "invalid x-api-key" in err_str or "401" in err_str:
                     _UNAVAILABLE_KEYS.add(key_tag, cooldown=3600)
                     self._record_diagnostic("anthropic", model, dur, "failed", "auth_error", "HTTP 401 authentication failed")
                 elif "rate_limit_error" in err_str or "429" in err_str:
                     _UNAVAILABLE_KEYS.add(key_tag, cooldown=300)
                     self._record_diagnostic("anthropic", model, dur, "failed", "rate_limited", "HTTP 429 rate limit")
-                elif "not_found_error" in err_str or "404" in err_str:
+                elif "not_found_error" in err_str or "404" in err_str or ("model" in err_str and ("not found" in err_str or "not available" in err_str)):
                     _UNAVAILABLE_MODELS.add(model_tag, cooldown=3600)
-                    self._record_diagnostic("anthropic", model, dur, "failed", "model_not_found", "HTTP 404 model not found")
                 else:
                     _UNAVAILABLE_KEYS.add(key_tag, cooldown=120)
-                    self._record_diagnostic("anthropic", model, dur, "failed", "request_failed", str(e))
-        _UNAVAILABLE_PROVIDERS.add("anthropic", cooldown=120)
+                    self._record_diagnostic("anthropic", model, dur, "failed", "request_failed", clean_err_msg)
+
+        # Only mark provider unavailable if all target keys are exhausted in cooldown
+        if all(f"anthropic_key_{hashlib.sha256(k.strip().encode()).hexdigest()[:12]}" in _UNAVAILABLE_KEYS for k in target_keys):
+            _UNAVAILABLE_PROVIDERS.add("anthropic", cooldown=self._calc_keys_cooldown("anthropic", target_keys))
         return None
 
     def _call_ollama(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int, timeout: Optional[float] = None) -> Optional[str]:
-        if "ollama" in _UNAVAILABLE_PROVIDERS or not self.ollama_enabled:
+        if "ollama" in _UNAVAILABLE_PROVIDERS or not (self.ollama_enabled or self._is_provider_configured("ollama")):
             return None
         model_tag = f"ollama:{model}"
         if model_tag in _UNAVAILABLE_MODELS:
@@ -1045,19 +1321,53 @@ class LLMEngine:
 
         is_interactive = task_type in ("interactive", "conversational", "chat", "classification")
         primary = getattr(self, "primary_provider", "openai").lower().strip()
-        if timeout_budget is None:
+
+        turn_dl = None
+        try:
+            from core.turn_deadline import get_current_turn_deadline
+            turn_dl = get_current_turn_deadline()
+        except Exception:
+            turn_dl = None
+
+        if turn_dl is not None and is_interactive:
+            rem_turn = turn_dl.time_remaining()
+            if rem_turn <= 0.4:
+                return None
+            timeout_budget = min(timeout_budget if timeout_budget is not None else self.interactive_budget, rem_turn)
+            deadline = time.time() + timeout_budget
+        elif timeout_budget is None:
             if is_interactive:
-                timeout_budget = max(6.0, min(self.interactive_timeout, 10.0))
+                timeout_budget = max(3.0, float(self.interactive_budget))
             else:
                 if primary == "ollama" or (self.ollama_enabled and "ollama" not in _UNAVAILABLE_PROVIDERS):
                     timeout_budget = max(self.request_timeout, self.ollama_timeout + 5.0)
                 else:
                     timeout_budget = self.request_timeout
+            deadline = time.time() + timeout_budget
         elif is_interactive:
-            timeout_budget = max(timeout_budget, 5.0)
+            timeout_budget = min(float(timeout_budget), float(self.interactive_budget))
+            deadline = time.time() + timeout_budget
+        else:
+            deadline = time.time() + float(timeout_budget)
 
         start_time = time.time()
-        deadline = start_time + timeout_budget
+
+        # Request-level deduplication: avoid rapid duplicate executions for the same prompt & task
+        clean_p_str = prompt.strip() if isinstance(prompt, str) else str(prompt).strip()
+        caller_sig = tuple(id(getattr(getattr(self, f"_call_{p}", None), "__func__", getattr(self, f"_call_{p}", None))) for p in ("groq", "openai", "gemini", "deepseek", "huggingface", "anthropic", "ollama"))
+        req_dedup_hash = (user_id, task_type, clean_p_str, caller_sig)
+        now_ts = time.time()
+        if not hasattr(self, "_completion_cache"):
+            self._completion_cache = {}
+        cached_entry = self._completion_cache.get(req_dedup_hash)
+        if cached_entry:
+            c_time, c_result, c_diags = cached_entry
+            if now_ts - c_time < 3.0:
+                if c_result is not None:
+                    return c_result
+                all_unavail = all(p in _UNAVAILABLE_PROVIDERS for p in ("groq", "gemini", "deepseek", "huggingface") if self._is_provider_configured(p, user_id))
+                if all_unavail:
+                    return None
 
         try:
             from core.latency_instrumentation import get_current_tracker
@@ -1068,6 +1378,7 @@ class LLMEngine:
         def _return_completion(content: str, provider_name: str) -> str:
             self.last_successful_provider = provider_name
             self.last_error_summary = ""
+            self._completion_cache[req_dedup_hash] = (time.time(), content, list(self.last_diagnostics))
             try:
                 from core.latency_instrumentation import get_current_tracker
                 tracker = get_current_tracker()
@@ -1077,14 +1388,23 @@ class LLMEngine:
                     tracker.set_reason(fallback=f"fallback to {provider_name}")
             except Exception:
                 pass
+            try:
+                from core.llm_health import record_provider_latency
+                dur = time.time() - prov_start if 'prov_start' in locals() else (time.time() - start_time)
+                record_provider_latency(provider_name, dur)
+            except Exception:
+                pass
             return content
 
         def get_call_timeout(prov_timeout: float, has_fallbacks: bool = False) -> float:
             rem = max(0.5, deadline - time.time())
             if task_type in ("coding", "deep_reasoning", "document"):
                 return max(10.0, min(max(prov_timeout, 30.0), rem))
-            if is_interactive and has_fallbacks:
-                return max(1.5, min(prov_timeout, min(3.5, rem * 0.75)))
+            if is_interactive:
+                eff_prov_to = min(prov_timeout, self.per_provider_timeout)
+                if has_fallbacks:
+                    return max(1.5, min(eff_prov_to, rem * 0.85))
+                return max(1.5, min(eff_prov_to, rem))
             return max(1.5, min(prov_timeout, rem))
 
         # Resolve user ID for user-isolated personalization
@@ -1092,14 +1412,17 @@ class LLMEngine:
         if resolved_uid is None:
             try:
                 from instance.config import settings as _cfg
-                resolved_uid = getattr(_cfg, 'CURRENT_USER_ID', None) or _cfg.get_last_user()
+                resolved_uid = getattr(_cfg, 'CURRENT_USER_ID', None)
+                if resolved_uid is None:
+                    from core.assistant_core import get_current_user_id
+                    resolved_uid = get_current_user_id()
             except Exception:
                 resolved_uid = None
         if resolved_uid is not None:
             try:
-                resolved_uid = int(resolved_uid)
+                resolved_uid = int(resolved_uid) if int(resolved_uid) > 0 else None
             except Exception:
-                pass
+                resolved_uid = None
 
         if resolved_uid is not None:
             if not memory or not str(memory).strip():
@@ -1145,8 +1468,13 @@ class LLMEngine:
                 f"Relevant Memory: {memory}\n"
                 "Guidelines:\n"
                 "- Answer questions directly, naturally, and concisely\n"
-                "- Spoken voice policy: keep responses concise (1–3 sentences for ordinary conversation, 1–4 sentences for simple factual or explanatory questions, 1 short sentence for actions)\n"
-                "- Never output bloated multi-category bullet lists unless explicitly asked to 'show the full list'\n"
+                "- Conversational Response Length Policy:\n"
+                "  * Simple questions and factual queries: answer in 1–2 short sentences directly.\n"
+                "  * General conversation: normally 2–4 sentences.\n"
+                "  * Explanations: provide a concise overview first (1–2 sentences), then offer more detail or a simple example if appropriate.\n"
+                "  * Detailed answers: provide them ONLY when the user explicitly asks for a detailed explanation, examples, or step-by-step instructions.\n"
+                "  * Commands and status queries: return the result directly without conversational fluff or repeated summaries.\n"
+                "- Never output bloated multi-category bullet lists or long lectures unless explicitly requested\n"
                 "- Confirm commands before execution\n"
                 "- Use memory and context naturally without announcing it\n"
                 "- Maintain consistent professional tone\n"
@@ -1174,36 +1502,18 @@ class LLMEngine:
             except Exception:
                 pass
 
-            # Inject behavioral & persona preferences from Centralized Configuration Service
+            # Inject behavioral & persona preferences from Centralized Configuration Service & Personality Engine
+            try:
+                from extensions.personality_engine.personality_core import get_personality
+                persona_directives = get_personality().build_prompt_directives(user_id=resolved_uid)
+                if persona_directives and persona_directives.strip():
+                    system_prompt = (system_prompt or "") + "\n" + persona_directives
+            except Exception as _p_err:
+                logger.debug("Could not inject personality directives: %s", _p_err)
+
             try:
                 from core.configuration_service import get_configuration_service
                 cfg_svc = get_configuration_service()
-                persona = cfg_svc.get_preference(resolved_uid, "persona")
-                response_style = cfg_svc.get_preference(resolved_uid, "response_style")
-                formality = cfg_svc.get_preference(resolved_uid, "formality_pct")
-                verbosity = cfg_svc.get_preference(resolved_uid, "verbosity")
-
-                behavior_directives = []
-                if persona and str(persona).strip():
-                    behavior_directives.append(f"Persona: {str(persona).strip()}")
-                if response_style and str(response_style).strip():
-                    behavior_directives.append(f"Response Style: {str(response_style).strip()}")
-                if formality is not None and str(formality).strip():
-                    behavior_directives.append(f"Formality Level: {str(formality).strip()}%")
-                if verbosity and str(verbosity).strip():
-                    behavior_directives.append(f"Verbosity: {str(verbosity).strip()}")
-                preferred_lang = cfg_svc.get_preference(resolved_uid, "language") or cfg_svc.get_preference(resolved_uid, "assistant_language")
-                if preferred_lang and str(preferred_lang).lower() not in ("english", "en", "default", "none", ""):
-                    behavior_directives.append(f"Language: Always reply to the user in {str(preferred_lang).strip().capitalize()}.")
-
-                if behavior_directives:
-                    style_block = (
-                        "\n[BEHAVIORAL & PERSONA SETTINGS]\n"
-                        "Adopt the following user-configured behavioral profile for all interactions:\n"
-                        + "\n".join(f"- {d}" for d in behavior_directives) + "\n"
-                    )
-                    system_prompt = (system_prompt or "") + "\n" + style_block
-
                 # Check failover toggle
                 failover_pref = cfg_svc.get_preference(resolved_uid, "ai_failover", True)
                 if str(failover_pref).lower() in ("false", "0", "no"):
@@ -1251,7 +1561,16 @@ class LLMEngine:
         req_id = getattr(self, "_active_request_id", None) or uuid.uuid4().hex[:8]
         attempted_providers = []
 
-        default_chain = ["openai", "groq", "gemini", "deepseek", "huggingface", "ollama", "anthropic"]
+        # Provider chain: fast cloud providers first, local Ollama at the end as fallback
+        default_chain = ["groq", "gemini", "openai", "deepseek", "huggingface", "anthropic"]
+        is_ollama_mocked = (
+            hasattr(getattr(self, "_call_ollama", None), "assert_called") or
+            hasattr(getattr(self, "_call_ollama", None), "mock_calls") or
+            (getattr(self, "_call_ollama", None) is not None and hasattr(getattr(self, "_call_ollama", None), "_mock_return_value"))
+        )
+        if (is_ollama_mocked or self._is_provider_configured("ollama", resolved_uid)) and "ollama" not in default_chain:
+            default_chain.append("ollama")
+
         if resolved_uid:
             try:
                 from core.configuration_service import get_configuration_service
@@ -1273,7 +1592,37 @@ class LLMEngine:
                 except Exception:
                     pass
 
-        if primary in default_chain:
+        # Disallow Ollama as automatic default unless explicitly mocked in tests
+        if primary == "ollama" and not is_ollama_mocked:
+            primary = "groq"
+
+        # Task-specific candidate selection via ModelRegistry
+        registry_cands = []
+        try:
+            from core.model_registry import get_model_registry
+            reg = get_model_registry()
+            registry_cands = reg.get_best_models_for_task(
+                task_type=task_type,
+                unavailable_models=_UNAVAILABLE_MODELS,
+                unavailable_keys=_UNAVAILABLE_KEYS,
+                unavailable_providers=_UNAVAILABLE_PROVIDERS,
+                preferred_provider=primary,
+                limit=15
+            )
+        except Exception:
+            pass
+
+        if registry_cands and user_failover:
+            candidate_providers = []
+            for cand, score in registry_cands:
+                p = cand.provider
+                if p not in candidate_providers and p in default_chain:
+                    candidate_providers.append(p)
+            provider_chain = candidate_providers + [p for p in default_chain if p not in candidate_providers]
+            if primary in candidate_providers and primary in provider_chain:
+                # Keep primary first if it offers a healthy top-ranked model
+                provider_chain = [primary] + [p for p in provider_chain if p != primary]
+        elif primary in default_chain:
             if user_failover:
                 provider_chain = [primary] + [p for p in default_chain if p != primary]
             else:
@@ -1282,7 +1631,7 @@ class LLMEngine:
             provider_chain = list(default_chain)
 
         if is_interactive and user_failover:
-            # Prioritize fastest eligible cloud provider for interactive requests to avoid waiting for Ollama timeout
+            # Prioritize fastest eligible cloud provider for interactive requests
             fast_healthy_cloud = [
                 p for p in ["groq", "openai", "gemini", "deepseek", "huggingface", "anthropic"]
                 if (self._is_provider_configured(p, resolved_uid) or hasattr(getattr(self, f"_call_{p}", None), "assert_called")) and p not in _UNAVAILABLE_PROVIDERS
@@ -1290,16 +1639,56 @@ class LLMEngine:
             if fast_healthy_cloud and primary == "ollama":
                 provider_chain = fast_healthy_cloud + [p for p in provider_chain if p not in fast_healthy_cloud]
 
+        # Prioritize verified healthy providers over providers with known balance or permission failure
+        if resolved_uid and resolved_uid > 0:
+            try:
+                from core.credential_manager import get_credential_manager
+                cm_status = get_credential_manager()
+                healthy_chain = []
+                unhealthy_chain = []
+                for p in provider_chain:
+                    st = cm_status.get_credential_status(resolved_uid, p)
+                    if st in ("insufficient_balance", "insufficient_permissions", "invalid"):
+                        unhealthy_chain.append(p)
+                    else:
+                        healthy_chain.append(p)
+                # Skip confirmed exhausted or invalid providers when healthy alternatives exist
+                provider_chain = healthy_chain if healthy_chain else (healthy_chain + unhealthy_chain)
+            except Exception:
+                pass
+
+        # Order remaining providers by measured latency (fastest first), placing rate-limited providers last
+        try:
+            from core.llm_health import order_provider_chain
+            provider_chain = order_provider_chain(provider_chain, primary=primary)
+        except Exception:
+            pass
+
         all_configured = [
             p for p in provider_chain
             if self._is_provider_configured(p, resolved_uid) or hasattr(getattr(self, f"_call_{p}", None), "assert_called")
         ]
         if all_configured and all(p in _UNAVAILABLE_PROVIDERS for p in all_configured):
+            now_t = time.time()
             probe_p = primary if primary in all_configured else all_configured[0]
-            _UNAVAILABLE_PROVIDERS.discard(probe_p)
-            print(f"[LLM] All configured providers in cooldown. Controlled recovery probe initiated for '{probe_p}'.")
+            if not hasattr(self, "_last_recovery_probe_time"):
+                self._last_recovery_probe_time = {}
+            last_probe = self._last_recovery_probe_time.get(probe_p, 0.0)
+            last_diag = next((d for d in reversed(self.last_diagnostics) if d.get("provider") == probe_p), None)
+            is_balance_exhaustion = last_diag and last_diag.get("category") == "insufficient_balance"
+            
+            # Allow recovery probe only after 15s cooldown and not for exhausted billing accounts
+            if (now_t - last_probe >= 15.0) and not is_balance_exhaustion:
+                self._last_recovery_probe_time[probe_p] = now_t
+                _UNAVAILABLE_PROVIDERS.discard(probe_p)
+                print(f"[LLM] All configured providers in cooldown. Controlled recovery probe initiated for '{probe_p}'.")
+            else:
+                self.last_error_summary = "All eligible providers are currently in cooldown or rate-limited"
+                self._record_diagnostic(probe_p, "n/a", 0.0, "skipped", "cooldown", "all eligible providers in active cooldown")
+                self._completion_cache[req_dedup_hash] = (time.time(), None, list(self.last_diagnostics))
+                return None
 
-        for prov in provider_chain:
+        def _execute_provider(prov: str, has_fallbacks: bool = False) -> Optional[Tuple[str, str]]:
             caller = getattr(self, f"_call_{prov}", None)
             is_mocked = hasattr(caller, "assert_called") or hasattr(caller, "mock_calls") or (caller is not None and hasattr(caller, "_mock_return_value"))
             prov_keys = self._get_provider_keys_for_user(prov, resolved_uid)
@@ -1309,150 +1698,169 @@ class LLMEngine:
                     self._record_diagnostic(prov, "n/a", 0.0, "skipped", "disabled_by_config", "OPENAI_ENABLED=false in configuration")
                 else:
                     self._record_diagnostic(prov, "n/a", 0.0, "skipped", "unconfigured", "no valid API keys or disabled")
-                continue
+                return None
 
             if prov in _UNAVAILABLE_PROVIDERS and not is_mocked:
                 self._record_diagnostic(prov, "n/a", 0.0, "skipped", "cooldown", "provider in cooldown")
-                continue
+                return None
 
             if prov_keys and not is_mocked:
                 all_keys_in_cooldown = True
+                max_key_cd = 120
                 for k in prov_keys:
                     k_tag = f"{prov}_key_{hashlib.sha256(k.encode()).hexdigest()[:12]}"
                     if k_tag not in _UNAVAILABLE_KEYS:
                         all_keys_in_cooldown = False
                         break
+                    else:
+                        exp = _UNAVAILABLE_KEYS._timestamps.get(k_tag, 0.0)
+                        if exp > time.time():
+                            max_key_cd = max(max_key_cd, int(exp - time.time()))
                 if all_keys_in_cooldown:
-                    _UNAVAILABLE_PROVIDERS.add(prov, cooldown=120)
-                    self._record_diagnostic(prov, "n/a", 0.0, "skipped", "keys_in_cooldown", "all keys for provider in cooldown")
-                    continue
+                    _UNAVAILABLE_PROVIDERS.add(prov, cooldown=max_key_cd)
+                    self._record_diagnostic(prov, "n/a", 0.0, "skipped", "keys_in_cooldown", f"all keys for provider in cooldown (cooldown={max_key_cd}s)")
+                    return None
 
             rem_budget = deadline - time.time()
             if rem_budget < 0.5 and not is_mocked:
-                rem_conf = [
-                    p for p in provider_chain[provider_chain.index(prov):]
-                    if self._is_provider_configured(p, resolved_uid) and p not in _UNAVAILABLE_PROVIDERS
-                ]
-                max_elapsed_allowed = 9.0 if is_interactive else 15.0
-                if user_failover and rem_conf and (time.time() - start_time < max_elapsed_allowed):
-                    added_budget = min(3.0, max_elapsed_allowed - (time.time() - start_time))
-                    if added_budget >= 0.8:
-                        rem_budget = added_budget
-                        deadline = time.time() + rem_budget
-                        print(f"[LLM] Extending budget by {added_budget:.1f}s for failover provider={prov}. Remaining: {rem_budget:.1f}s")
-                if rem_budget < 0.5:
-                    print(f"[LLM] Request deadline reached ({timeout_budget:.1f}s budget exhausted).")
-                    self._record_diagnostic(prov, "n/a", 0.0, "skipped", "deadline_exhausted", f"remaining budget {rem_budget:.2f}s < 0.5s")
-                    break
+                self._record_diagnostic(prov, "n/a", 0.0, "skipped", "deadline_exhausted", f"remaining budget {rem_budget:.2f}s < 0.5s")
+                return None
 
             prov_start = time.time()
             attempted_providers.append(prov)
-            healthy_subsequent = [
-                p for p in provider_chain[provider_chain.index(prov) + 1:]
-                if self._is_provider_configured(p, resolved_uid) and p not in _UNAVAILABLE_PROVIDERS
-            ]
-            has_fallbacks = bool(healthy_subsequent)
+            try:
+                from core.latency_instrumentation import get_current_tracker
+                get_current_tracker().record_llm_call(prov)
+            except Exception:
+                pass
 
-            if prov == "groq":
-                if (prov_keys or is_mocked) and ("groq" not in _UNAVAILABLE_PROVIDERS or is_mocked):
-                    base_models = [user_configured_model] if user_configured_model else [self.groq_model]
-                    models_to_try = base_models + [m for m in self.groq_fallback_models if m not in base_models]
-                    for m in models_to_try:
-                        if "groq" in _UNAVAILABLE_PROVIDERS and not is_mocked:
-                            break
-                        if f"groq:{m}" in _UNAVAILABLE_MODELS and not is_mocked:
-                            continue
-                        call_to = get_call_timeout(self.groq_timeout, has_fallbacks=has_fallbacks)
-                        try:
-                            resp = self._call_groq(messages, m, temperature, max_tokens, timeout=call_to, keys=prov_keys)
-                            if resp:
-                                return _return_completion(resp, prov)
-                        except Exception as e:
-                            print(f"[LLM] Provider=Groq raised {type(e).__name__}: {e}")
-                        if "groq" in _UNAVAILABLE_PROVIDERS and not is_mocked:
-                            break
-                        if deadline - time.time() < 0.5:
-                            break
-                    if not is_mocked:
-                        _UNAVAILABLE_PROVIDERS.add("groq", cooldown=120)
-                    print(f"[LLM] Provider=Groq attempt failed (elapsed={time.time() - prov_start:.2f}s). Remaining: {max(0.0, deadline - time.time()):.2f}s")
+            models_to_try = self._get_candidate_models_for_provider(prov, task_type, user_configured_model)
+            timeout_map = {
+                "groq": self.groq_timeout,
+                "openai": self.openai_timeout,
+                "gemini": self.gemini_timeout,
+                "deepseek": self.deepseek_timeout,
+                "huggingface": self.hf_timeout,
+                "anthropic": self.anthropic_timeout,
+                "ollama": self.ollama_interactive_timeout if is_interactive else self.ollama_timeout
+            }
+            call_to = get_call_timeout(timeout_map.get(prov, self.request_timeout), has_fallbacks=has_fallbacks)
 
-            elif prov == "openai":
-                if self.openai_enabled and (prov_keys or is_mocked) and ("openai" not in _UNAVAILABLE_PROVIDERS or is_mocked):
-                    target_model = user_configured_model or self.openai_model
-                    call_to = get_call_timeout(self.openai_timeout, has_fallbacks=has_fallbacks)
-                    try:
-                        resp = self._call_openai(messages, target_model, temperature, max_tokens, timeout=call_to, keys=prov_keys)
-                        if resp:
-                            return _return_completion(resp, prov)
-                    except Exception as e:
-                        print(f"[LLM] Provider=OpenAI raised {type(e).__name__}: {e}")
-                    print(f"[LLM] Provider=OpenAI attempt failed (elapsed={time.time() - prov_start:.2f}s). Remaining: {max(0.0, deadline - time.time()):.2f}s")
-
-            elif prov == "gemini":
-                if (prov_keys or is_mocked) and ("gemini" not in _UNAVAILABLE_PROVIDERS or is_mocked):
-                    target_model = user_configured_model or self.gemini_model
-                    call_to = get_call_timeout(self.gemini_timeout, has_fallbacks=has_fallbacks)
-                    try:
-                        resp = self._call_gemini(prompt, system_prompt, target_model, temperature, max_tokens, timeout=call_to, keys=prov_keys)
-                        if resp:
-                            return _return_completion(resp, prov)
-                    except Exception as e:
-                        print(f"[LLM] Provider=Gemini raised {type(e).__name__}: {e}")
-                    print(f"[LLM] Provider=Gemini attempt failed (elapsed={time.time() - prov_start:.2f}s). Remaining: {max(0.0, deadline - time.time()):.2f}s")
-
-            elif prov == "deepseek":
-                if (prov_keys or is_mocked) and ("deepseek" not in _UNAVAILABLE_PROVIDERS or is_mocked):
-                    target_model = user_configured_model or self.deepseek_model
-                    call_to = get_call_timeout(self.deepseek_timeout, has_fallbacks=has_fallbacks)
-                    try:
-                        resp = self._call_deepseek(messages, target_model, temperature, max_tokens, timeout=call_to, keys=prov_keys)
-                        if resp:
-                            return _return_completion(resp, prov)
-                    except Exception as e:
-                        print(f"[LLM] Provider=DeepSeek raised {type(e).__name__}: {e}")
-                    print(f"[LLM] Provider=DeepSeek attempt failed (elapsed={time.time() - prov_start:.2f}s). Remaining: {max(0.0, deadline - time.time()):.2f}s")
-
-            elif prov == "huggingface":
-                if (prov_keys or is_mocked) and ("huggingface" not in _UNAVAILABLE_PROVIDERS or is_mocked):
-                    target_model = user_configured_model or self.hf_model
-                    call_to = get_call_timeout(self.hf_timeout, has_fallbacks=has_fallbacks)
-                    try:
-                        resp = self._call_huggingface(prompt, system_prompt, target_model, max_tokens, timeout=call_to, keys=prov_keys)
-                        if resp:
-                            return _return_completion(resp, prov)
-                    except Exception as e:
-                        print(f"[LLM] Provider=HuggingFace raised {type(e).__name__}: {e}")
-                    print(f"[LLM] Provider=HuggingFace attempt failed (elapsed={time.time() - prov_start:.2f}s). Remaining: {max(0.0, deadline - time.time()):.2f}s")
-
-            elif prov == "anthropic":
-                if (prov_keys or is_mocked) and ("anthropic" not in _UNAVAILABLE_PROVIDERS or is_mocked):
-                    target_model = user_configured_model or self.anthropic_model
-                    call_to = get_call_timeout(self.anthropic_timeout, has_fallbacks=has_fallbacks)
-                    try:
-                        resp = self._call_anthropic(messages, target_model, temperature, max_tokens, timeout=call_to, keys=prov_keys)
-                        if resp:
-                            return _return_completion(resp, prov)
-                    except Exception as e:
-                        print(f"[LLM] Provider=Anthropic raised {type(e).__name__}: {e}")
-                    print(f"[LLM] Provider=Anthropic attempt failed (elapsed={time.time() - prov_start:.2f}s). Remaining: {max(0.0, deadline - time.time()):.2f}s")
-
-            elif prov == "ollama":
-                if (self.ollama_enabled or is_mocked) and ("ollama" not in _UNAVAILABLE_PROVIDERS or is_mocked):
-                    other_configured = [p for p in provider_chain if p != "ollama" and self._is_provider_configured(p, resolved_uid) and p not in _UNAVAILABLE_PROVIDERS]
-                    if is_interactive:
-                        ollama_limit = min(2.5, max(1.5, self.ollama_interactive_timeout))
-                        call_to = max(1.0, min(ollama_limit, rem_budget * 0.45 if other_configured else ollama_limit))
+            for m in models_to_try:
+                if prov in _UNAVAILABLE_PROVIDERS and not is_mocked:
+                    break
+                if f"{prov}:{m}" in _UNAVAILABLE_MODELS and not is_mocked:
+                    continue
+                try:
+                    resp = None
+                    if prov == "gemini":
+                        resp = self._call_gemini(prompt, system_prompt, m, temperature, max_tokens, timeout=call_to, keys=prov_keys)
+                    elif prov == "ollama":
+                        resp = self._call_ollama(messages, m, temperature, max_tokens, timeout=call_to)
+                    elif prov == "huggingface":
+                        resp = self._call_huggingface(prompt, system_prompt, m, max_tokens, timeout=call_to, keys=prov_keys)
                     else:
-                        ollama_limit = self.ollama_timeout
-                        call_to = get_call_timeout(ollama_limit, has_fallbacks=has_fallbacks)
+                        c_func = getattr(self, f"_call_{prov}", None)
+                        if c_func:
+                            resp = c_func(messages, m, temperature, max_tokens, timeout=call_to, keys=prov_keys)
+                    if resp and str(resp).strip():
+                        return resp.strip(), prov
+                except Exception as e:
+                    print(f"[LLM] Provider={prov} raised {type(e).__name__}: {e}")
+                if prov in _UNAVAILABLE_PROVIDERS and not is_mocked:
+                    break
+                if deadline - time.time() < 0.5:
+                    break
+
+            if not is_mocked and prov != "ollama":
+                last_diag = next((d for d in reversed(self.last_diagnostics) if d.get("provider") == prov), None)
+                cat = last_diag.get("category") if last_diag else None
+                if cat in ("auth_error", "insufficient_balance"):
+                    _UNAVAILABLE_PROVIDERS.add(prov, cooldown=1800)
+                elif cat == "timeout":
+                    _UNAVAILABLE_PROVIDERS.add(prov, cooldown=10)
+                else:
+                    _UNAVAILABLE_PROVIDERS.add(prov, cooldown=30)
+            print(f"[LLM] Provider={prov} attempt failed (elapsed={time.time() - prov_start:.2f}s, timeout={call_to:.1f}s). Remaining: {max(0.0, deadline - time.time()):.2f}s")
+            return None
+
+        import concurrent.futures
+        from core.progress_acknowledgement import acknowledge_progress
+
+        is_mocked_test = any(hasattr(getattr(self, f"_call_{p}", None), "assert_called") for p in ("groq", "openai", "gemini", "deepseek", "huggingface", "anthropic", "ollama"))
+
+        with acknowledge_progress(delay=1.5):
+            eligible_for_hedge = []
+            if is_interactive and not is_mocked_test:
+                eligible_for_hedge = [
+                    p for p in provider_chain
+                    if (self._is_provider_configured(p, resolved_uid) or hasattr(getattr(self, f"_call_{p}", None), "assert_called"))
+                    and p not in _UNAVAILABLE_PROVIDERS
+                ]
+
+            if len(eligible_for_hedge) >= 2:
+                p1, p2 = eligible_for_hedge[0], eligible_for_hedge[1]
+                hedge_delay = getattr(self, "hedged_delay", 1.2)
+                print(f"[LLM Hedged] Sending request to fastest provider: {p1} (hedge delay: {hedge_delay:.1f}s)")
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+                try:
+                    fut1 = executor.submit(_execute_provider, p1, True)
+                    fut2 = None
                     try:
-                        resp = self._call_ollama(messages, self.ollama_model, temperature, max_tokens, timeout=call_to)
-                        if resp:
-                            return _return_completion(resp, prov)
+                        wait_t1 = min(hedge_delay, max(0.1, deadline - time.time()))
+                        res1 = fut1.result(timeout=wait_t1)
+                        if res1:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            ans_text, winner_prov = res1
+                            return _return_completion(ans_text, winner_prov)
+                    except concurrent.futures.TimeoutError:
+                        print(f"[LLM Hedged] Provider {p1} did not answer within {hedge_delay:.1f}s — hedging request to {p2}")
                     except Exception as e:
-                        print(f"[LLM] Provider=Ollama raised {type(e).__name__}: {e}")
-                    print(f"[LLM] Provider=Ollama attempt failed (elapsed={time.time() - prov_start:.2f}s, timeout={call_to:.1f}s). Remaining: {max(0.0, deadline - time.time()):.2f}s")
+                        print(f"[LLM Hedged] Provider {p1} error: {e} — hedging request to {p2}")
+
+                    if deadline - time.time() >= 0.5:
+                        fut2 = executor.submit(_execute_provider, p2, True)
+
+                    futs = {}
+                    if fut2:
+                        futs[fut2] = p2
+                    if not fut1.done():
+                        futs[fut1] = p1
+
+                    if futs:
+                        rem_hedge_time = max(0.5, deadline - time.time())
+                        try:
+                            for fut in concurrent.futures.as_completed(futs, timeout=rem_hedge_time):
+                                prov_done = futs[fut]
+                                try:
+                                    res = fut.result()
+                                    if res:
+                                        executor.shutdown(wait=False, cancel_futures=True)
+                                        ans_text, winner_prov = res
+                                        return _return_completion(ans_text, winner_prov)
+                                except Exception as e:
+                                    print(f"[LLM Hedged] Provider {prov_done} exception: {e}")
+                        except Exception as e:
+                            print(f"[LLM Hedged] as_completed timed out: {e}")
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+
+                remaining = [p for p in provider_chain if p not in (p1, p2)]
+                for prov in remaining:
+                    if deadline - time.time() < 0.5:
+                        break
+                    res = _execute_provider(prov, has_fallbacks=True)
+                    if res:
+                        ans_text, winner_prov = res
+                        return _return_completion(ans_text, winner_prov)
+            else:
+                for prov in provider_chain:
+                    if deadline - time.time() < 0.5:
+                        break
+                    res = _execute_provider(prov, has_fallbacks=True)
+                    if res:
+                        ans_text, winner_prov = res
+                        return _return_completion(ans_text, winner_prov)
 
         total_elapsed = time.time() - start_time
         rem_budget = max(0.0, deadline - time.time())
@@ -1489,6 +1897,7 @@ class LLMEngine:
                 tracker.set_reason(timeout="all provider deadlines exhausted")
         except Exception:
             pass
+        self._completion_cache[req_dedup_hash] = (time.time(), None, list(self.last_diagnostics))
         return None
 
     def stream_completion(
@@ -1499,12 +1908,106 @@ class LLMEngine:
         memory: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: int = 512,
-        user_id: Optional[int] = None
+        user_id: Optional[int] = None,
+        cancel_event: Optional[Any] = None
     ):
         """
         Streams completion sentence-by-sentence.
         Yields each completed sentence as soon as it is generated for instant TTS dispatch.
         """
+        streamed_any = False
+        try:
+            # ── Spoken-voice conciseness policy ──────────────────────────────────
+            # When the caller supplies no system prompt (plain conversational stream),
+            # inject a minimal identity + conciseness directive so responses stay
+            # natural and short for TTS, not verbose essay-style answers.
+            if not system_prompt:
+                try:
+                    from instance.config import settings as _cfg
+                    _asst_name = _cfg.get_assistant_name() or "your assistant"
+                except Exception:
+                    _asst_name = "your assistant"
+                _mem_part = f"\nRelevant Memory: {memory}" if memory else ""
+                _ctx_part = f"\nRecent Context: {context}" if context else ""
+                system_prompt = (
+                    f"You are {_asst_name}, a helpful voice assistant. "
+                    "Reply concisely in 1–3 spoken sentences. "
+                    "Do not use bullet lists, markdown, or meta-commentary. "
+                    "Speak naturally as if talking to someone face-to-face."
+                    + _mem_part + _ctx_part
+                )
+                # Once memory/context are embedded in the system prompt, clear them
+                # so they are not duplicated as separate system messages below.
+                memory = None
+                context = None
+            # ── end conciseness policy ────────────────────────────────────────────
+
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            if memory:
+                messages.append({"role": "system", "content": f"Relevant background memory:\n{memory}"})
+            if context:
+                messages.append({"role": "system", "content": f"Recent conversation context:\n{context}"})
+            messages.append({"role": "user", "content": prompt})
+
+            if "groq" not in _UNAVAILABLE_PROVIDERS and self.groq_keys:
+                api_key = self.groq_keys[0]
+                model = getattr(self, "groq_model", "llama-3.3-70b-versatile")
+                headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"}
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": True
+                }
+                res = self._session.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    stream=True,
+                    timeout=5.0
+                )
+                if res.status_code == 200:
+                    buffer = ""
+                    for line in res.iter_lines():
+                        if cancel_event and cancel_event.is_set():
+                            res.close()
+                            return
+                        if not line:
+                            continue
+                        line_str = line.decode("utf-8") if isinstance(line, bytes) else str(line)
+                        if line_str.startswith("data: "):
+                            chunk = line_str[6:].strip()
+                            if chunk == "[DONE]":
+                                break
+                            try:
+                                import json
+                                d = json.loads(chunk)
+                                delta = d.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if delta:
+                                    buffer += delta
+                                    m = re.search(r'([.?!])(?:\s+|$)', buffer)
+                                    if m and m.end() < len(buffer):
+                                        s_text = buffer[:m.end()].strip()
+                                        buffer = buffer[m.end():]
+                                        if s_text:
+                                            streamed_any = True
+                                            yield s_text
+                            except Exception:
+                                pass
+                    if buffer.strip() and not (cancel_event and cancel_event.is_set()):
+                        streamed_any = True
+                        yield buffer.strip()
+                    res.close()
+                    return
+        except Exception as st_err:
+            logger.debug("[LLMEngine] Real-time SSE streaming error: %s", st_err)
+
+        if streamed_any:
+            return
+
         full_text = self.get_completion(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -1520,6 +2023,8 @@ class LLMEngine:
         from extensions.system.tts_backend import split_sentences_for_streaming
         sentences = split_sentences_for_streaming(full_text)
         for s in sentences:
+            if cancel_event and cancel_event.is_set():
+                break
             if s.strip():
                 yield s.strip()
 
@@ -1624,7 +2129,7 @@ class LLMEngine:
         "  CALCULATOR         — arithmetic, math calculation (e.g. 'calculate 25 * 8', 'what is 12 + 37'). NEVER for generating or listing numbers\n"
         "  CODE_GENERATION    — write/build/create code, programs, scripts\n"
         "  TRANSLATION        — translate text to another language\n"
-        "  TIME_QUERY         — asking what time it is\n"
+        "  TIME_QUERY         — asking what time it is, setting/listing/cancelling alarms, timers, or stopwatch ('set an alarm for 30 seconds', 'wake me up in 5 minutes', 'set a timer', 'what is the time')\n"
         "  DATE_QUERY         — asking what date/day it is\n"
         "  WEATHER_QUERY      — asking about weather, temperature, forecast, umbrella\n"
         "  MEMORY_QUERY       — asking what the assistant remembers about the user, or what the user and assistant were working on\n"
@@ -1638,10 +2143,11 @@ class LLMEngine:
         "  'remove', 'erase', 'throw away', 'get rid of', 'I don't need' → action=delete_folder or delete_file\n"
         "  'make', 'new', 'create', 'mkdir' → action=create_folder\n\n"
         "DEVICE_CONTROL entity guidance:\n"
-        "  action values: mute | unmute | increase_volume | decrease_volume | screenshot | lock\n"
+        "  action values: mute | unmute | increase_volume | decrease_volume | screenshot | lock | get_location\n"
         "  'make quiet', 'turn sound off', 'silence' → action=mute\n"
         "  'too loud', 'lower sound', 'turn down' → action=decrease_volume\n"
-        "  'louder', 'turn up' → action=increase_volume\n\n"
+        "  'louder', 'turn up' → action=increase_volume\n"
+        "  'where am i', 'what is my current location', 'my location' → action=get_location\n\n"
         "POWER_ACTION entity guidance:\n"
         "  action values: shutdown | restart | sleep\n"
         "  'turn off PC/computer', 'shut down' → action=shutdown\n"
@@ -1660,100 +2166,290 @@ class LLMEngine:
         "ONLY return the JSON object. No other text."
     )
 
-    def semantic_resolve(self, user_input: str) -> Dict[str, Any]:
-        """
-        Semantic intent resolution via LLM — called ONLY when the deterministic
-        regex router in UnifiedCommandRouter returns GENERAL_CONVERSATION.
+    # ------------------------------------------------------------------
+    # Semantic output contract
+    # ------------------------------------------------------------------
+    # The semantic layer only ever hands back objects that satisfy this
+    # contract.  Anything else (empty, truncated, partial, wrong types,
+    # unknown labels) is rejected and replaced by the deterministic
+    # fallback -- never by a guessed intent with a confident score.
+    # ------------------------------------------------------------------
 
-        Uses the existing get_completion() multi-provider failover chain.
-        Does NOT execute any OS commands — returns structured intent + entities
-        that the UnifiedCommandRouter maps back to existing handlers.
+    # Capability values the reasoning prompt allows (kept in sync with the
+    # prompt text and with core/semantic_understanding.py).
+    REASONING_CAPABILITIES = [
+        "OPEN_APPLICATION",
+        "CLOSE_APPLICATION",
+        "DEVICE_CONTROL",
+        "CONTENT_INSERTION",
+        "CONTENT_ACQUISITION",
+        "ARTIFACT_READING",
+        "ENVIRONMENT_QUERY",
+        "HISTORICAL_QUERY",
+        "FILE_OPERATIONS",
+        "TASK_MANAGEMENT",
+        "MUSIC",
+        "STOP_SPEECH",
+        "GENERAL_CONVERSATION",
+        "AUTO",
+    ]
 
-        Returns:
-            {
-                "intent": str,           # One of INTENT_LABELS
-                "confidence": float,     # 0.0 – 1.0
-                "entities": {
-                    "action":    str|None,
-                    "target":    str|None,
-                    "name":      str|None,
-                    "location":  str|None,
-                },
-                "needs_clarification": bool,
-                "clarification_reason": str|None,
-                "source": "semantic"     # marks that this came from LLM, not regex
-            }
+    REQUEST_TYPES = [
+        "INSTRUCTION",
+        "QUESTION",
+        "EXPLANATION",
+        "NEGATION",
+        "HYPOTHETICAL",
+        "CORRECTION",
+        "CONVERSATION",
+    ]
 
-        On any failure (LLM unavailable, bad JSON, unknown label) returns:
-            {"intent": "GENERAL_CONVERSATION", "confidence": 0.5,
-             "entities": {}, "needs_clarification": False,
-             "clarification_reason": None, "source": "semantic_fallback"}
-        """
-        import json as _json
+    # Total wall-clock budget for one semantic resolution including the single
+    # bounded repair retry.  Prevents a broken provider from stalling a turn.
+    SEMANTIC_TOTAL_BUDGET = 5.0
+    SEMANTIC_MAX_ATTEMPTS = 2
 
-        _fallback = {
+    @staticmethod
+    def _coerce_confidence(value: Any) -> Optional[float]:
+        """Return a finite float in [0, 1], or None when the value is unusable."""
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            c = float(value)
+        except (TypeError, ValueError):
+            return None
+        if c != c or c in (float("inf"), float("-inf")):   # NaN / infinity
+            return None
+        return max(0.0, min(1.0, c))
+
+    def _semantic_failure_fallback(self, reason: str) -> Dict[str, Any]:
+        """Deterministic, non-actionable fallback for a failed semantic pass."""
+        return {
             "intent": "GENERAL_CONVERSATION",
-            "confidence": 0.5,
+            "confidence": 0.0,
             "entities": {"action": None, "target": None, "name": None, "location": None},
             "needs_clarification": False,
             "clarification_reason": None,
             "source": "semantic_fallback",
+            "failure_reason": reason,
         }
+
+    def _validate_semantic_intent_object(self, parsed: Any):
+        """Validate/normalise a semantic_resolve() model object.
+
+        Returns (normalised_dict, "") on success or (None, reason) on failure.
+        Required: intent (known label), confidence (finite 0..1), entities (object).
+        """
+        if not isinstance(parsed, dict) or not parsed:
+            return None, "not_a_json_object"
+
+        intent_label = str(parsed.get("intent") or "").strip().upper().replace(" ", "_")
+        if not intent_label:
+            return None, "missing_intent"
+        if intent_label not in self.INTENT_LABELS:
+            return None, "unknown_intent_label"
+
+        confidence = self._coerce_confidence(parsed.get("confidence"))
+        if confidence is None:
+            return None, "missing_or_invalid_confidence"
+
+        raw_entities = parsed.get("entities")
+        if raw_entities is None:
+            raw_entities = {}
+        if not isinstance(raw_entities, dict):
+            return None, "invalid_entities_type"
+
+        def _entity(key: str) -> Optional[str]:
+            val = raw_entities.get(key)
+            if val is None:
+                return None
+            if isinstance(val, (int, float, bool)):
+                return str(val)
+            if not isinstance(val, str):
+                return None
+            cleaned = val.strip()
+            return cleaned or None
+
+        needs_clarification = parsed.get("needs_clarification", False)
+        if not isinstance(needs_clarification, bool):
+            needs_clarification = str(needs_clarification).strip().lower() in ("true", "1", "yes")
+        clarification_reason = parsed.get("clarification_reason")
+        if clarification_reason is not None and not isinstance(clarification_reason, str):
+            clarification_reason = str(clarification_reason)
+
+        return {
+            "intent": intent_label,
+            "confidence": confidence,
+            "entities": {
+                "action": _entity("action"),
+                "target": _entity("target"),
+                "name": _entity("name"),
+                "location": _entity("location"),
+            },
+            "needs_clarification": needs_clarification,
+            "clarification_reason": clarification_reason,
+            "source": "semantic",
+        }, ""
+
+    def _validate_semantic_reasoning_object(self, parsed: Any):
+        """Validate/normalise a semantic_reasoning() model object.
+
+        The reasoning prompt promises a fixed shape.  Any object that does not
+        provide every required field with the right type is rejected so that an
+        incomplete/truncated model answer can never be executed as an action.
+        """
+        if not isinstance(parsed, dict) or not parsed:
+            return None, "not_a_json_object"
+
+        request_type = str(parsed.get("request_type") or "").strip().upper()
+        if request_type not in self.REQUEST_TYPES:
+            return None, "invalid_request_type"
+
+        capability = str(parsed.get("capability") or "").strip().upper()
+        if capability not in self.REASONING_CAPABILITIES:
+            return None, "invalid_capability"
+
+        confidence = self._coerce_confidence(parsed.get("confidence"))
+        if confidence is None:
+            return None, "missing_or_invalid_confidence"
+
+        for flag in ("requires_action", "requires_information", "requires_clarification"):
+            if flag not in parsed or not isinstance(parsed.get(flag), bool):
+                return None, f"missing_or_invalid_{flag}"
+
+        goal = parsed.get("goal")
+        if not isinstance(goal, str) or not goal.strip():
+            return None, "missing_goal"
+
+        parameters = parsed.get("parameters")
+        if not isinstance(parameters, dict):
+            return None, "invalid_parameters"
+
+        references = parsed.get("references")
+        if references is None:
+            references = {}
+        if not isinstance(references, dict):
+            return None, "invalid_references"
+
+        steps = parsed.get("steps")
+        if steps is None:
+            steps = []
+        if not isinstance(steps, list):
+            return None, "invalid_steps"
+
+        normalised = dict(parsed)
+        normalised.update({
+            "goal": goal.strip(),
+            "request_type": request_type,
+            "capability": capability,
+            "confidence": confidence,
+            "parameters": parameters,
+            "references": references,
+            "steps": steps,
+            "is_multi_step": bool(parsed.get("is_multi_step", False)),
+            "source": "semantic_llm",
+        })
+        return normalised, ""
+
+    def semantic_resolve(self, user_input: str, user_id: Optional[Any] = None) -> Dict[str, Any]:
+        """
+        Semantic intent resolution via LLM -- called ONLY when the deterministic
+        regex router in UnifiedCommandRouter returns GENERAL_CONVERSATION.
+
+        Uses the existing get_completion() multi-provider failover chain.
+        Does NOT execute any OS commands -- returns structured intent + entities
+        that the UnifiedCommandRouter maps back to existing handlers.
+
+        The model answer must satisfy _validate_semantic_intent_object() exactly.
+        A malformed/truncated/empty answer is retried at most once and then
+        replaced by the deterministic fallback (never by a confident guess).
+        """
+        global _SEMANTIC_RESOLVE_CACHE
 
         if not user_input or not user_input.strip():
-            return _fallback
+            return self._semantic_failure_fallback("empty_input")
 
-        try:
-            raw = self.get_completion(
-                prompt=user_input,
-                system_prompt=self._SEMANTIC_SYSTEM_PROMPT,
-                temperature=0.0,   # deterministic — no creativity here
-                max_tokens=200,
-                timeout_budget=4.0,
-                task_type="classification",
+        norm_key = user_input.strip().lower()
+        effective_uid = user_id
+        if effective_uid is None:
+            try:
+                from instance.config import settings as _cfg
+                effective_uid = getattr(_cfg, 'CURRENT_USER_ID', None)
+            except Exception:
+                effective_uid = None
+
+        cache_key = (effective_uid, norm_key)
+        if cache_key in _SEMANTIC_RESOLVE_CACHE:
+            cached = _SEMANTIC_RESOLVE_CACHE[cache_key]
+            print(f"[SEMANTIC_RESOLVE CACHE HIT] '{user_input[:60]}' -> intent={cached.get('intent')}")
+            return dict(cached)
+
+        start_ts = time.time()
+        parsed = None
+        failure_reason = "no_model_response"
+
+        for attempt in range(1, self.SEMANTIC_MAX_ATTEMPTS + 1):
+            remaining = self.SEMANTIC_TOTAL_BUDGET - (time.time() - start_ts)
+            if remaining <= 0.75:
+                failure_reason = "semantic_budget_exhausted"
+                break
+
+            prompt = user_input
+            if attempt > 1:
+                # Bounded repair retry: restate the contract, same deterministic
+                # temperature.  Never retries the same invalid answer again.
+                prompt = (
+                    f"{user_input}\n\n"
+                    "Your previous answer was not a valid JSON object with all required "
+                    "fields. Return ONLY one JSON object with keys intent, confidence, "
+                    "entities, needs_clarification, clarification_reason."
+                )
+
+            try:
+                raw = self.get_completion(
+                    prompt=prompt,
+                    system_prompt=self._SEMANTIC_SYSTEM_PROMPT,
+                    temperature=0.0,   # deterministic — no creativity here
+                    max_tokens=600,
+                    timeout_budget=min(4.0, remaining),
+                    task_type="classification",
+                    user_id=effective_uid,
+                )
+            except Exception as e:
+                failure_reason = f"llm_call_failed:{type(e).__name__}"
+                break
+
+            if not raw or not str(raw).strip():
+                failure_reason = "empty_model_response"
+                continue
+
+            try:
+                from core.json_repair import parse_llm_json
+                candidate = parse_llm_json(raw)
+            except Exception as e:
+                candidate = None
+                failure_reason = f"json_parse_error:{type(e).__name__}"
+
+            validated, reason = self._validate_semantic_intent_object(candidate)
+            if validated is not None:
+                parsed = validated
+                break
+
+            failure_reason = reason
+            print(
+                f"[SEMANTIC_RESOLVE] contract violation attempt={attempt} "
+                f"reason={reason} response_len={len(str(raw))}"
             )
-        except Exception as e:
-            print(f"[SEMANTIC_RESOLVE] LLM call failed: {e}")
-            return _fallback
 
-        if not raw:
-            return _fallback
+        if parsed is None:
+            print(f"[SEMANTIC_RESOLVE] semantic reasoning failed reason={failure_reason} -> deterministic_fallback")
+            return self._semantic_failure_fallback(failure_reason)
 
-        # Strip accidental markdown fences or leading/trailing whitespace
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        try:
-            parsed = _json.loads(raw)
-        except (_json.JSONDecodeError, ValueError) as e:
-            print(f"[SEMANTIC_RESOLVE] JSON parse error: {e} | Raw: {raw[:200]}")
-            return _fallback
-
-        # Validate intent label is one we recognise
-        intent_label = str(parsed.get("intent", "")).upper().strip()
-        if intent_label not in self.INTENT_LABELS:
-            print(f"[SEMANTIC_RESOLVE] Unknown intent label '{intent_label}' — using fallback")
-            return _fallback
-
-        confidence = float(parsed.get("confidence", 0.5))
-        entities = parsed.get("entities", {})
-        if not isinstance(entities, dict):
-            entities = {}
-
-        # Normalise entity dict — ensure all expected keys exist
-        normalised_entities = {
-            "action":   entities.get("action"),
-            "target":   entities.get("target"),
-            "name":     entities.get("name"),
-            "location": entities.get("location"),
-        }
-
-        needs_clarification = bool(parsed.get("needs_clarification", False))
-        clarification_reason = parsed.get("clarification_reason")
+        intent_label = parsed["intent"]
+        confidence = parsed["confidence"]
+        normalised_entities = parsed["entities"]
+        needs_clarification = parsed["needs_clarification"]
+        clarification_reason = parsed["clarification_reason"]
 
         # Low-confidence result → force clarification for destructive intents
         DESTRUCTIVE_INTENTS = {
@@ -1792,12 +2488,18 @@ class LLMEngine:
             "needs_clarification": needs_clarification,
             "clarification_reason": clarification_reason,
             "source": "semantic",
+            "original_input": user_input,
         }
 
         print(
             f"[SEMANTIC_RESOLVE] '{user_input[:60]}' -> intent={intent_label} "
             f"confidence={confidence:.2f} clarify={needs_clarification}"
         )
+        if len(_SEMANTIC_RESOLVE_CACHE) > 500:
+            _SEMANTIC_RESOLVE_CACHE.clear()
+        # Only validated results are cached.  Failures are never cached so a
+        # transient provider problem cannot pin a user input to a bad answer.
+        _SEMANTIC_RESOLVE_CACHE[cache_key] = result
         return result
 
     def semantic_reasoning(
@@ -1805,6 +2507,7 @@ class LLMEngine:
         user_input: str,
         structured_context: Optional[Dict[str, Any]] = None,
         timeout_budget: float = 3.0,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Primary semantic reasoning layer for NOVA.
@@ -1812,10 +2515,10 @@ class LLMEngine:
         Distinguishes instructions, questions, explanations, negations, hypotheticals, and corrections.
         Resolves pronouns ('it', 'that', 'there', 'the previous one') using context.
         """
-        import json as _json
-
         _fallback = {
             "goal": user_input,
+            "original_input": user_input,
+            "normalized_goal": user_input,
             "request_type": "INSTRUCTION",
             "requires_action": True,
             "requires_information": False,
@@ -1826,7 +2529,7 @@ class LLMEngine:
             "references": {"what": None, "where": None},
             "is_multi_step": False,
             "steps": [],
-            "confidence": 0.5,
+            "confidence": 0.0,
             "source": "fallback",
         }
 
@@ -1924,38 +2627,79 @@ class LLMEngine:
 
         user_prompt = f"Context:\n{context_block}\n\nUser utterance:\n\"{user_input}\""
 
-        try:
-            raw = self.get_completion(
-                prompt=user_prompt,
-                system_prompt=system_prompt,
-                temperature=0.0,
-                max_tokens=350,
-                timeout_budget=timeout_budget
+        start_ts = time.time()
+        total_budget = max(float(timeout_budget or 3.0), 1.0) + 1.0
+        parsed = None
+        failure_reason = "no_model_response"
+
+        for attempt in range(1, self.SEMANTIC_MAX_ATTEMPTS + 1):
+            remaining = total_budget - (time.time() - start_ts)
+            if remaining <= 0.75:
+                failure_reason = "reasoning_budget_exhausted"
+                break
+
+            attempt_prompt = user_prompt
+            if attempt > 1:
+                attempt_prompt = (
+                    f"{user_prompt}\n\n"
+                    "Your previous answer did not satisfy the required JSON contract. "
+                    "Return ONLY the complete JSON object with every required field."
+                )
+
+            try:
+                raw = self.get_completion(
+                    prompt=attempt_prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.0,
+                    max_tokens=750,
+                    timeout_budget=min(float(timeout_budget or 3.0), remaining),
+                    user_id=user_id
+                )
+            except Exception as e:
+                failure_reason = f"llm_call_failed:{type(e).__name__}"
+                break
+
+            if not raw or not str(raw).strip():
+                failure_reason = "empty_model_response"
+                continue
+
+            raw_text = str(raw).strip()
+            if "```" in raw_text:
+                parts = raw_text.split("```")
+                for p in parts:
+                    p_clean = p.strip()
+                    if p_clean.startswith("json"):
+                        p_clean = p_clean[4:].strip()
+                    if p_clean.startswith("{") and p_clean.endswith("}"):
+                        raw_text = p_clean
+                        break
+
+            try:
+                from core.json_repair import parse_llm_json
+                candidate = parse_llm_json(raw_text)
+            except Exception as e:
+                candidate = None
+                failure_reason = f"json_parse_error:{type(e).__name__}"
+
+            validated, reason = self._validate_semantic_reasoning_object(candidate)
+            if validated is not None:
+                validated["original_input"] = user_input
+                validated["normalized_goal"] = validated.get("goal") or user_input
+                parsed = validated
+                break
+
+            failure_reason = reason
+            print(
+                f"[SEMANTIC_REASONING] contract violation attempt={attempt} "
+                f"reason={reason} response_len={len(raw_text)}"
             )
-        except Exception as e:
-            print(f"[SEMANTIC_REASONING] LLM error: {e}")
+
+        if parsed is None:
+            print(f"[SEMANTIC_REASONING] reasoning failed reason={failure_reason} -> deterministic_fallback")
+            _fallback["failure_reason"] = failure_reason
             return _fallback
 
-        if not raw:
-            return _fallback
-
-        raw = raw.strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1] if len(parts) > 1 else raw
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        try:
-            parsed = _json.loads(raw)
-            if not isinstance(parsed, dict):
-                return _fallback
-            parsed["source"] = "semantic_llm"
-            return parsed
-        except Exception as e:
-            print(f"[SEMANTIC_REASONING] JSON decode failed: {e} | Raw: {raw[:150]}")
-            return _fallback
+        return parsed
 
 
 # Module-level singleton

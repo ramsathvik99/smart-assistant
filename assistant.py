@@ -300,6 +300,18 @@ def main():
     # Initialize Unified Routing
     initialize_unified_routing()
 
+    # Pre-warm local Whisper STT engine in background so first command is instant
+    try:
+        def _warm_up_stt():
+            try:
+                from extensions.system.stt_engine import get_stt_engine
+                get_stt_engine().warm_up()
+            except Exception as e:
+                print(f"[STT] Startup warm-up notice: {e}")
+        threading.Thread(target=_warm_up_stt, daemon=True, name="stt-startup-warmup").start()
+    except Exception:
+        pass
+
     print("[ASSISTANT] Launching PyQt6 UI...")
     from modules.ui.pyqt_app import AssistantApp
     app = AssistantApp()

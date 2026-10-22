@@ -1808,17 +1808,53 @@ def _brain_process_core(
         from core.content_acquisition import get_content_acquisition_engine
         acq_engine = get_content_acquisition_engine()
 
+        effective_req = input_to_analyze if reference_resolved else user_input
         artifact = acq_engine.acquire_content(
-            user_request=user_input,
+            user_request=effective_req,
             user_id=uid_int,
             dialogue_state=dialogue_mgr.current_state,
         )
 
+        # Fallback pronoun safeguard: if extracted topic is a pronoun, bind to pending topic
+        if artifact.topic.lower() in ("it", "that", "this", "them"):
+            pending_top = dialogue_mgr.current_state.session_context.get("pending_unresolved_topic") or dialogue_mgr.current_state.session_context.get("last_content_topic")
+            if pending_top:
+                artifact.topic = pending_top
+
+        dialogue_mgr.current_state.session_context["last_content_topic"] = artifact.topic
+        dialogue_mgr.current_state.session_context["last_content_type"] = artifact.content_type
+
+        if artifact.status == "failed" or not artifact.content:
+            dialogue_mgr.current_state.session_context["pending_unresolved_topic"] = artifact.topic
+            dialogue_mgr.current_state.session_context["last_failed_topic"] = artifact.topic
+            dialogue_mgr.current_state.session_context["last_failed_request"] = user_input
+            msg = f"I was unable to find or gather information about {artifact.topic} right now because the language model providers are currently unavailable."
+            full_resp = (pending_prefix + msg).strip()
+            dialogue_mgr.record_response(full_resp)
+            dialogue_mgr.update_state(
+                execution_result={
+                    "status": "error",
+                    "intent": "CONTENT_ACQUISITION",
+                    "action": "gather_information_failed",
+                    "target": artifact.topic,
+                    "response": full_resp,
+                },
+                intents=["CONTENT_ACQUISITION"],
+            )
+            return {
+                "status": "error",
+                "intent": "CONTENT_ACQUISITION",
+                "response": full_resp,
+                "artifact_id": artifact.artifact_id,
+                "topic": artifact.topic,
+                "content_type": artifact.content_type,
+                "artifact": artifact.to_dict(),
+                "handled": True,
+            }
+
         dialogue_mgr.current_state.active_artifact = artifact.to_dict()
         dialogue_mgr.current_state.session_context["active_artifact"] = artifact.to_dict()
         dialogue_mgr.current_state.session_context["last_content_artifact_id"] = artifact.artifact_id
-        dialogue_mgr.current_state.session_context["last_content_topic"] = artifact.topic
-        dialogue_mgr.current_state.session_context["last_content_type"] = artifact.content_type
 
         if artifact.content_type == "code":
             type_label = f"{artifact.programming_language.capitalize()} code" if artifact.programming_language else "code"
@@ -2090,7 +2126,8 @@ def _brain_process_core(
     # Step 1.1d — DOCUMENT INTELLIGENCE & REFERENCE RESOLUTION
     # ------------------------------------------------------------------
     is_email_cmd = any(k in clean_low for k in ("email", "emails", "mail", "mails", "inbox", "from:", "subject:", "reply to this", "draft a reply"))
-    is_doc_cmd = (not is_email_cmd) and ((semantic_rep.intent in ("DOCUMENT_INTELLIGENCE", "DOCUMENT_READING")) or any(
+    is_browser_or_visual_cmd = any(k in clean_low for k in ("screenshot", "screenshots", "browser scenario", "browser automation", "dummy password", "inspect the url", "inspect the page", "nonexistent element", "adaptive recovery", "adaptive browser", "verified browser", "export script", "export scripts", "export web scripts"))
+    is_doc_cmd = (not is_email_cmd) and (not is_browser_or_visual_cmd) and ((semantic_rep.intent in ("DOCUMENT_INTELLIGENCE", "DOCUMENT_READING")) or any(
         phrase in clean_low for phrase in (
             "summarize", "summary", "big picture", "compare these", "compare the documents",
             "make a summary pdf", "create one pdf", "make that into a pdf", "make a pdf",
@@ -2362,7 +2399,7 @@ def _brain_process_core(
             }
 
     # 2.2 Universal OS Goal Execution (Natural OS Operations)
-    if not semantic_rep.rewritten_command:
+    if not semantic_rep.rewritten_command and not is_browser_or_visual_cmd:
         try:
             from core.os_gateway import get_os_gateway
             os_gw = get_os_gateway()
@@ -2393,16 +2430,10 @@ def _brain_process_core(
                 }
 
     # 3. Conversational thoughts / non-action expressions (Section 9)
-    if not semantic_rep.action_required and semantic_rep.intent == "GENERAL_CONVERSATION" and not any(w in clean_low for w in ("joke", "hello", "hi", "how are you")):
-        conv_ack = "I understand! If you'd like me to perform an action for you, just let me know."
-        dialogue_mgr.record_response(conv_ack)
-        return {
-            "status": "success",
-            "intent": "GENERAL_CONVERSATION",
-            "response": conv_ack,
-            "semantic_representation": semantic_rep.to_dict(),
-            "handled": True
-        }
+    # NOTE: Do NOT add an early-return canned gate here. Corrections ("I am 21 years old"),
+    # personal facts, and informal statements are GENERAL_CONVERSATION inputs that must
+    # reach the UCR GENERAL_CONVERSATION handler for proper memory extraction, LLM response,
+    # and offline factual recall. The UCR handler is the authoritative path for these inputs.
     # Step 1.4 — EXPLICIT POSTPONEMENT / PERSISTENCE (Phase 9)
     # ------------------------------------------------------------------
     if any(phrase in clean_low for phrase in ("continue this later", "save this for later", "finish this later", "postpone this", "remember this for later", "save this goal")):

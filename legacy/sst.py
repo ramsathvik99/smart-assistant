@@ -24,6 +24,8 @@ once per process.  If the cached device disappears (stream open fails)
 the cache is cleared and the selection retried automatically.
 """
 
+import os
+import sys
 import time
 import threading
 import math
@@ -34,6 +36,7 @@ try:
 except Exception:
     pyaudio = None
 import queue
+import collections
 
 from instance.config import settings as CONFIG
 
@@ -573,7 +576,10 @@ def _recognise(audio: sr.AudioData) -> str:
             vl_rec.on_transcription_error("Speech service unavailable")
         _tts_speak("Speech service unavailable. Please type your command.")
         try:
-            return input("You: ")
+            import sys
+            if sys.stdin and hasattr(sys.stdin, "isatty") and sys.stdin.isatty():
+                return input("You: ")
+            return ""
         except Exception:
             return ""
 
@@ -844,14 +850,43 @@ def _continuous_audio_stream_loop():
               f"Speech threshold: {speech_thresh:.0f} RMS | "
               f"Silence threshold: {silence_thresh:.0f} RMS")
 
+        # ── VAD engine configuration & hang time ──────────────────────────────
+        vad_engine_type = os.getenv("VAD_ENGINE", "neural").lower()
+        try:
+            from instance.config import settings
+            vad_engine_type = getattr(settings, "VAD_ENGINE", vad_engine_type).lower()
+        except Exception:
+            pass
+
+        silero_vad = None
+        if vad_engine_type == "neural":
+            try:
+                from faster_whisper.vad import get_vad_model
+                silero_vad = get_vad_model()
+                print("[VAD] Silero Neural VAD engine active via ONNX")
+            except Exception as e:
+                print(f"[VAD] Failed to initialize neural VAD: {e}. Falling back to energy VAD.")
+                silero_vad = None
+
+        # Post-speech hang time: ~700 ms (11 frames * 64 ms) for neural, or VAD_SILENCE_END_FRAMES for energy
+        if vad_engine_type == "neural":
+            try:
+                SILENCE_END = int(os.getenv("VAD_SILENCE_HANG_FRAMES", "11"))
+            except Exception:
+                SILENCE_END = 11
+        else:
+            SILENCE_END = VAD_SILENCE_END_FRAMES
+
         # ── VAD state ─────────────────────────────────────────────────────────
         vad_state          = STATE_LISTENING
         onset_ring_bool    = []   # list[bool], len <= ONSET_WIN
         onset_ring_chunks  = []   # list[np.ndarray], len <= ONSET_WIN
+        pre_roll_ring      = collections.deque(maxlen=5)  # ~320 ms pre-roll
         utterance_frames   = []   # numpy chunks
         speech_frame_count = 0    # speech-positive frames inside utterance
         consecutive_silence = 0   # consecutive silence frames inside utterance
         last_queue_full_time = 0.0
+        utterance_start_time = 0.0
 
         while not _continuous_audio_state['stop_requested']:
             try:
@@ -866,6 +901,10 @@ def _continuous_audio_stream_loop():
 
                 # ── Infrasonic hardware filter ────────────────────────────────
                 chunk = hp_filter.process(chunk)
+
+                # Track rolling pre-roll audio (~320 ms) during standby listening
+                if vad_state == STATE_LISTENING:
+                    pre_roll_ring.append(chunk)
 
                 # ── EchoGuard Acoustic Echo Filter ────────────────────────────
                 is_user_speech = True
@@ -891,9 +930,21 @@ def _continuous_audio_stream_loop():
                 # genuine user speech from assistant echo.
                 if tts_speaking:
                     barge_in_thresh = max(speech_thresh, noise_floor * 2.6, 1350.0)
-                    is_speech = (frame_rms >= barge_in_thresh) and is_user_speech
+                    energy_speech = (frame_rms >= barge_in_thresh) and is_user_speech
                 else:
-                    is_speech = (frame_rms >= speech_thresh) and is_user_speech
+                    energy_speech = (frame_rms >= speech_thresh) and is_user_speech
+
+                # Confirm speech frame with Neural VAD if enabled
+                if silero_vad is not None and energy_speech:
+                    try:
+                        chunk_f32 = chunk.astype(np.float32) / 32768.0
+                        vad_probs = silero_vad(chunk_f32)
+                        neural_prob = float(np.max(vad_probs))
+                        is_speech = (neural_prob >= 0.40)
+                    except Exception:
+                        is_speech = energy_speech
+                else:
+                    is_speech = energy_speech
 
                 # ═════════════════════════════════════════════════════════════
                 # STATE: LISTENING
@@ -929,8 +980,15 @@ def _continuous_audio_stream_loop():
                                     pass
                             print("[BARGE-IN] Genuine user speech detected during assistant playback — stopping TTS immediately!")
 
-                        utterance_frames    = list(onset_ring_chunks) if onset_ring_chunks else [chunk]
+                        # Build initial utterance buffer incorporating ~300ms pre-roll
+                        if pre_roll_ring:
+                            utterance_frames = list(pre_roll_ring)
+                        elif onset_ring_chunks:
+                            utterance_frames = list(onset_ring_chunks)
+                        else:
+                            utterance_frames = [chunk]
                         vad_state           = STATE_SPEAKING
+                        utterance_start_time = time.monotonic()
                         _ptt_active_in_utterance = _ptt_held
                         consecutive_silence = 0
                         speech_frame_count  = max(positives, 1)
@@ -992,7 +1050,8 @@ def _continuous_audio_stream_loop():
                                   f"frames={len(utterance_frames)} speech={speech_frame_count}")
                             last_queue_full_time = _vad_finish_utterance(
                                 utterance_frames, speech_frame_count,
-                                MIN_SPEECH, last_queue_full_time
+                                MIN_SPEECH, last_queue_full_time,
+                                utterance_start_time=utterance_start_time,
                             )
 
                         vad_state                = STATE_LISTENING
@@ -1019,7 +1078,8 @@ def _continuous_audio_stream_loop():
                               f"silence_frames={consecutive_silence}")
                         last_queue_full_time = _vad_finish_utterance(
                             utterance_frames, speech_frame_count,
-                            1 if ptt_released else MIN_SPEECH, last_queue_full_time
+                            1 if ptt_released else MIN_SPEECH, last_queue_full_time,
+                            utterance_start_time=utterance_start_time,
                         )
                         vad_state                = STATE_LISTENING
                         _ptt_active_in_utterance = False
@@ -1065,6 +1125,7 @@ def _vad_finish_utterance(
     speech_frame_count: int,
     min_speech: int,
     last_queue_full_time: float,
+    utterance_start_time: float = 0.0,
 ) -> float:
     """Validate and enqueue one complete utterance.  Returns updated last_queue_full_time."""
     if speech_frame_count < min_speech:
@@ -1076,8 +1137,10 @@ def _vad_finish_utterance(
 
     duration_s = len(utterance_frames) * CHUNK_SIZE / SAMPLE_RATE
     complete_audio = np.concatenate(utterance_frames)
+    if utterance_start_time <= 0.0:
+        utterance_start_time = time.monotonic()
     try:
-        _utterance_queue.put_nowait(complete_audio)
+        _utterance_queue.put_nowait((complete_audio, utterance_start_time))
         print(f"[VAD] queued utterance  frames={len(utterance_frames)} "
               f"speech_frames={speech_frame_count} "
               f"duration={duration_s:.2f}s")
@@ -1089,8 +1152,14 @@ def _vad_finish_utterance(
     return last_queue_full_time
 
 
-def _process_utterance(audio_data: np.ndarray):
+def _process_utterance(audio_item):
     """Process a complete utterance through STT and intent pipeline."""
+    if isinstance(audio_item, tuple) and len(audio_item) == 2:
+        audio_data, utterance_start_time = audio_item
+    else:
+        audio_data = audio_item
+        utterance_start_time = time.monotonic()
+
     try:
         from core.voice_lifecycle import get_voice_lifecycle
         vl = get_voice_lifecycle()
@@ -1099,24 +1168,62 @@ def _process_utterance(audio_data: np.ndarray):
         vl = None
 
     try:
-        # If TTS is still in flight when utterance finishes, halt it immediately
+        # Check utterance freshness: drop stale utterances older than UTTERANCE_MAX_AGE
+        UTTERANCE_MAX_AGE = float(os.getenv("UTTERANCE_MAX_AGE", "10.0"))
+        now = time.monotonic()
+        if utterance_start_time > 0.0 and (now - utterance_start_time) > UTTERANCE_MAX_AGE:
+            print(f"[UTTERANCE PROCESSOR] Dropping stale utterance (age={now - utterance_start_time:.2f}s > {UTTERANCE_MAX_AGE:.1f}s)")
+            if vl:
+                vl.reset_to_idle()
+            return
+
+        # Barge-in timing: only interrupt TTS if the utterance began AFTER speech started
         if _is_tts_speaking():
+            speech_start = 0.0
             try:
-                from extensions.system.tts_coordinator import interrupt_speech
-                interrupt_speech()
+                from legacy.tts import get_speech_start_time
+                speech_start = get_speech_start_time()
             except Exception:
+                pass
+
+            if speech_start > 0.0 and utterance_start_time > speech_start:
+                print(f"[TTS BARGE-IN] Real barge-in: utterance started at +{utterance_start_time - speech_start:.2f}s after speech began — interrupting TTS")
                 try:
-                    from legacy.tts import stop_speaking
-                    stop_speaking(interrupted=True)
+                    from extensions.system.tts_coordinator import interrupt_speech
+                    interrupt_speech()
                 except Exception:
-                    pass
+                    try:
+                        from legacy.tts import stop_speaking
+                        stop_speaking(interrupted=True)
+                    except Exception:
+                        pass
+            else:
+                print(f"[TTS COORDINATOR] Utterance began before or at speech start (u_start={utterance_start_time:.2f}, speech_start={speech_start:.2f}) — waiting for speech to end")
+                deadline = time.monotonic() + 15.0
+                while _is_tts_speaking() and time.monotonic() < deadline:
+                    time.sleep(0.05)
         
         # Convert to sr.AudioData format
         audio_bytes = audio_data.tobytes()
         audio_sr = sr.AudioData(audio_bytes, SAMPLE_RATE, 2)
         
+        try:
+            from core.latency_instrumentation import start_new_tracker
+            _trk = start_new_tracker()
+            if utterance_start_time > 0.0:
+                _trk.record("capture_start_timestamp", utterance_start_time)
+            _trk.record("utterance_end_timestamp", time.monotonic())
+        except Exception:
+            pass
+
         # STT recognition
         text = _recognise(audio_sr)
+
+        try:
+            from core.latency_instrumentation import get_current_tracker
+            get_current_tracker().record("transcription_complete_timestamp", time.monotonic())
+        except Exception:
+            pass
         
         if text and text.strip():
             clean_cmd = text.strip()
@@ -1134,13 +1241,62 @@ def _process_utterance(audio_data: np.ndarray):
             except Exception as _mc_err:
                 print(f"[MUSIC] Error checking incidental speech: {_mc_err}")
 
+            # Strip addressing and assistant name
+            asst_name = "Friday"
+            user_name = ""
+            try:
+                from core.assistant_core import assistant_core
+                u_ctx = assistant_core.get_user_context()
+                asst_name = u_ctx.get("assistant_name") or "Friday"
+                user_name = u_ctx.get("username") or ""
+            except Exception:
+                try:
+                    from instance.config import settings
+                    asst_name = getattr(settings, "CURRENT_ASSISTANT_NAME", "Friday")
+                except Exception:
+                    pass
+
+            from core.addressing import strip_address
+            clean_cmd, addressed = strip_address(clean_cmd, assistant_name=asst_name)
+
+            if addressed and not clean_cmd:
+                print(f"[ADDRESSING] Assistant name '{asst_name}' called alone — acknowledging")
+                if vl:
+                    vl.on_transcription_completed(asst_name)
+                ack_text = f"Yes {user_name.capitalize()}?" if (user_name and user_name.lower() != "user") else "Yes?"
+                try:
+                    from extensions.system.tts_coordinator import get_tts_coordinator, TTSPriority
+                    get_tts_coordinator().speak(ack_text, priority=TTSPriority.COMMAND)
+                except Exception:
+                    try:
+                        from legacy.tts import speak
+                        speak(ack_text)
+                    except Exception:
+                        pass
+                if vl:
+                    vl.reset_to_idle()
+                return
+
+            if not clean_cmd:
+                if vl:
+                    vl.on_transcription_error("Didn't catch that — try again.")
+                return
+
             if vl:
                 vl.on_transcription_completed(clean_cmd)
                 vl.on_assistant_executing(clean_cmd)
             # Process through existing pipeline
             from legacy.assistant import process_input
             print(f"[CONTINUOUS AUDIO] Processing: {clean_cmd}")
-            process_input(clean_cmd)
+            from instance.config import settings as _cfg_sst
+            sst_uid = getattr(_cfg_sst, 'CURRENT_USER_ID', None)
+            if not sst_uid:
+                try:
+                    from core.assistant_core import assistant_core
+                    sst_uid = assistant_core.get_current_user_id()
+                except Exception:
+                    sst_uid = None
+            process_input(clean_cmd, user_id=sst_uid)
         else:
             if vl:
                 vl.on_transcription_error("Didn't catch that — try again.")

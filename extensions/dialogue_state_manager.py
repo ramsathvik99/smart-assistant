@@ -508,6 +508,38 @@ class DialogueStateManager:
         if is_list_nav_command:
             return user_input, False
 
+        # ---- Destructive schedule-management scope clarification ----
+        # "Remove all the schedules" is ambiguous about WHICH schedule store is
+        # meant.  The router asks once; the answer is resolved here into the
+        # canonical destructive command carrying the explicit scope, so the
+        # confirmation flow never has to guess.
+        _pending_clar = getattr(self.current_state, "pending_clarification", None)
+        if isinstance(_pending_clar, dict) and _pending_clar.get("type") == "schedule_delete_scope":
+            scope_text = re.sub(r"[^a-z0-9\s]", " ", lower)
+            scope_text = re.sub(r"\s+", " ", scope_text).strip()
+            wants_reminders = bool(re.search(r"\b(?:reminders?|alerts?)\b", scope_text))
+            wants_events = bool(re.search(r"\b(?:calendar|events?|meetings?|appointments?|schedules?)\b", scope_text))
+            wants_all = bool(re.search(r"\b(?:both|all|everything|every\s+one|every\s+single)\b", scope_text))
+            is_negative = bool(re.match(r"^(?:no|nope|nah|cancel|stop|never\s*mind|forget|don'?t)\b", scope_text))
+            if is_negative:
+                self.current_state.pending_clarification = None
+                self.current_state.goal_status = "RUNNING"
+                return "cancel current goal", True
+            if wants_all or (wants_reminders and wants_events):
+                resolved_scope = "calendar and reminder"
+            elif wants_reminders:
+                resolved_scope = "reminder"
+            elif wants_events:
+                resolved_scope = "calendar"
+            else:
+                resolved_scope = ""
+            if resolved_scope:
+                self.current_state.pending_clarification = None
+                self.current_state.goal_status = "RUNNING"
+                resolved = f"delete all {resolved_scope} schedules"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (schedule deletion scope)")
+                return resolved, True
+
         # ---- Plural reference resolution ----
         # Handle phrases like "both of them", "both", "all of them", "them", "those two", "both apps", etc.
         # Resolve strictly to entities in the active_entity_set for the relevant semantic domain.
@@ -866,7 +898,15 @@ class DialogueStateManager:
             # Check turn freshness (turn delta <= 2)
             last_turn = self.current_state.turns[-1].turn_number if self.current_state.turns else 0
             if (self.current_state.current_turn - last_turn) <= 2:
-                if last_intent == "WEATHER_QUERY" or "weather" in self.current_state.entities or "location" in self.current_state.entities:
+                cand_low = candidate.lower()
+                last_turn_text = (self.current_state.turns[-1].user_input.lower() + " " + self.current_state.turns[-1].assistant_response.lower()) if self.current_state.turns else ""
+                is_edu_ctx = any(k in last_turn_text for k in ("study", "studies", "studied", "university", "college", "intermediate", "school", "education", "10th", "degree", "srm"))
+                is_edu_cand = any(k in cand_low for k in ("10th", "tenth", "intermediate", "inter", "school", "college", "degree", "major", "graduation"))
+                if is_edu_cand or (is_edu_ctx and last_intent in ("MEMORY_QUERY", "GENERAL_CONVERSATION")):
+                    resolved = f"where did I study {candidate}"
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (education/memory follow-up for: '{candidate}')")
+                    return resolved, True
+                elif last_intent == "WEATHER_QUERY" or "weather" in self.current_state.entities or "weather" in post_req or "weather" in last_action_desc:
                     resolved = f"what is the weather in {candidate}"
                     print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (weather follow-up for: '{candidate}')")
                     return resolved, True
@@ -896,6 +936,25 @@ class DialogueStateManager:
                     resolved = f"search google for {candidate}"
                     print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (web search follow-up for: '{candidate}')")
                     return resolved, True
+
+        # ── 3a2. Follow-ups to content acquisition, research, or pending/unresolved topic ──
+        # Handles: "tell me about it", "tell me about that", "tell me more about it", "what about it", "explain it"
+        m_topic_followup = re.match(
+            r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:tell\s+me|explain|what\s+about)\s+(?:more\s+)?(?:about\s+)?(?:it|that|this)|tell\s+me\s+about\s+it)[.!?]?$',
+            lower
+        )
+        if m_topic_followup:
+            topic_target = (
+                self.current_state.session_context.get("pending_unresolved_topic") or
+                self.current_state.session_context.get("last_content_topic") or
+                self.current_state.session_context.get("last_artifact_topic") or
+                (self.current_state.active_artifact or {}).get("topic") or
+                self.current_state.session_context.get("last_failed_topic")
+            )
+            if topic_target:
+                resolved = f"tell me about {topic_target}"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (content/topic follow-up for: '{topic_target}')")
+                return resolved, True
 
         # ── 3b. Follow-ups to telemetry or prior local commands ("so find it", "find it", "what do you mean?", "check it and tell me") ──
         m_find_it = re.match(
@@ -999,6 +1058,22 @@ class DialogueStateManager:
                 print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (entity explanation follow-up)")
                 return resolved, True
 
+        # Conversational verification ("Are you sure?", "Are you certain?", "Really?")
+        if lower.rstrip('?.!') in ("are you sure", "are you certain", "really", "are you positive", "you sure"):
+            if self.current_state.turns:
+                last_turn_q = self.current_state.turns[-1].user_input
+                resolved = f"are you sure: {last_turn_q}"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (verification of prior turn)")
+                return resolved, True
+
+        # Conversational simplification ("Explain that challenge in simpler terms", "explain it more simply")
+        m_simpler = re.match(r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain|describe)\s+(?:that|it|this|the\s+challenge|that\s+challenge)(?:\s+in\s+simpler\s+terms|\s+more\s+simply|\s+simply)?)[.!?]?$', lower)
+        if m_simpler and self.current_state.turns:
+            prev_input = self.current_state.turns[-1].user_input
+            resolved = f"explain that in simpler terms: {prev_input}"
+            print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (conversational simplification follow-up)")
+            return resolved, True
+
         # ── 4. Active browser contextual search & result interaction ──
         active_site = self.current_state.session_context.get("active_site", "")
         active_app = self.current_state.active_application or ""
@@ -1011,30 +1086,52 @@ class DialogueStateManager:
         # Result click/select ("Open the first result", "click the top result", "open the second result", "open the 3rd result", "open the previous result", "open the first link")
         m_res = re.search(r'\b(?:open|play|select|click)\s+(?:the\s+)?(first|top|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|previous)\s+(?:result|link)\b', lower)
         is_new_search_cmd = any(k in lower for k in ["search for", "search the web", "search google", "search on google", "search on youtube", "find "])
-        if is_browser and m_res and not is_new_search_cmd:
-            ord_word = m_res.group(1).lower()
-            ord_map = {
-                "first": 0, "1st": 0, "top": 0,
-                "second": 1, "2nd": 1,
-                "third": 2, "3rd": 2,
-                "fourth": 3, "4th": 3,
-                "fifth": 4, "5th": 4,
-                "previous": -1,
-            }
-            target_idx = ord_map.get(ord_word, 0)
+        if m_res and not is_new_search_cmd:
+            # Search results can live in either canonical store: the generic
+            # last_search_results list or the browser result set recorded after a
+            # web search.  Looking at only one of them made a valid, fresh
+            # reference look "stale/unavailable".
             results = self.current_state.last_search_results or []
-            if results and 0 <= target_idx < len(results):
-                item = results[target_idx]
-                target_url = item.get("url") or item.get("link")
-                if target_url:
-                    resolved = f"open url {target_url}"
-                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (browser search result resolution)")
+            if not results:
+                results = self.current_state.session_context.get("last_browser_result_set", []) or []
+            last_query = self.current_state.session_context.get("last_search_query")
+            if is_browser or results:
+                ord_word = m_res.group(1).lower()
+                ord_map = {
+                    "first": 0, "1st": 0, "top": 0,
+                    "second": 1, "2nd": 1,
+                    "third": 2, "3rd": 2,
+                    "fourth": 3, "4th": 3,
+                    "fifth": 4, "5th": 4,
+                }
+                if ord_word == "previous":
+                    target_idx = (len(results) - 1) if results else -1
+                else:
+                    target_idx = ord_map.get(ord_word, 0)
+                if results and 0 <= target_idx < len(results):
+                    item = results[target_idx]
+                    if isinstance(item, dict):
+                        target_url = item.get("url") or item.get("link")
+                        if target_url:
+                            resolved = f"open url {target_url}"
+                            print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (browser search result resolution)")
+                            return resolved, True
+                # Results known but the ordinal is outside the list → explicit,
+                # truthful out-of-range answer instead of a silent failure.
+                if results:
+                    total = len(results)
+                    wanted = target_idx + 1 if target_idx >= 0 else 0
+                    resolved = f"candidate_ordinal_out_of_range {wanted} {total}"
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (browser result ordinal out of range)")
                     return resolved, True
-            elif not results:
-                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> 'explain_web_search_results_unavailable' (stale search results)")
+                # No stored results: if a search context exists the canonical
+                # open_link executor can re-resolve it, otherwise the reference is
+                # genuinely stale and must be reported as such.
+                if last_query:
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> delegating to canonical open_browser_result (query='{last_query[:40]}')")
+                    return user_input, True
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> 'explain_web_search_results_unavailable' (no search results in context)")
                 return "explain_web_search_results_unavailable", True
-            print(f"[REFERENCE_RESOLUTION] '{user_input}' -> delegating to canonical open_browser_result")
-            return user_input, True
 
         # Browser Navigation ("Go back", "Navigate back", "Back")
         if is_browser and re.match(r'^(?:go\s+back|navigate\s+back|back)[.!?]?$', lower):
@@ -1165,10 +1262,10 @@ class DialogueStateManager:
         # "No not Chrome, open Edge", "Oh no, I meant Edge", "Not that, Edge", "I meant Microsoft Edge"
         m_corr = re.match(
             r'^(?:'
-                r'(?:oh\s+no|no|actually|wait)[,\s]+(?:i\s+meant|not\s+(?:that|[a-zA-Z0-9_\-]+))[,\s]+'
-                r'|(?:oh\s+no|no)[,\s]+i\s+meant\s+'
-                r'|no\s+i\s+meant\s+'
-                r'|i\s+meant\s+'
+                r'(?:oh\s+no|no|actually|wait)[,\s]+(?:i\s+(?:mean|meant)|not\s+(?:that|[a-zA-Z0-9_\-]+))[,\s]+'
+                r'|(?:oh\s+no|no)[,\s]+i\s+(?:mean|meant)\s+'
+                r'|no\s+i\s+(?:mean|meant)\s+'
+                r'|i\s+(?:mean|meant)\s+'
                 r'|oh\s+no[,\s]+'
                 r'|actually\s+not\s+(?:that|[a-zA-Z0-9_\-]+)[,\s]+'
                 r'|actually\s+'
@@ -1188,12 +1285,14 @@ class DialogueStateManager:
             candidate = re.sub(r'^(?:not\s+(?:that|[a-zA-Z0-9_\-]+)[,\s]+)+', '', candidate, flags=re.IGNORECASE).strip()
             if candidate.lower().startswith("i meant "):
                 candidate = candidate[8:].strip()
+            if candidate.lower().startswith("i mean "):
+                candidate = candidate[7:].strip()
             if candidate.lower().startswith("it to "):
                 candidate = candidate[6:].strip()
 
             last_intent = self.current_state.recent_intents[-1] if self.current_state.recent_intents else ""
             last_turn_input = self.current_state.turns[-1].user_input.lower() if self.current_state.turns else ""
-            has_weather = last_intent == "WEATHER_QUERY" or "weather" in last_turn_input or "location" in self.current_state.entities
+            has_weather = last_intent == "WEATHER_QUERY" or "weather" in last_turn_input or (self.current_state.entities.get("last_topic") == "weather")
 
             # Case 0: Executable instruction / correction command (Section 6, 7, 8)
             # e.g. "no I need you to open the pdf that you created about the deadlocks",
@@ -1232,6 +1331,15 @@ class DialogueStateManager:
                 clean_loc = "Desktop" if "desktop" in candidate.lower() else ("Downloads" if "downloads" in candidate.lower() else candidate)
                 resolved = f"save to {clean_loc}"
                 print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (destination correction to '{clean_loc}')")
+                return resolved, True
+
+            # Case C2: Personal fact / education correction ("I mean my intermediate", "No, my intermediate")
+            cand_edu = any(k in candidate.lower() for k in ("intermediate", "inter", "10th", "tenth", "school", "college", "degree", "major", "university"))
+            prev_context_str = (last_turn_input + " " + (self.current_state.turns[-1].assistant_response.lower() if self.current_state.turns else ""))
+            is_edu_ctx = any(k in prev_context_str for k in ("study", "studies", "studied", "university", "college", "intermediate", "school", "education", "attend", "srm"))
+            if cand_edu and (is_edu_ctx or last_intent in ("MEMORY_QUERY", "GENERAL_CONVERSATION")):
+                resolved = f"where did I study {candidate}"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (education/memory correction to '{candidate}')")
                 return resolved, True
 
             # Case D: Application correction ("no, I meant Edge", "Edge instead", "actually Edge", "actually not Chrome, Edge")

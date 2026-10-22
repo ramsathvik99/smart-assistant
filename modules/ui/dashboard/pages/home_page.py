@@ -50,60 +50,63 @@ def _time_greeting(hour: Optional[int] = None) -> str:
 
 
 class QuickActionCard(QFrame):
+    """Futuristic interactive cyber quick action card with glowing accent tile."""
+
     def __init__(self, icon_name: str, title: str, subtitle: str, accent: str,
                  on_click, parent=None):
         super().__init__(parent)
         self.setProperty("class", "CardInner")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(88)
+        self.setMinimumHeight(76)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._accent = accent
+        self._cb = on_click
+
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(Spacing.LG, Spacing.MD, Spacing.LG, Spacing.MD)
+        lay.setContentsMargins(Spacing.MD, Spacing.SM + 2, Spacing.MD, Spacing.SM + 2)
         lay.setSpacing(Spacing.MD)
-        # accent icon tile
+
+        # Ambient accent icon tile
         tile = QLabel()
-        tile.setFixedSize(44, 44)
+        tile.setFixedSize(40, 40)
         try:
             h = accent.lstrip("#")
             if len(h) >= 6:
                 r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
                 tile.setStyleSheet(
-                    f"background: rgba({r},{g},{b},0.14); "
+                    f"background: rgba({r},{g},{b},0.15); "
+                    f"border: 1px solid rgba({r},{g},{b},0.35); "
                     f"border-radius: {Radius.MD}px;"
                 )
             else:
-                tile.setStyleSheet(
-                    f"background: rgba(0,212,255,0.14); "
-                    f"border-radius: {Radius.MD}px;"
-                )
+                tile.setStyleSheet(f"background: rgba(0,212,255,0.15); border-radius: {Radius.MD}px;")
         except Exception:
-            tile.setStyleSheet(
-                f"background: rgba(0,212,255,0.14); "
-                f"border-radius: {Radius.MD}px;"
-            )
+            tile.setStyleSheet(f"background: rgba(0,212,255,0.15); border-radius: {Radius.MD}px;")
+
         tile_l = QVBoxLayout(tile)
+        tile_l.setContentsMargins(0, 0, 0, 0)
         tile_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ic = QLabel()
-        ic.setPixmap(icon_pixmap(icon_name, accent, 22))
+        ic.setPixmap(icon_pixmap(icon_name, accent, 20))
         ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tile_l.addWidget(ic)
         lay.addWidget(tile, 0)
-        # labels
+
+        # Labels
         col = QVBoxLayout()
-        col.setSpacing(2)
+        col.setSpacing(1)
         t = QLabel(title)
-        t.setStyleSheet(f"font-weight: 600; font-size: 14px; color: {C.TEXT};")
+        t.setStyleSheet(f"font-weight: 700; font-size: 13px; color: {C.TEXT}; letter-spacing: -0.2px;")
         s = QLabel(subtitle)
-        s.setStyleSheet(f"font-size: 12px; color: {C.TEXT_MED};")
+        s.setStyleSheet(f"font-size: 11px; color: {C.TEXT_MED};")
         col.addWidget(t)
         col.addWidget(s)
         lay.addLayout(col, 1)
-        # arrow
+
+        # Futuristic indicator arrow
         ar = QLabel("›")
-        ar.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 20px; font-weight: 700;")
+        ar.setStyleSheet(f"color: {rgba_str(accent, 0.70)}; font-size: 18px; font-weight: 700;")
         lay.addWidget(ar)
-        # click: install event filter
-        self._cb = on_click
 
     def mousePressEvent(self, ev):
         super().mousePressEvent(ev)
@@ -115,7 +118,18 @@ class QuickActionCard(QFrame):
 
     def enterEvent(self, ev):
         super().enterEvent(ev)
-        self.setStyleSheet(f".QuickActionCard {{ border: 1px solid {rgba_str(C.SEC_DASHBOARD, 0.40)}; background: {C.PANEL3}; border-radius: {Radius.LG}px; }}")
+        try:
+            h = self._accent.lstrip("#")
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            self.setStyleSheet(
+                f".QuickActionCard {{ "
+                f"border: 1px solid rgba({r},{g},{b},0.65); "
+                f"background: rgba({r},{g},{b},0.08); "
+                f"border-radius: {Radius.LG}px; "
+                f"}}"
+            )
+        except Exception:
+            self.setStyleSheet(f".QuickActionCard {{ border: 1px solid {rgba_str(C.SEC_DASHBOARD, 0.50)}; background: {C.PANEL3}; }}")
 
     def leaveEvent(self, ev):
         super().leaveEvent(ev)
@@ -123,10 +137,16 @@ class QuickActionCard(QFrame):
 
 
 class HomePage(QWidget):
+    """
+    Advanced 3D AI Command Center Dashboard Page.
+    Houses the interactive 3D Friday Holographic Centerpiece, multimodal command console,
+    quick actions deck, attention monitors, and system telemetry feeds.
+    """
     navigate = None  # will be set by shell to lambda page_id
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setMouseTracking(True)
         self._identity: Dict = {}
         self._state: Dict = {}
         self._reminders: List[Dict] = []
@@ -135,31 +155,68 @@ class HomePage(QWidget):
         self._workers = []  # Track worker threads for cleanup
         self._build_ui()
 
+    def mouseMoveEvent(self, ev):
+        super().mouseMoveEvent(ev)
+        if hasattr(self, "_orb") and self._orb:
+            pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+            orb_pos = self._orb.mapFrom(self, pos.toPoint() if hasattr(pos, 'toPoint') else pos)
+            w = float(self._orb.width())
+            h = float(self._orb.height())
+            dx = (orb_pos.x() - w / 2.0) / max(60.0, w / 2.0)
+            dy = (orb_pos.y() - h / 2.0) / max(60.0, h / 2.0)
+            self._orb.set_mouse_parallax(dx, dy)
+
     def _build_ui(self):
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(Spacing.LG2, Spacing.LG2, Spacing.LG2, Spacing.LG2)
-        outer.setSpacing(Spacing.LG)
+        outer.setContentsMargins(Spacing.LG, Spacing.LG, Spacing.LG, Spacing.LG)
+        outer.setSpacing(Spacing.MD)
 
         scroller = QScrollArea()
         scroller.setWidgetResizable(True)
         scroller.setFrameShape(QFrame.Shape.NoFrame)
         scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroller.setMouseTracking(True)
+
         sw = QWidget()
+        sw.setMouseTracking(True)
         root = QVBoxLayout(sw)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(Spacing.LG)
 
-        # -------- Hero section: greeting + orb + command (more compact)
-        hero = QHBoxLayout()
-        hero.setSpacing(Spacing.LG)
+        # ── 1. Advanced 3D Command Deck (Hero Cockpit) ──────────────────────
+        hero_card = QFrame()
+        hero_card.setProperty("class", "CardInner")
+        hero_card.setMouseTracking(True)
+        hero_card.setStyleSheet(f"""
+            QFrame[class="CardInner"] {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(8, 14, 24, 0.85),
+                    stop:0.5 rgba(12, 20, 34, 0.75),
+                    stop:1 rgba(6, 12, 20, 0.90));
+                border: 1px solid rgba(0, 212, 255, 0.22);
+                border-radius: {Radius.XL}px;
+            }}
+        """)
 
-        # Left: greeting + status + command
+        hero_lay = QHBoxLayout(hero_card)
+        hero_lay.setContentsMargins(Spacing.LG2, Spacing.LG, Spacing.LG2, Spacing.LG)
+        hero_lay.setSpacing(Spacing.XL)
+
+        # Left Column: Mission Telemetry, Identity, and Command Console
         left = QVBoxLayout()
         left.setSpacing(Spacing.SM)
 
-        self._greeting_lbl = QLabel("Good morning")
+        # Top breadcrumb telemetry line
+        telemetry_top = QLabel("FRIDAY INTELLIGENCE SYSTEM // 3D COMMAND DECK")
+        telemetry_top.setStyleSheet(
+            f"font-size: 10px; font-weight: 700; letter-spacing: 2.2px; color: {C.SEC_DASHBOARD};"
+        )
+        left.addWidget(telemetry_top)
+
+        # Greeting & User / Assistant Identifier
+        self._greeting_lbl = QLabel("Good morning,")
         self._greeting_lbl.setStyleSheet(
-            f"font-size: 24px; font-weight: 700; letter-spacing: -0.5px; color: {C.TEXT};"
+            f"font-size: 26px; font-weight: 800; letter-spacing: -0.6px; color: {C.TEXT};"
         )
         left.addWidget(self._greeting_lbl)
 
@@ -167,140 +224,204 @@ class HomePage(QWidget):
         self._name_row.setSpacing(Spacing.SM)
         self._user_lbl = QLabel("User")
         self._user_lbl.setStyleSheet(f"font-size: 20px; font-weight: 700; color: {C.SEC_DASHBOARD}; letter-spacing: -0.3px;")
-        self._dot = QLabel("·")
-        self._dot.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 18px; padding: 0 2px;")
-        self._asst_lbl = QLabel("Assistant")
-        self._asst_lbl.setStyleSheet(f"font-size: 16px; font-weight: 500; color: {C.TEXT_MED}; letter-spacing: -0.1px;")
+        self._dot = QLabel("//")
+        self._dot.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 15px; font-weight: 600; padding: 0 2px;")
+        self._asst_lbl = QLabel("Friday")
+        self._asst_lbl.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {C.TEXT_MED}; letter-spacing: -0.1px;")
         self._name_row.addWidget(self._user_lbl)
         self._name_row.addWidget(self._dot)
         self._name_row.addWidget(self._asst_lbl)
         self._name_row.addStretch(1)
-        self._state_chip = StatusChip("IDLE", "online")
+
+        self._state_chip = StatusChip("ONLINE", "online")
         self._state_chip.setCursor(Qt.CursorShape.PointingHandCursor)
         self._name_row.addWidget(self._state_chip)
         left.addLayout(self._name_row)
 
-        self._sub_lbl = QLabel("What would you like to do today?")
-        self._sub_lbl.setStyleSheet(f"font-size: 13px; color: {C.TEXT_MED}; letter-spacing: 0.05px;")
+        self._sub_lbl = QLabel("Primary neural core online. All subsystems operating nominally.")
+        self._sub_lbl.setStyleSheet(f"font-size: 12px; color: {C.TEXT_MED}; letter-spacing: 0.1px;")
         left.addWidget(self._sub_lbl)
 
-        left.addSpacing(Spacing.SM)
+        left.addSpacing(Spacing.MD)
 
-        # Command input (more compact)
+        # Futuristic Command Console Bar
         cmd_card = QFrame()
-        cmd_card.setProperty("class", "CardInner")
+        cmd_card.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(6, 12, 22, 0.75);
+                border: 1px solid rgba(0, 212, 255, 0.32);
+                border-radius: {Radius.LG}px;
+            }}
+            QFrame:focus-within {{
+                border: 1px solid #00D4FF;
+                background: rgba(0, 212, 255, 0.05);
+            }}
+        """)
         cmd_lay = QVBoxLayout(cmd_card)
-        cmd_lay.setContentsMargins(Spacing.SM, Spacing.SM, Spacing.SM, Spacing.SM)
+        cmd_lay.setContentsMargins(Spacing.SM + 2, Spacing.SM, Spacing.SM + 2, Spacing.SM)
         cmd_row = QHBoxLayout()
         cmd_row.setSpacing(Spacing.SM)
+
         self._cmd_input = QLineEdit()
-        self._cmd_input.setPlaceholderText("Ask anything…")
+        self._cmd_input.setPlaceholderText("Ask Friday anything, search knowledge, or issue system commands…")
         self._cmd_input.setCursor(Qt.CursorShape.IBeamCursor)
-        self._cmd_input.setStyleSheet(
-            f"QLineEdit {{ border: none; background: transparent; padding: 8px 4px; font-size: 14px; color: {C.TEXT}; }}"
-        )
+        self._cmd_input.setStyleSheet(f"""
+            QLineEdit {{
+                border: none;
+                background: transparent;
+                padding: 10px 8px;
+                font-size: 14px;
+                font-weight: 500;
+                color: {C.TEXT};
+            }}
+        """)
         self._cmd_input.returnPressed.connect(self._on_send)
         cmd_row.addWidget(self._cmd_input, 1)
 
         self._mic_btn = QPushButton()
         self._mic_btn.setObjectName("IconBtn")
-        self._mic_btn.setIcon(icon(ICONS.MIC, C.SEC_DASHBOARD, 16))
-        self._mic_btn.setToolTip("Voice input")
-        self._mic_btn.setFixedSize(36, 36)
+        self._mic_btn.setIcon(icon(ICONS.MIC, C.SEC_DASHBOARD, 18))
+        self._mic_btn.setToolTip("Voice Command (Push to speak)")
+        self._mic_btn.setFixedSize(38, 38)
         self._mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._mic_btn.clicked.connect(lambda: self._send_as_command("Toggle voice listening"))
         cmd_row.addWidget(self._mic_btn)
 
         self._send_btn = QPushButton()
         self._send_btn.setObjectName("PrimaryBtn")
-        self._send_btn.setIcon(icon(ICONS.SEND, get_contrast_color(C.SEC_DASHBOARD), 16))
-        self._send_btn.setToolTip("Send")
+        self._send_btn.setIcon(icon(ICONS.SEND, get_contrast_color(C.SEC_DASHBOARD), 17))
+        self._send_btn.setToolTip("Execute Command (Enter)")
         self._send_btn.setFixedSize(40, 40)
         self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._send_btn.clicked.connect(self._on_send)
         cmd_row.addWidget(self._send_btn)
+
         cmd_lay.addLayout(cmd_row)
         left.addWidget(cmd_card)
+
+        # Quick Suggestion Chips below input
+        sugg_row = QHBoxLayout()
+        sugg_row.setSpacing(Spacing.SM)
+        suggestions = [
+            ("⚡ Open Notepad", "Open Notepad"),
+            ("📅 Schedule", "What is on my schedule today?"),
+            ("📄 Create Document", "Create a new document"),
+            ("🧠 Memory", "What do you remember about me?"),
+        ]
+        for label, cmd_text in suggestions:
+            s_btn = QPushButton(label)
+            s_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgba(255, 255, 255, 0.04);
+                    border: 1px solid rgba(255, 255, 255, 0.08);
+                    border-radius: {Radius.SM}px;
+                    color: {C.TEXT_MED};
+                    font-size: 11px;
+                    font-weight: 500;
+                    padding: 4px 10px;
+                }}
+                QPushButton:hover {{
+                    background: rgba(0, 212, 255, 0.12);
+                    border-color: rgba(0, 212, 255, 0.40);
+                    color: {C.SEC_DASHBOARD};
+                }}
+            """)
+            s_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            s_btn.clicked.connect(lambda _=False, t=cmd_text: self._execute_suggestion(t))
+            sugg_row.addWidget(s_btn)
+        sugg_row.addStretch(1)
+        left.addLayout(sugg_row)
         left.addStretch(1)
 
-        # Right: orb (smaller, more compact)
-        self._orb = AssistantOrbWidget(200)
+        # Right Column: 3D Holographic AI Orb Centerpiece
+        self._orb = AssistantOrbWidget(260)
         right = QVBoxLayout()
         right.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        right.setSpacing(Spacing.XS)
+
+        orb_header = QLabel("HOLOGRAPHIC CORE // 3D MATRIX")
+        orb_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        orb_header.setStyleSheet(
+            f"color: {C.SEC_DASHBOARD}; font-size: 9px; font-weight: 700; letter-spacing: 2px;"
+        )
+        right.addWidget(orb_header)
         right.addWidget(self._orb)
+
         self._orb_sub = QLabel("READY")
         self._orb_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._orb_sub.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 10px; font-weight: 600; letter-spacing: 2px;")
+        self._orb_sub.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 11px; font-weight: 700; letter-spacing: 2.2px;")
         right.addWidget(self._orb_sub)
+
         right_w = QWidget()
+        right_w.setMouseTracking(True)
         right_w.setLayout(right)
-        right_w.setMinimumWidth(240)
-        right_w.setMaximumWidth(280)
+        right_w.setMinimumWidth(280)
+        right_w.setMaximumWidth(320)
 
-        hero.addLayout(left, 1)
-        hero.addWidget(right_w, 0)
+        hero_lay.addLayout(left, 1)
+        hero_lay.addWidget(right_w, 0)
+        root.addWidget(hero_card)
 
-        hero_w = QWidget()
-        hero_w.setLayout(hero)
-        root.addWidget(hero_w)
+        # ── 2. Futuristic Quick Actions Command Deck ────────────────────────
+        root.addWidget(SectionHeader("Quick Actions", "Instant access to core Friday subsystems", accent=C.SEC_DASHBOARD))
+        qa_grid = QGridLayout()
+        qa_grid.setSpacing(Spacing.MD)
 
-        # -------- Quick actions (horizontal chips for better space utilization) --------
-        root.addWidget(SectionHeader("Quick Actions", "Jump straight into what you need", accent=C.SEC_DASHBOARD))
-        qa_row = QHBoxLayout()
-        qa_row.setSpacing(Spacing.SM)
         actions = [
-            (ICONS.ASSISTANT,     "Conversation", C.SEC_ASSISTANT,     lambda: self._go("assistant")),
-            (ICONS.COMMUNICATIONS, "Email",        C.SEC_COMMUNICATIONS, lambda: self._go_quick("communications", "compose")),
-            (ICONS.SCHEDULE,       "Schedule",     C.SEC_SCHEDULE,       lambda: self._go("schedule")),
-            (ICONS.FILE_PDF,     "Document",     C.SEC_WORKSPACE,      lambda: self._go("workspace")),
-            (ICONS.CONNECTED_WORLD, "Devices",      C.SEC_CONNECTED,      lambda: self._go("connected_world")),
-            (ICONS.INTELLIGENCE,    "Memory",       C.SEC_INTELLIGENCE,   lambda: self._go("intelligence")),
+            (ICONS.ASSISTANT,     "Conversation", "Direct neural dialogue",       C.SEC_ASSISTANT,     lambda: self._go("assistant")),
+            (ICONS.COMMUNICATIONS, "Email",        "Inbox, compose & drafts",     C.SEC_COMMUNICATIONS, lambda: self._go_quick("communications", "compose")),
+            (ICONS.SCHEDULE,       "Schedule",     "Calendar, events & reminders", C.SEC_SCHEDULE,       lambda: self._go("schedule")),
+            (ICONS.FILE_PDF,     "Document",     "PDF, DOCX & sheets generator",  C.SEC_WORKSPACE,      lambda: self._go("workspace")),
+            (ICONS.CONNECTED_WORLD, "Devices",      "Connected devices & mobile",  C.SEC_CONNECTED,      lambda: self._go("connected_world")),
+            (ICONS.INTELLIGENCE,    "Memory",       "Knowledge base & facts",      C.SEC_INTELLIGENCE,   lambda: self._go("intelligence")),
         ]
-        for icn, title, acc_col, cb in actions:
-            btn = QPushButton(title)
-            btn.setObjectName("GhostBtn")
-            btn.setIcon(icon(icn, acc_col, 14))
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            btn.clicked.connect(cb)
-            qa_row.addWidget(btn, 1)
-        root.addLayout(qa_row)
 
-        # -------- Two columns: Attention required / Recent --------
+        for idx, (icn, title, subtitle, acc_col, cb) in enumerate(actions):
+            card = QuickActionCard(icn, title, subtitle, acc_col, cb)
+            row = idx // 3
+            col = idx % 3
+            qa_grid.addWidget(card, row, col)
+
+        qa_w = QWidget()
+        qa_w.setLayout(qa_grid)
+        root.addWidget(qa_w)
+
+        # ── 3. Attention Required & Recent Interactions Columns ─────────────
         cols = QHBoxLayout()
         cols.setSpacing(Spacing.MD)
 
-        # --- Attention column
+        # Attention column
         col_left = Card(title="Attention Required", accent=C.STATUS_WARNING)
         col_left.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._attn_stack = QVBoxLayout()
         self._attn_stack.setSpacing(Spacing.SM)
-        self._attn_loading = LoadingState("Checking reminders and events…")
+        self._attn_loading = LoadingState("Scanning reminders, events, and pending tasks…")
         self._attn_stack.addWidget(self._attn_loading)
         col_left.body.addLayout(self._attn_stack)
         cols.addWidget(col_left, 1)
 
-        # --- Recent column
+        # Recent column
         col_right = Card(title="Recent Interactions", accent=C.SEC_INTELLIGENCE)
         col_right.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._hist_stack = QVBoxLayout()
         self._hist_stack.setSpacing(Spacing.SM)
-        self._hist_loading = LoadingState("Loading conversation history…")
+        self._hist_loading = LoadingState("Loading neural conversation history…")
         self._hist_stack.addWidget(self._hist_loading)
         col_right.body.addLayout(self._hist_stack)
         cols.addWidget(col_right, 1)
 
-        cols_w = QWidget(); cols_w.setLayout(cols)
+        cols_w = QWidget()
+        cols_w.setLayout(cols)
         cols_w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         root.addWidget(cols_w, 2)
 
-        # Current activity strip
-        act = Card(title="Current Activity", accent=C.STATUS_ACTIVE)
+        # ── 4. Current Activity & System Telemetry Strip ────────────────────
+        act = Card(title="System Operations & Telemetry", accent=C.STATUS_ACTIVE)
         act.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._act_stack = QVBoxLayout()
         self._act_stack.setSpacing(Spacing.SM)
-        self._act_empty = EmptyState(ICONS.POWER, "All systems idle",
-                                    "Assistant isn't doing anything right now.",
+        self._act_empty = EmptyState(ICONS.POWER, "All systems nominal",
+                                    "Friday background processes idle. Standing by for instructions.",
                                     accent=C.STATUS_ACTIVE)
         self._act_stack.addWidget(self._act_empty)
         act.body.addLayout(self._act_stack)
@@ -309,9 +430,13 @@ class HomePage(QWidget):
         scroller.setWidget(sw)
         outer.addWidget(scroller, 1)
 
-        # Initial refresh timers
+        # Refresh timers
         QTimer.singleShot(0, self._refresh_attention)
         QTimer.singleShot(100, self._refresh_history)
+
+    def _execute_suggestion(self, text: str):
+        self._cmd_input.setText(text)
+        self._on_send()
 
     # ---------------------- helpers --------------------------------------
     def _go(self, page_id: str):

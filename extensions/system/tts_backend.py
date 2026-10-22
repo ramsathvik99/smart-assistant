@@ -181,7 +181,11 @@ def map_metadata_to_neural_style(metadata: Optional[Dict[str, Any]] = None, text
 
     # Action confirmations: crisp, confident (+12% sounds natural while eliminating sluggishness)
     if response_type == "action_confirmation" or conversational_style == "brief_confirmation" or is_brief:
-        return ("+12%", "+1Hz", "+0%")
+        return ("+10%", "+1Hz", "+0%")
+
+    # Questions: natural inquisitive pitch contour (+3Hz)
+    if (text or "").strip().endswith("?") or response_type == "question" or conversational_style in ("question", "clarification"):
+        return ("+4%", "+3Hz", "+0%")
 
     # Frustration recovery or errors: calm and reassuring
     if response_type in ("frustration_recovery", "error_explanation") or conversational_style in ("apologetic", "reassuring"):
@@ -204,7 +208,7 @@ def map_metadata_to_neural_style(metadata: Optional[Dict[str, Any]] = None, text
 
 
 def split_sentences_for_streaming(text: str) -> List[str]:
-    """Split text into spoken sentence units while preserving abbreviations."""
+    """Split text into spoken sentence and clause units for optimal streaming latency."""
     if not text or not text.strip():
         return []
 
@@ -224,7 +228,19 @@ def split_sentences_for_streaming(text: str) -> List[str]:
         for orig, rep in abbrevs:
             s_restored = re.sub(re.escape(rep), orig, s_restored, flags=re.IGNORECASE)
         s_restored = s_restored.strip()
-        if s_restored:
+        if not s_restored:
+            continue
+
+        # If sentence is long (> 12 words), break at clause boundaries for faster TTFA
+        words = s_restored.split()
+        if len(words) > 12:
+            # Split on semicolons, colons, em-dashes, or comma followed by coordinating conjunction / pause
+            clauses = re.split(r'(?<=[;:\u2014])\s+|(?<=,)\s+(?=(?:and|but|or|so|because|while|when|where|which|although|though|however|yet)\b)', s_restored, flags=re.IGNORECASE)
+            for c in clauses:
+                c_clean = c.strip()
+                if c_clean:
+                    sentences.append(c_clean)
+        else:
             sentences.append(s_restored)
 
     return sentences if sentences else [cleaned]
@@ -265,41 +281,11 @@ class NeuralTTSBackend(TTSBackend):
     @classmethod
     def prewarm_common_phrases(cls):
         """Asynchronously pre-synthesize very frequent responses in a background thread for sub-millisecond TTFA."""
-        def _prewarm_worker():
-            common_phrases = [
-                "Opened Notepad.",
-                "Opened Visual Studio Code.",
-                "Opened Google Chrome.",
-                "Opened Calculator.",
-                "Yes, I understand what you're saying. Please go ahead.",
-                "You don't have any events scheduled for today.",
-            ]
-            voice = cls.DEFAULT_VOICE
-            for p in common_phrases:
-                try:
-                    cache_key = (p.strip().lower(), voice, "+0%", "+0Hz", "+0%")
-                    with cls._PHRASE_CACHE_LOCK:
-                        if cache_key in cls._PHRASE_CACHE:
-                            continue
-                    import edge_tts, io, soundfile as sf
-                    import numpy as np
-                    comm = edge_tts.Communicate(text=p, voice=voice)
-                    bio = io.BytesIO()
-                    async def _run():
-                        async for chunk in comm.stream():
-                            if chunk["type"] == "audio":
-                                bio.write(chunk["data"])
-                    asyncio.run(_run())
-                    bio.seek(0)
-                    pcm_data, sr = sf.read(bio, dtype="int16")
-                    if len(pcm_data.shape) > 1 and pcm_data.shape[1] > 1:
-                        pcm_data = np.mean(pcm_data, axis=1).astype(np.int16)
-                    pcm_data = trim_audio_silence(pcm_data, sr)
-                    with cls._PHRASE_CACHE_LOCK:
-                        cls._PHRASE_CACHE[cache_key] = (pcm_data, sr)
-                except Exception:
-                    pass
-        threading.Thread(target=_prewarm_worker, daemon=True, name="tts-prewarm").start()
+        try:
+            from core.audio_prewarm import prewarm_audio_subsystem
+            prewarm_audio_subsystem()
+        except Exception as e:
+            logger.debug("[NEURAL TTS] Audio prewarm delegate failed: %s", e)
 
     @classmethod
     def is_valid_voice(cls, voice_id: Optional[str]) -> bool:
@@ -450,18 +436,28 @@ class NeuralTTSBackend(TTSBackend):
         self._interrupted.clear()
         t_start = time.time()
         eff_lang = language or (metadata.get("lang_hint") if metadata else None) or (metadata.get("language") if metadata else None)
-        chosen_voice = self.resolve_voice(voice or self._voice, language=eff_lang, text=text)
-        rate_str, pitch_str, vol_str = map_metadata_to_neural_style(metadata, text=text)
+        sample_text = text if isinstance(text, str) else ""
+        chosen_voice = self.resolve_voice(voice or self._voice, language=eff_lang, text=sample_text)
+        rate_str, pitch_str, vol_str = map_metadata_to_neural_style(metadata, text=sample_text)
 
-        sentences = split_sentences_for_streaming(text)
-        if not sentences:
-            return SynthesisResult(duration_ms=0.0, first_audio_ms=0.0)
+        if isinstance(text, str):
+            sentences = split_sentences_for_streaming(text)
+            if not sentences:
+                return SynthesisResult(duration_ms=0.0, first_audio_ms=0.0)
+        else:
+            sentences = text
 
         result = SynthesisResult()
         first_audio_recorded = False
 
         try:
             import edge_tts
+            try:
+                from core.net_ssl import get_ssl_context
+                import edge_tts.communicate
+                edge_tts.communicate._SSL_CTX = get_ssl_context()
+            except Exception:
+                pass
             import soundfile as sf
             import sounddevice as sd
             import numpy as np
@@ -470,9 +466,10 @@ class NeuralTTSBackend(TTSBackend):
             result.error = str(err)
             return result
 
+        sent_count = len(sentences) if isinstance(sentences, (list, tuple)) else -1
         logger.info(
-            "[TTS] backend=neural voice=%s sentences=%d text=%r",
-            chosen_voice, len(sentences), text[:60]
+            "[TTS] backend=neural voice=%s sentences=%s text=%r",
+            chosen_voice, str(sent_count) if sent_count >= 0 else "stream", sample_text[:60]
         )
 
         def _seed_echoguard(pcm_arr: np.ndarray, sr: int):
@@ -613,6 +610,16 @@ class NeuralTTSBackend(TTSBackend):
             first_audio_recorded = True
             print(f"[TTS] backend=neural first_audio_ms={first_audio_ms:.1f}")
             print(f"[TTS] sentence_1_synthesis_ms: {first_synth_ms:.1f}")
+            try:
+                from core.latency_instrumentation import get_current_tracker
+                trk = get_current_tracker()
+                t_now = time.monotonic()
+                if trk.timestamps.get("tts_first_audio_timestamp") is None:
+                    trk.record("tts_first_audio_timestamp", t_now)
+                if trk.timestamps.get("tts_playback_start_timestamp") is None:
+                    trk.record("tts_playback_start_timestamp", t_now)
+            except Exception:
+                pass
             if on_start:
                 try:
                     on_start()
@@ -846,6 +853,12 @@ class NeuralTTSBackend(TTSBackend):
 
         async def _synth():
             import edge_tts
+            try:
+                from core.net_ssl import get_ssl_context
+                import edge_tts.communicate
+                edge_tts.communicate._SSL_CTX = get_ssl_context()
+            except Exception:
+                pass
             communicate = edge_tts.Communicate(
                 text=text,
                 voice=chosen_voice,
@@ -1070,6 +1083,16 @@ class SAPIBackend(TTSBackend):
 
             result.first_audio_ms = (time.time() - t_start) * 1000.0
             print(f"[TTS] backend=sapi first_audio_ms={result.first_audio_ms:.1f}")
+            try:
+                from core.latency_instrumentation import get_current_tracker
+                trk = get_current_tracker()
+                t_now = time.monotonic()
+                if trk.timestamps.get("tts_first_audio_timestamp") is None:
+                    trk.record("tts_first_audio_timestamp", t_now)
+                if trk.timestamps.get("tts_playback_start_timestamp") is None:
+                    trk.record("tts_playback_start_timestamp", t_now)
+            except Exception:
+                pass
 
             # Flag 1 = SVSFlagsAsync
             sp.Speak(text, 1)

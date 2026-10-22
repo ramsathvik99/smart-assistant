@@ -4,8 +4,10 @@ Provides seamless, zero-selector language detection, translation, and speech rec
 """
 
 import logging
+import os
 import re
 import threading
+import numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
@@ -449,14 +451,69 @@ class MultilingualEngine:
         audio_data: Any,
         user_id: Any = None
     ) -> Tuple[str, str, float]:
-        """Recognize spoken audio across candidate languages concurrently.
+        """Recognize spoken audio across candidate languages.
+        
+        Attempts local faster-whisper STT first (when STT_ENGINE == 'whisper').
+        Gracefully falls back to concurrent Google multi-locale recognition if
+        Whisper is unavailable, errors, or returns empty.
         
         Returns (recognized_text, detected_language, confidence).
         """
+        active_lang = self.get_active_language(user_id)
+
+        # ── 1. Local Whisper Recognition ──────────────────────────────────────
+        stt_engine_type = os.getenv("STT_ENGINE")
+        if not stt_engine_type:
+            try:
+                from instance.config import settings
+                stt_engine_type = getattr(settings, "STT_ENGINE", "whisper")
+            except Exception:
+                stt_engine_type = "whisper"
+        stt_engine_type = (stt_engine_type or "whisper").lower()
+
+        if stt_engine_type == "whisper":
+            try:
+                from extensions.system.stt_engine import get_stt_engine
+
+                audio_np = None
+                sample_rate = 16000
+                if hasattr(audio_data, "get_raw_data"):
+                    raw_bytes = audio_data.get_raw_data()
+                    sample_rate = getattr(audio_data, "sample_rate", 16000)
+                    audio_np = np.frombuffer(raw_bytes, dtype=np.int16)
+                elif isinstance(audio_data, np.ndarray):
+                    audio_np = audio_data
+                    sample_rate = 16000
+
+                if audio_np is not None and len(audio_np) > 0:
+                    whisper_engine = get_stt_engine()
+                    if not whisper_engine.is_available():
+                        logger.info("[STT] Voice engine loading... Falling back to Google multi-probe.")
+                    else:
+                        text, det_lang, conf = whisper_engine.transcribe(
+                            audio_np, sample_rate=sample_rate, language_hint=active_lang
+                        )
+                        if text and text.strip():
+                            clean_text = text.strip()
+                            if not self.get_requested_response_language(user_id):
+                                if det_lang == "en" or conf >= 0.70:
+                                    self.set_active_language(user_id, det_lang)
+                            logger.info(
+                                "[ASR WHISPER] Recognized=%s (%.2f): %r",
+                                det_lang, conf, clean_text
+                            )
+                            return clean_text, det_lang, conf
+            except Exception as exc:
+                logger.warning("[STT] Local Whisper path failed (%s), falling back to Google multi-probe.", exc)
+
+        # ── 2. Google Multi-Locale Probing Fallback ──────────────────────────
         import speech_recognition as sr
         r = sr.Recognizer()
 
-        active_lang = self.get_active_language(user_id)
+        google_audio = audio_data
+        if isinstance(audio_data, np.ndarray):
+            google_audio = sr.AudioData(audio_data.tobytes(), 16000, 2)
+
         active_locale = self.LOCALE_MAP.get(active_lang, "en-US")
         req_lang = self.get_requested_response_language(user_id)
         req_locale = self.LOCALE_MAP.get(req_lang, None) if req_lang else None
@@ -476,7 +533,7 @@ class MultilingualEngine:
 
         def _probe_locale(loc: str):
             try:
-                res = r.recognize_google(audio_data, language=loc, show_all=True)
+                res = r.recognize_google(google_audio, language=loc, show_all=True)
                 return loc, res
             except Exception:
                 return loc, None

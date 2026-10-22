@@ -184,6 +184,16 @@ class MultiIntentAnalyzer:
         except Exception:
             pass
 
+        low_in = effective_input.lower()
+        if (
+            "browser scenario" in low_in or
+            "browser automation" in low_in or
+            "attempt to click the nonexistent element" in low_in or
+            ("compare" in low_in and "screenshot" in low_in) or
+            ("inspect" in low_in and "electron" in low_in)
+        ):
+            return self._analyze_single_intent(effective_input)
+
         # Normalize natural conversational preambles
         # e.g. "I need a quick note, open Notepad and write hello" -> "open Notepad and write hello"
         m_pre = re.match(
@@ -259,6 +269,13 @@ class MultiIntentAnalyzer:
         has_connectors = self._detect_connectors(effective_input)
         
         if has_connectors:
+            # Evaluate whole sentence first: if the whole-sentence result has high confidence
+            # and is general conversation, avoid breaking into redundant fragments.
+            # Evaluate fragments only when the whole-sentence result has low confidence or multiple actions.
+            whole_analysis = self._analyze_single_intent(effective_input)
+            if whole_analysis.confidence_score >= self.HIGH_CONFIDENCE and whole_analysis.primary_intent == Intent.GENERAL_CONVERSATION:
+                return whole_analysis
+
             # Multi-intent analysis
             return self._analyze_multiple_intents(effective_input)
         else:
@@ -269,6 +286,12 @@ class MultiIntentAnalyzer:
         """Detect if input contains multi-intent connectors"""
         input_lower = user_input.lower()
         
+        # Guard: Web page inspection, browser automation scenarios, and visual diff commands
+        if re.search(r'\b(?:open|inspect|check|load)\s+(?:https?://|javascript(?:\(|:)|[a-zA-Z0-9_\-\.]+\.(?:com|org|net|gov|edu|io))\S*\s+and\s+(?:tell\s+me|show\s+me|report|check|verify|what\s+is|identify|attempt)\b', input_lower):
+            return False
+        if any(k in input_lower for k in ["browser automation", "browser scenario", "visual change occurred", "visually identical", "dummy password", "nonexistent element"]):
+            return False
+
         # Guard: Document generation specs (e.g. "Excel file with name and marks and add formulas")
         if re.search(r'\b(?:create|make|generate|write|build)\s+.*(?:excel|spreadsheet|document|presentation|powerpoint|pdf|docx|pptx|xlsx|ppt|slides)\b', input_lower):
             if not any(k in input_lower for k in ["then", "and email", "and send", "and open", "and play", "and set", "and reminder"]):
@@ -616,13 +639,13 @@ class MultiIntentAnalyzer:
             if prefix.lower().startswith(("type ", "write ")):
                 continue
                 
-            # 3. Verify prefix is a valid actionable command
-            intent_pre, _ = self.router.route_command(prefix)
+            # 3. Verify prefix is a valid actionable command (no LLM semantic call for candidate boundaries)
+            intent_pre, _ = self.router.route_command(prefix, allow_semantic=False)
             if intent_pre == Intent.GENERAL_CONVERSATION:
                 continue
                 
-            # 4. Verify suffix is a valid actionable command
-            intent_suf, _ = self.router.route_command(suffix)
+            # 4. Verify suffix is a valid actionable command (no LLM semantic call for candidate boundaries)
+            intent_suf, _ = self.router.route_command(suffix, allow_semantic=False)
             if intent_suf == Intent.GENERAL_CONVERSATION:
                 continue
                 

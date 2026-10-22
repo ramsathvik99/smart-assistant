@@ -340,8 +340,21 @@ class DatabaseManager:
         if not self.pool or not user_id:
             return []
         try:
+            from datetime import date, datetime, time
             with self._get_cursor() as cur:
                 if start_date and end_date:
+                    norm_start = start_date
+                    norm_end = end_date
+                    if isinstance(norm_start, date) and not isinstance(norm_start, datetime):
+                        norm_start = datetime.combine(norm_start, time.min)
+                    elif isinstance(norm_start, str) and len(norm_start) == 10:
+                        norm_start = f"{norm_start} 00:00:00"
+
+                    if isinstance(norm_end, date) and not isinstance(norm_end, datetime):
+                        norm_end = datetime.combine(norm_end, time.max)
+                    elif isinstance(norm_end, str) and len(norm_end) == 10:
+                        norm_end = f"{norm_end} 23:59:59.999999"
+
                     cur.execute(
                         """
                         SELECT id, task_text, due_at, is_notified, created_at
@@ -350,7 +363,7 @@ class DatabaseManager:
                           AND due_at BETWEEN %s AND %s
                         ORDER BY due_at ASC
                         """,
-                        (user_id, start_date, end_date)
+                        (user_id, norm_start, norm_end)
                     )
                 else:
                     cur.execute(

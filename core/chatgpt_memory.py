@@ -728,6 +728,60 @@ class ChatGPTMemoryManager:
         facts = self.get_user_facts(user_id)
         prefs = self.get_preferences(user_id)
 
+        # Speech recognition / spelling normalization for education & personal facts
+        q = re.sub(r'\binter\s+stu(?:y|ies|dy|dies)\b', 'intermediate studies', q)
+        q = re.sub(r'\bmy\s+inter\b', 'my intermediate', q)
+
+        # 0.02 Temporal reasoning over a stored date fact
+        # ("Which day of the week is my birthday next year?", "How many days until
+        #  my birthday?", "What date is my next birthday?")  Uses the canonical
+        #  facts already loaded above and deterministic date arithmetic ONLY.
+        temporal_answer = self._answer_temporal_fact_query(q, facts)
+        if temporal_answer:
+            return temporal_answer
+
+        # 0.01 Verification / "Are you sure?" re-evaluation queries
+        if q.startswith("are you sure") or q.startswith("are you certain") or "really sure" in q:
+            if any(k in q for k in ("intermediate", "inter")):
+                inter = facts.get("intermediate") or facts.get("intermediate_college")
+                if inter:
+                    return f"Yes, I'm certain based on your stored records that you completed your intermediate at {inter}."
+                return "Yes, I am sure. I re-checked your persistent memory and profile records, and there is no record of your intermediate education."
+            elif any(k in q for k in ("10th", "tenth", "school")):
+                tenth = facts.get("10th") or facts.get("school")
+                if tenth:
+                    return f"Yes, I'm certain based on your stored records that you completed your 10th at {tenth}."
+                return "Yes, I am sure. I re-checked your persistent memory and profile records, and there is no record of your 10th grade education."
+            elif any(k in q for k in ("university", "college", "srm", "study", "studied")):
+                inst = facts.get("institution") or facts.get("university") or facts.get("college")
+                if inst:
+                    return f"Yes, I am certain. According to your stored profile records, you study at {inst}."
+                return "Yes, I am sure. I re-checked your records and found no university entry recorded."
+            else:
+                if facts:
+                    fact_summary = ", ".join(f"{k}: {v}" for k, v in list(facts.items())[:3])
+                    return f"Yes, I verified your stored records. The recorded facts are: {fact_summary}."
+                return "Yes, I am sure. I verified your persistent memory records, and no matching entry is stored."
+
+        # 0.05 Intermediate / +2 / Junior College Inquiries
+        if any(p in q for p in (
+            "intermediate", "inter studies", "my intermediate", "junior college",
+            "+2", "plus two", "12th", "twelfth"
+        )):
+            inter = facts.get("intermediate") or facts.get("intermediate_college") or facts.get("junior_college") or facts.get("12th")
+            if inter:
+                return f"According to your records, you completed your intermediate at {inter}."
+            return "I checked your available records, and I don't have a record of your intermediate education."
+
+        # 0.06 10th Grade / SSC / Matriculation Inquiries
+        if any(p in q for p in (
+            "10th", "tenth", "my 10th", "my tenth", "ssc", "matriculation", "high school", "schooling"
+        )) and not any(p in q for p in ("university", "college", "intermediate")):
+            tenth = facts.get("10th") or facts.get("tenth") or facts.get("tenth_school") or facts.get("school") or facts.get("high_school") or facts.get("matriculation")
+            if tenth:
+                return f"According to your records, you studied your 10th grade at {tenth}."
+            return "I checked your available records, and I don't have a record of your 10th grade education."
+
         # 0. University & Institution Inquiries
         # e.g. "Which university do I attend?", "What university do I attend?", "Where do I study?", "What college do I attend?"
         if any(p in q for p in (
@@ -744,7 +798,16 @@ class ChatGPTMemoryManager:
                 return f"You attend {inst}."
             return "I don't have a record of which university or college you attend."
 
+        # 0.08 Age
+        if any(p in q for p in ("how old am i", "what is my age", "what's my age", "whats my age",
+                                 "my age", "how old", "how many years old")):
+            age_fact = facts.get("age")
+            if age_fact:
+                return f"You are {age_fact} years old."
+            return "I don't have your age on record."
+
         # 0.1 Education, Year, & Student Status
+
         # e.g. "What is my education?", "What year am I in?", "Am I a student?", "What is my student status?"
         if any(p in q for p in (
             "what is my education", "what year am i in", "am i a student",
@@ -779,16 +842,22 @@ class ChatGPTMemoryManager:
             return "I don't have a record of your activities or committee roles."
 
         # 0.3 Preferred Name & Name
-        # e.g. "What is my preferred name?", "What is my name?", "What should you call me?"
+        # e.g. "What is my preferred name?", "What is my full name?", "What is my name?", "What should you call me?"
         if any(p in q for p in (
+            "what is my full name", "what's my full name", "whats my full name", "my full name", "tell me my full name",
             "what is my preferred name", "my preferred name", "what name do i prefer",
             "what should you call me", "what is my name", "what's my name", "whats my name",
             "who am i", "do you know my name", "tell me my name"
         )):
-            name = facts.get("preferred_name") or facts.get("name")
+            if "full name" in q:
+                fn = facts.get("full_name") or facts.get("name") or facts.get("preferred_name")
+                if fn:
+                    return f"Your full name is {fn}."
+                return "I don't have a full name recorded for you."
+            name = facts.get("preferred_name") or facts.get("name") or facts.get("full_name")
             if name:
-                return f"Your preferred name is {name}."
-            return "I don't have a preferred name recorded for you."
+                return f"Your name is {name}."
+            return "I don't have a name recorded for you."
 
         # 0.4 Commitments & Deadlines
         # e.g. "When is my interview?", "What deadlines do I have?", "What is my next commitment?"
@@ -940,6 +1009,156 @@ class ChatGPTMemoryManager:
             return f"According to your records, your {clean_k} is {best_val}."
 
         return None
+
+    # ------------------------------------------------------------------
+    # Deterministic temporal reasoning over stored date facts
+    # ------------------------------------------------------------------
+    _MONTHS = {
+        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8,
+        "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+
+    # Fact keys that hold a DATE (month/day[/year]).
+    _DATE_FACT_KEYS = (
+        "birthday", "birth_date", "date_of_birth", "dob", "anniversary",
+        "wedding_anniversary", "joining_date", "graduation_date",
+    )
+
+    @classmethod
+    def _parse_stored_date(cls, raw: Any) -> Optional[Dict[str, int]]:
+        """Parse a stored date value into {'month', 'day', 'year'?} without guessing."""
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+
+        # ISO: 2005-04-14 / 2005/04/14
+        m = re.search(r'\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b', text)
+        if m:
+            month, day, year = int(m.group(2)), int(m.group(3)), int(m.group(1))
+            return {"month": month, "day": day, "year": year} if 1 <= month <= 12 and 1 <= day <= 31 else None
+
+        # Month name + day [+ year]: "April 14, 2005" / "14 April 2005" / "Apr 14"
+        month_names = "|".join(cls._MONTHS.keys())
+        m = re.search(rf'\b({month_names})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(\d{{4}}))?', text, re.IGNORECASE)
+        if m:
+            month = cls._MONTHS[m.group(1).lower()]
+            day = int(m.group(2))
+            year = int(m.group(3)) if m.group(3) else None
+            return {"month": month, "day": day, **(({"year": year}) if year else {})}
+        m = re.search(rf'\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({month_names})\.?(?:,?\s*(\d{{4}}))?', text, re.IGNORECASE)
+        if m:
+            month = cls._MONTHS[m.group(2).lower()]
+            day = int(m.group(1))
+            year = int(m.group(3)) if m.group(3) else None
+            return {"month": month, "day": day, **(({"year": year}) if year else {})}
+
+        # Numeric month/day[/year]: 04/14/2005 or 14/04/2005 (unambiguous only)
+        m = re.search(r'\b(\d{1,2})[/](\d{1,2})[/](\d{2,4})\b', text)
+        if m:
+            a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if y < 100:
+                y += 2000 if y < 50 else 1900
+            if a <= 12 < b:
+                return {"month": a, "day": b, "year": y}
+            if b <= 12 < a:
+                return {"month": b, "day": a, "year": y}
+        return None
+
+    def _find_date_fact(self, q: str, facts: Dict[str, str]):
+        """Return (label, parsed_date) for the date fact the query refers to."""
+        if not facts:
+            return None, None
+        candidates = []
+        for key, value in facts.items():
+            key_low = str(key).lower()
+            if any(dk in key_low for dk in self._DATE_FACT_KEYS) or "birthday" in key_low:
+                parsed = self._parse_stored_date(value)
+                if parsed:
+                    candidates.append((str(key), parsed))
+        if not candidates:
+            return None, None
+        # Prefer the fact explicitly named in the question.
+        for key, parsed in candidates:
+            label = key.replace("_", " ").lower()
+            tokens = [t for t in label.split() if len(t) > 3 and t not in ("date", "birth")]
+            if any(t in q for t in tokens):
+                return key, parsed
+        return candidates[0]
+
+    def _answer_temporal_fact_query(self, q: str, facts: Dict[str, str]) -> Optional[str]:
+        """Answer weekday / countdown / next-occurrence questions about a stored date."""
+        from datetime import date as _date
+
+        wants_weekday = bool(re.search(r'\b(?:what|which)\s+day(?:\s+of\s+the\s+week)?\b', q)) or "weekday" in q
+        wants_countdown = bool(re.search(r'\bhow\s+many\s+days\b', q))
+        wants_next_date = bool(re.search(r'\b(?:what|which)\s+(?:date|day)\b', q)) and "next" in q
+        wants_age = bool(re.search(r'\bhow\s+old\b', q)) or bool(re.search(r'\bwhat(?:\'s|\s+is)\s+my\s+age\b', q))
+        if not (wants_weekday or wants_countdown or wants_next_date or wants_age):
+            return None
+
+        key, stored = self._find_date_fact(q, facts)
+        if not stored:
+            # No usable stored date: let the ordinary fact paths answer (and say
+            # "I don't have that recorded" rather than inventing a date).
+            return None
+
+        label = key.replace("_", " ").strip().lower()
+        month, day = stored["month"], stored["day"]
+        today = _date.today()
+
+        def _safe_date(year: int) -> Optional[_date]:
+            try:
+                return _date(year, month, day)
+            except ValueError:
+                return None   # e.g. Feb 29 in a non-leap year
+
+        if wants_age:
+            if not stored.get("year"):
+                return None
+            age = today.year - stored["year"] - ((today.month, today.day) < (month, day))
+            return f"According to your records, you are {age} years old."
+
+        # Resolve the target occurrence
+        if "next year" in q:
+            target_year = today.year + 1
+        elif "this year" in q:
+            target_year = today.year
+        else:
+            upcoming = _safe_date(today.year)
+            if upcoming is None:
+                target_year = today.year + 1
+            elif upcoming < today:
+                target_year = today.year + 1
+            else:
+                target_year = today.year
+        target = _safe_date(target_year)
+        if target is None:
+            # Feb 29 requested for a non-leap year: use the following leap year.
+            for y in (target_year + 1, target_year + 2, target_year + 3, target_year + 4):
+                target = _safe_date(y)
+                if target:
+                    target_year = y
+                    break
+        if target is None:
+            return f"I have your {label} as {month:02d}/{day:02d}, which is not a valid calendar date."
+
+        if wants_countdown:
+            days = (target - today).days
+            if days == 0:
+                return f"Your {label} is today ({target.strftime('%B %d, %Y')})."
+            return f"Your {label} is {days} day(s) away, on {target.strftime('%A, %B %d, %Y')}."
+
+        if wants_next_date:
+            return f"Your next {label} is on {target.strftime('%A, %B %d, %Y')}."
+
+        weekday = target.strftime("%A")
+        if "next year" in q:
+            return f"Your {label} next year falls on {weekday}, {target.strftime('%B %d, %Y')}."
+        return f"Your {label} falls on {weekday}, {target.strftime('%B %d, %Y')}."
 
     def answer_historical_command_query(self, user_id: int, query_text: str) -> Optional[str]:
         """

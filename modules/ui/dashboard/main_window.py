@@ -18,7 +18,7 @@ import os
 from datetime import datetime
 from typing import Callable, Dict, Optional
 
-from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal, QEvent, QPointF, QRectF
+from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal, QEvent, QPointF, QRectF, pyqtProperty
 from PyQt6.QtGui import QAction, QColor, QIcon, QPixmap, QPainter, QBrush, QRadialGradient, QPalette, QPen, QConicalGradient
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QVBoxLayout, QFrame, QLabel, QPushButton,
@@ -224,30 +224,56 @@ def QConicalGradient_fallback(x, y, angle):
 
 class Sidebar(QFrame):
     nav_changed = pyqtSignal(str)
+    collapse_toggled = pyqtSignal(bool)
+
+    def get_sidebar_width(self) -> int:
+        return self.width()
+
+    def set_sidebar_width(self, w: int):
+        self.setFixedWidth(w)
+
+    sidebarWidth = pyqtProperty(int, get_sidebar_width, set_sidebar_width)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setProperty("class", "SidebarPanel")
-        self.setFixedWidth(SidebarSize.WIDTH_EXPANDED)
         self._buttons: Dict[str, QPushButton] = {}
         self._current: Optional[str] = None
         self._collapsed = False
+        self._username = "User"
+        self._assistant_name = "Assistant"
+        self._current_state = "idle"
+
+        # Check existing user preference for sidebar collapse
+        try:
+            prefs = load_user_preferences() or {}
+            if bool(prefs.get("sidebar_collapsed")):
+                self._collapsed = True
+        except Exception:
+            pass
+
         self._build_ui()
+        if self._collapsed:
+            self.set_collapsed(True, animate=False)
+        else:
+            self.setFixedWidth(SidebarSize.WIDTH_EXPANDED)
 
     # --- UI build ------------------------------------------------------------
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        self._root_layout = QVBoxLayout(self)
         bp = SidebarSize.BRAND_PAD
-        root.setContentsMargins(bp - 2, bp, bp - 2, bp)
-        root.setSpacing(Spacing.SM)
+        self._root_layout.setContentsMargins(bp - 2, bp, bp - 2, bp)
+        self._root_layout.setSpacing(Spacing.SM)
 
         # Brand / App header
         brand_row = QHBoxLayout()
-        brand_row.setSpacing(Spacing.MD)
-        brand_row.setContentsMargins(4, 0, 0, 0)
+        brand_row.setSpacing(Spacing.SM)
+        brand_row.setContentsMargins(2, 0, 0, 0)
         self._logo_orb = AssistantOrb(26)
         brand_row.addWidget(self._logo_orb, 0, Qt.AlignmentFlag.AlignVCenter)
-        brand_col = QVBoxLayout()
+
+        self._brand_text_wrap = QWidget()
+        brand_col = QVBoxLayout(self._brand_text_wrap)
         brand_col.setSpacing(1)
         brand_col.setContentsMargins(0, 0, 0, 0)
         self._app_name = QLabel("Smart Assistant")
@@ -259,31 +285,44 @@ class Sidebar(QFrame):
         self._app_sub.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px;")
         brand_col.addWidget(self._app_name)
         brand_col.addWidget(self._app_sub)
-        brand_row.addLayout(brand_col, 0)
-        brand_row.addStretch(1)
-        root.addLayout(brand_row)
+        brand_row.addWidget(self._brand_text_wrap, 1)
 
-        root.addSpacing(Spacing.LG - 2)
-        root.addWidget(HLine(C.DIVIDER, 1))
-        root.addSpacing(Spacing.MD)
+        # Collapse / Expand toggle button
+        self._toggle_btn = QPushButton()
+        self._toggle_btn.setObjectName("IconBtn")
+        self._toggle_btn.setFixedSize(30, 30)
+        self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle_btn.setIcon(icon(ICONS.CHEVRON_LEFT, C.TEXT_MED, 13))
+        self._toggle_btn.setToolTip("Collapse sidebar")
+        self._toggle_btn.clicked.connect(lambda: self.toggle_collapse(animate=True))
+        brand_row.addWidget(self._toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self._root_layout.addLayout(brand_row)
+
+        self._sep1 = HLine(C.DIVIDER, 1)
+        self._root_layout.addSpacing(Spacing.SM)
+        self._root_layout.addWidget(self._sep1)
+        self._root_layout.addSpacing(Spacing.SM)
 
         # Identity card
         self._identity_card = QFrame()
         self._identity_card.setProperty("class", "CardInner")
         id_layout = QHBoxLayout(self._identity_card)
-        id_layout.setContentsMargins(Spacing.MD, Spacing.MD, Spacing.MD, Spacing.MD)
+        id_layout.setContentsMargins(Spacing.SM + 2, Spacing.SM + 2, Spacing.SM + 2, Spacing.SM + 2)
         id_layout.setSpacing(Spacing.MD)
         self._avatar = QLabel()
-        self._avatar.setFixedSize(40, 40)
+        self._avatar.setFixedSize(38, 38)
         self._avatar.setStyleSheet(
-            f"border-radius: 20px; background: {rgba_str(C.ACC, 0.14)}; "
+            f"border-radius: 19px; background: {rgba_str(C.ACC, 0.14)}; "
             f"color: {C.ACC}; font-weight: 700; font-size: 14px;"
             f"border: 1px solid {rgba_str(C.ACC, 0.22)};"
         )
         self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._avatar.setText("U")
-        id_layout.addWidget(self._avatar)
-        id_col = QVBoxLayout()
+        id_layout.addWidget(self._avatar, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self._id_text_wrap = QWidget()
+        id_col = QVBoxLayout(self._id_text_wrap)
         id_col.setSpacing(1)
         id_col.setContentsMargins(0, 0, 0, 0)
         self._user_lbl = QLabel("User")
@@ -293,18 +332,18 @@ class Sidebar(QFrame):
         self._asst_lbl.setStyleSheet(f"font-size: 11px; color: {C.TEXT_DIM};")
         id_col.addWidget(self._user_lbl)
         id_col.addWidget(self._asst_lbl)
-        id_layout.addLayout(id_col, 1)
-        root.addWidget(self._identity_card)
+        id_layout.addWidget(self._id_text_wrap, 1)
 
-        root.addSpacing(Spacing.MD + 2)
+        self._root_layout.addWidget(self._identity_card)
+        self._root_layout.addSpacing(Spacing.MD)
 
-        nav_lbl = QLabel("NAVIGATION")
-        nav_lbl.setProperty("class", "Caption")
-        nav_lbl.setStyleSheet(
+        self._nav_header = QLabel("NAVIGATION")
+        self._nav_header.setProperty("class", "Caption")
+        self._nav_header.setStyleSheet(
             f"letter-spacing: 1.6px; font-size: 10px; padding: 0 {Spacing.MD}px; color: {C.TEXT_DIM};"
         )
-        root.addWidget(nav_lbl)
-        root.addSpacing(Spacing.SM)
+        self._root_layout.addWidget(self._nav_header)
+        self._root_layout.addSpacing(Spacing.SM)
 
         # Scrollable nav list
         scroll = QScrollArea()
@@ -315,7 +354,7 @@ class Sidebar(QFrame):
         scroll_contents = QWidget()
         self._nav_layout = QVBoxLayout(scroll_contents)
         self._nav_layout.setContentsMargins(0, 0, 0, 0)
-        self._nav_layout.setSpacing(2)
+        self._nav_layout.setSpacing(3)
 
         # Section accent colors for navigation
         self._nav_accents = {
@@ -347,22 +386,94 @@ class Sidebar(QFrame):
 
         self._nav_layout.addStretch(1)
         scroll.setWidget(scroll_contents)
-        root.addWidget(scroll, 1)
+        self._root_layout.addWidget(scroll, 1)
 
-        root.addSpacing(Spacing.SM)
-        root.addWidget(HLine(C.DIVIDER, 1))
-        root.addSpacing(Spacing.MD - 2)
+        self._root_layout.addSpacing(Spacing.SM)
+        self._sep2 = HLine(C.DIVIDER, 1)
+        self._root_layout.addWidget(self._sep2)
+        self._root_layout.addSpacing(Spacing.MD - 2)
 
         # Assistant state at bottom
-        state_row = QHBoxLayout()
-        state_row.setSpacing(Spacing.SM)
-        state_row.setContentsMargins(4, 0, 4, 0)
-        self._state_orb = AssistantOrb(12)
-        state_row.addWidget(self._state_orb, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._state_row = QHBoxLayout()
+        self._state_row.setSpacing(Spacing.SM)
+        self._state_row.setContentsMargins(4, 0, 4, 0)
+        self._state_orb = AssistantOrb(14)
+        self._state_row.addWidget(self._state_orb, 0, Qt.AlignmentFlag.AlignVCenter)
         self._state_chip = StatusChip("IDLE", "idle")
-        state_row.addWidget(self._state_chip, 0, Qt.AlignmentFlag.AlignVCenter)
-        state_row.addStretch(1)
-        root.addLayout(state_row)
+        self._state_row.addWidget(self._state_chip, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._state_row.addStretch(1)
+        self._root_layout.addLayout(self._state_row)
+
+    # --- Collapse / Expand Interaction ---------------------------------------
+    @property
+    def collapsed(self) -> bool:
+        return self._collapsed
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def toggle_collapse(self, animate: bool = True):
+        self.set_collapsed(not self._collapsed, animate=animate)
+
+    def set_collapsed(self, collapsed: bool, animate: bool = True):
+        self._collapsed = collapsed
+        target_w = SidebarSize.WIDTH_COLLAPSED if collapsed else SidebarSize.WIDTH_EXPANDED
+
+        # Toggle visibility of labels and panels
+        self._brand_text_wrap.setVisible(not collapsed)
+        self._id_text_wrap.setVisible(not collapsed)
+        self._nav_header.setVisible(not collapsed)
+        self._state_chip.setVisible(not collapsed)
+
+        # Update button texts, tooltips, and padding
+        for pid, label, icon_name, _cls in _NAV_ITEMS:
+            btn = self._buttons.get(pid)
+            if btn:
+                btn.setProperty("collapsed", collapsed)
+                if collapsed:
+                    btn.setText("")
+                    btn.setToolTip(label)
+                else:
+                    btn.setText("   " + label)
+                    btn.setToolTip("")
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+
+        # Update toggle button visual
+        if collapsed:
+            self._toggle_btn.setIcon(icon(ICONS.CHEVRON_RIGHT, C.SEC_DASHBOARD, 13))
+            self._toggle_btn.setToolTip("Expand sidebar")
+            self._avatar.setToolTip(f"User: {self._username}")
+            self._state_orb.setToolTip(f"Assistant: {self._current_state.upper()}")
+            self._identity_card.setStyleSheet("background: transparent; border: none;")
+        else:
+            self._toggle_btn.setIcon(icon(ICONS.CHEVRON_LEFT, C.TEXT_MED, 13))
+            self._toggle_btn.setToolTip("Collapse sidebar")
+            self._avatar.setToolTip("")
+            self._state_orb.setToolTip("")
+            self._identity_card.setStyleSheet("")
+
+        # Persist preference asynchronously
+        try:
+            from .service_adapters import save_user_preference
+            save_user_preference("sidebar_collapsed", self._collapsed)
+        except Exception:
+            pass
+
+        self.collapse_toggled.emit(self._collapsed)
+
+        # Smooth animation or immediate jump
+        if animate:
+            if hasattr(self, "_anim") and self._anim.state() == QPropertyAnimation.State.Running:
+                self._anim.stop()
+            self._anim = QPropertyAnimation(self, b"sidebarWidth")
+            self._anim.setDuration(220)
+            self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            self._anim.setStartValue(self.width())
+            self._anim.setEndValue(target_w)
+            self._anim.start()
+        else:
+            self.setFixedWidth(target_w)
 
     # --- Public API ----------------------------------------------------------
     def set_current(self, page_id: str):
@@ -394,17 +505,24 @@ class Sidebar(QFrame):
             btn.style().polish(btn)
 
     def update_identity(self, username: str, assistant_name: str):
-        self._user_lbl.setText(username or "User")
-        self._asst_lbl.setText(assistant_name or "Trevon")
-        letter = (username or "U")[0:1].upper()
+        self._username = username or "User"
+        self._assistant_name = assistant_name or "Friday"
+        self._user_lbl.setText(self._username)
+        self._asst_lbl.setText(self._assistant_name)
+        letter = self._username[0:1].upper()
         self._avatar.setText(letter)
+        if self._collapsed:
+            self._avatar.setToolTip(f"User: {self._username}")
 
     def update_state(self, state: str):
         s = (state or "idle").lower()
+        self._current_state = s
         self._state_orb.set_state(s)
         self._state_chip.set_state(s)
         self._state_chip.setText(s.upper())
         self._logo_orb.set_state(s)
+        if self._collapsed:
+            self._state_orb.setToolTip(f"Assistant: {s.upper()}")
 
 
 class Topbar(QFrame):
@@ -447,7 +565,7 @@ class Topbar(QFrame):
         search_wrap.setSpacing(0)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search conversations, files, calendar, commands…  (Ctrl+K)")
-        self._search.setMinimumWidth(360)
+        self._search.setMinimumWidth(220)
         self._search.setMaximumWidth(520)
         self._search.setFixedHeight(36)
         self._search.addAction(icon(ICONS.SEARCH, C.TEXT_DIM, 14),

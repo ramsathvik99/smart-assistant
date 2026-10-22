@@ -191,18 +191,110 @@ def extract_candidate_facts(text: str) -> List[ExtractedFact]:
                 source_ref=raw_text
             ))
 
-    # Explicit: "My name is X"
-    m_my_name = re.search(r'\bmy\s+name\s+is\s+([a-zA-Z\s]+?)(?:,\s*|\s+and\b|\.|$)', raw_text, re.IGNORECASE)
+    # Explicit: "My name is X" / "My full name is X"
+    m_my_name = re.search(r'\bmy\s+(?:full\s+)?name\s+is\s+([a-zA-Z\s]+?)(?:,\s*|\s+and\b|\.|$)', raw_text, re.IGNORECASE)
     if m_my_name:
         n_val = _clean_str(m_my_name.group(1))
         words = n_val.split()
-        if 1 <= len(words) <= 3 and not any(w.lower() in _NON_NAME_WORDS for w in words):
+        if 1 <= len(words) <= 4 and not any(w.lower() in _NON_NAME_WORDS for w in words):
             clean_name = " ".join(w.capitalize() for w in words)
             add_fact(ExtractedFact(
                 key="name",
                 value=clean_name,
                 category="identity",
                 confidence=0.99,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+            add_fact(ExtractedFact(
+                key="preferred_name",
+                value=clean_name,
+                category="identity",
+                confidence=0.99,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+            add_fact(ExtractedFact(
+                key="full_name",
+                value=clean_name,
+                category="identity",
+                confidence=0.99,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
+    # 10th School / Schooling: e.g. "I studied my 10th at Ongole Sai Baba Central School", "My 10th school is ..."
+    m_10th = re.search(
+        r'\b(?:i\s+(?:studied|did|completed|attended|went\s+to)\s+(?:my\s+)?(?:10th(?:\s+grade)?|tenth(?:\s+grade)?|schooling)|my\s+(?:10th|tenth)\s+(?:school\s+)?(?:was|is|=))\s+(?:at|in|from)?\s*([a-zA-Z0-9\s–\-]+?)(?:,\s*|\s+(?:and|where|but)\b|\.|$)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_10th:
+        s_val = _clean_str(m_10th.group(1))
+        if s_val:
+            add_fact(ExtractedFact(
+                key="10th",
+                value=s_val,
+                category="education",
+                confidence=0.98,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+            add_fact(ExtractedFact(
+                key="tenth",
+                value=s_val,
+                category="education",
+                confidence=0.98,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+            add_fact(ExtractedFact(
+                key="tenth_school",
+                value=s_val,
+                category="education",
+                confidence=0.98,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+            add_fact(ExtractedFact(
+                key="school",
+                value=s_val,
+                category="education",
+                confidence=0.98,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
+    # Intermediate / Junior College: e.g. "I completed intermediate at Narayana Junior College in Nellore"
+    m_inter = re.search(
+        r'\b(?:i\s+(?:studied|did|completed|attended|went\s+to)\s+(?:my\s+)?(?:intermediate|inter|\+2|plus\s+two|junior\s+college)|my\s+(?:intermediate|inter)\s+(?:college\s+)?(?:was|is|=))\s+(?:at|in|from)?\s*([a-zA-Z0-9\s–\-]+?)(?:,\s*|\s+(?:and|where|but)\b|\.|$)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_inter:
+        i_val = _clean_str(m_inter.group(1))
+        if i_val:
+            add_fact(ExtractedFact(
+                key="intermediate",
+                value=i_val,
+                category="education",
+                confidence=0.98,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+            add_fact(ExtractedFact(
+                key="intermediate_college",
+                value=i_val,
+                category="education",
+                confidence=0.98,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+            add_fact(ExtractedFact(
+                key="junior_college",
+                value=i_val,
+                category="education",
+                confidence=0.98,
                 status="confirmed",
                 source_ref=raw_text
             ))
@@ -269,66 +361,44 @@ def extract_candidate_facts(text: str) -> List[ExtractedFact]:
             source_ref=raw_text
         ))
 
-    # C. Institution / University / College
+    # C. Institution / University / College (only if not an intermediate or 10th school statement)
     # e.g., "SRM AP student", "student at SRM University–AP", "studying at SRM AP", "My university is SRM AP"
-    m_univ_explicit = re.search(
-        r'\b(?:my\s+)?(?:university|college|institution|campus|school)\s+(?:is|was|=)\s+([a-zA-Z0-9\s–\-]+?)(?:,\s*|\s+(?:and|where|but)\b|\.|$)',
-        raw_text,
-        re.IGNORECASE
-    )
-    if m_univ_explicit:
-        u_val = _clean_str(m_univ_explicit.group(1))
-        if len(u_val.split()) <= 6:
-            add_fact(ExtractedFact(
-                key="institution",
-                value=u_val,
-                category="education",
-                confidence=0.98,
-                status="confirmed",
-                source_ref=raw_text
-            ))
-            add_fact(ExtractedFact(
-                key="university",
-                value=u_val,
-                category="education",
-                confidence=0.98,
-                status="confirmed",
-                source_ref=raw_text
-            ))
-
-    # Recognizer for known or standard university expressions in conversational clauses
-    # e.g. "SRM AP", "SRM University-AP", "SRM University–AP", "IIT Madras", "Stanford"
-    m_srm = re.search(r'\b(SRM\s*(?:University\s*[-–]\s*AP|University\s+AP|University|AP))\b', raw_text, re.IGNORECASE)
-    if m_srm:
-        srm_raw = m_srm.group(1).strip()
-        # Canonicalize to the official institution name
-        inst_name = "SRM University–AP" if "ap" in srm_raw.lower() else "SRM University"
-        add_fact(ExtractedFact(
-            key="institution",
-            value=inst_name,
-            category="education",
-            confidence=0.95,
-            status="confirmed",
-            source_ref=raw_text
-        ))
-        add_fact(ExtractedFact(
-            key="university",
-            value=inst_name,
-            category="education",
-            confidence=0.95,
-            status="confirmed",
-            source_ref=raw_text
-        ))
-    else:
-        m_at_inst = re.search(
-            r'\b(?:at|attending|studying\s+at)\s+((?:IIT|NIT|BITS|IIIT|IIM|MIT|Stanford|Harvard|Oxford|Cambridge)(?:\s+[A-Z][a-zA-Z0-9]+)?|[A-Z][a-zA-Z0-9\s–\-]+?(?:University|College|Institute|Campus|Academy))\b',
-            raw_text
+    if not re.search(r'\b(?:intermediate|junior\s+college|inter\b|10th|tenth|schooling)\b', raw_text, re.IGNORECASE):
+        m_univ_explicit = re.search(
+            r'\b(?:my\s+)?(?:university|institution|campus)\s+(?:is|was|=)\s+([a-zA-Z0-9\s–\-]+?)(?:,\s*|\s+(?:and|where|but)\b|\.|$)',
+            raw_text,
+            re.IGNORECASE
         )
-        if m_at_inst:
-            inst_val = _clean_str(m_at_inst.group(1))
+        if m_univ_explicit:
+            u_val = _clean_str(m_univ_explicit.group(1))
+            if len(u_val.split()) <= 6:
+                add_fact(ExtractedFact(
+                    key="institution",
+                    value=u_val,
+                    category="education",
+                    confidence=0.98,
+                    status="confirmed",
+                    source_ref=raw_text
+                ))
+                add_fact(ExtractedFact(
+                    key="university",
+                    value=u_val,
+                    category="education",
+                    confidence=0.98,
+                    status="confirmed",
+                    source_ref=raw_text
+                ))
+
+        # Recognizer for known or standard university expressions in conversational clauses
+        # e.g. "SRM AP", "SRM University-AP", "SRM University–AP", "IIT Madras", "Stanford"
+        m_srm = re.search(r'\b(SRM\s*(?:University\s*[-–]\s*AP|University\s+AP|University|AP))\b', raw_text, re.IGNORECASE)
+        if m_srm:
+            srm_raw = m_srm.group(1).strip()
+            # Canonicalize to the official institution name
+            inst_name = "SRM University–AP" if "ap" in srm_raw.lower() else "SRM University"
             add_fact(ExtractedFact(
                 key="institution",
-                value=inst_val,
+                value=inst_name,
                 category="education",
                 confidence=0.95,
                 status="confirmed",
@@ -336,7 +406,51 @@ def extract_candidate_facts(text: str) -> List[ExtractedFact]:
             ))
             add_fact(ExtractedFact(
                 key="university",
-                value=inst_val,
+                value=inst_name,
+                category="education",
+                confidence=0.95,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+        else:
+            m_at_inst = re.search(
+                r'\b(?:at|attending|studying\s+at)\s+((?:IIT|NIT|BITS|IIIT|IIM|MIT|Stanford|Harvard|Oxford|Cambridge)(?:\s+[A-Z][a-zA-Z0-9]+)?|[A-Z][a-zA-Z0-9\s–\-]+?(?:University|College|Institute|Campus|Academy))\b',
+                raw_text
+            )
+            if m_at_inst:
+                inst_val = _clean_str(m_at_inst.group(1))
+                add_fact(ExtractedFact(
+                    key="institution",
+                    value=inst_val,
+                    category="education",
+                    confidence=0.95,
+                    status="confirmed",
+                    source_ref=raw_text
+                ))
+                add_fact(ExtractedFact(
+                    key="university",
+                    value=inst_val,
+                    category="education",
+                    confidence=0.95,
+                    status="confirmed",
+                    source_ref=raw_text
+                ))
+    else:
+        m_srm = re.search(r'\b(SRM\s*(?:University\s*[-–]\s*AP|University\s+AP|University|AP))\b', raw_text, re.IGNORECASE)
+        if m_srm:
+            srm_raw = m_srm.group(1).strip()
+            inst_name = "SRM University–AP" if "ap" in srm_raw.lower() else "SRM University"
+            add_fact(ExtractedFact(
+                key="institution",
+                value=inst_name,
+                category="education",
+                confidence=0.95,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+            add_fact(ExtractedFact(
+                key="university",
+                value=inst_name,
                 category="education",
                 confidence=0.95,
                 status="confirmed",
@@ -564,7 +678,7 @@ def extract_candidate_facts(text: str) -> List[ExtractedFact]:
         ))
 
     # J. Location / City: "I live in X", "I am from X"
-    m_city = re.search(r'\b(?:i\s+live\s+in|i\s+am\s+from|i\'m\s+from)\s+([A-Z][a-zA-Z\s]+?)(?:,\s*|\s+(?:and|where)\b|\.|$)', raw_text)
+    m_city = re.search(r'\b(?:i\s+live\s+in|i\s+am\s+from|i\'m\s+from)\s+([A-Z][a-zA-Z\s]+?)(?:,\s*|\s+(?:and|where)\b|\.|$)', raw_text, re.IGNORECASE)
     if m_city:
         city_val = _clean_str(m_city.group(1))
         if len(city_val.split()) <= 3 and city_val.lower() not in _NON_NAME_WORDS:
@@ -577,7 +691,33 @@ def extract_candidate_facts(text: str) -> List[ExtractedFact]:
                 source_ref=raw_text
             ))
 
+    # J2. Age: "I am 21 years old", "I'm 21", "my age is 21", "I am 21-year-old"
+    m_age = re.search(
+        r'\b(?:i\s+am|i\'m|my\s+age\s+is)\s+(?:a\s+)?(\d{1,3})[- ]?(?:years?\s+old|yrs?\s+old|yo\b|year[- ]old\b)?',
+        raw_text,
+        re.IGNORECASE
+    )
+    if not m_age:
+        m_age = re.search(
+            r'\bage\s+(?:is\s+)?(\d{1,3})\b',
+            raw_text,
+            re.IGNORECASE
+        )
+    if m_age:
+        age_val = m_age.group(1).strip()
+        age_int = int(age_val)
+        if 5 <= age_int <= 120:
+            add_fact(ExtractedFact(
+                key="age",
+                value=age_val,
+                category="identity",
+                confidence=0.98,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
     # K. Favorites: "my favorite X is Y"
+
     m_fav = re.search(r'\bmy\s+favou?rite\s+(\w+)\s+is\s+([a-zA-Z0-9\s]+?)(?:,\s*|\s+and\b|\.|$)', raw_text, re.IGNORECASE)
     if m_fav:
         f_item = _clean_str(m_fav.group(1)).lower()

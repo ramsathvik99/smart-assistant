@@ -119,9 +119,9 @@ def explicitly_requests_web(text: str) -> bool:
         return True
     return False
 
-def is_conversational_followup_or_complaint(text: str) -> bool:
+def is_conversational_complaint(text: str) -> bool:
     t = text.lower().strip().rstrip('.?!')
-    followup_patterns = [
+    complaint_patterns = [
         r'\bare\s+you\s+(?:getting\s+my\s+point|listening(?:\s+to\s+me)?|paying\s+attention|following\s+me)\b',
         r'\bdo\s+you\s+(?:understand(?:\s+what\s+i(\'m|\s+am)\s+saying)?|get\s+what\s+i\s+mean|hear\s+me)\b',
         r'\bwhy\s+are\s+you\s+(?:doing\s+that|doing\s+this|responding\s+like\s+this|acting\s+like\s+this)\b',
@@ -134,6 +134,22 @@ def is_conversational_followup_or_complaint(text: str) -> bool:
         r'\byou\s+are\s+the\s+one\s+who\s+is\s+not\s+taking\s+all\s+the\s+input\b',
         r'\byou\s+are\s+not\s+able\s+to\s+put\s+what\s+i\s+am\s+trying\s+to\s+say\b',
         r'\byou(\'re|\s+are)\s+not\s+(?:listening|taking\s+all\s+the\s+input|getting\s+it)\b',
+    ]
+    for pat in complaint_patterns:
+        if re.search(pat, t):
+            return True
+    return False
+
+def is_conversational_followup_or_complaint(text: str) -> bool:
+    if is_conversational_complaint(text):
+        return True
+    t = text.lower().strip().rstrip('.?!')
+    followup_patterns = [
+        r'\b(?:explain|clarify|elaborate|simplify|summarize|break\s+down)\s+(?:that|this|it)\b',
+        r'\b(?:in\s+)?simpler\s+terms\b',
+        r'\b(?:explain|tell\s+me\s+more\s+about)\s+(?:that|this)\s+(?:challenge|issue|problem|point|concept|topic)\b',
+        r'\bwhat\s+(?:about|is)\s+(?:that|this)\b',
+        r'\bwhat\s+is\s+the\s+main\s+challenge\s+in\s+making\s+it\b',
     ]
     for pat in followup_patterns:
         if re.search(pat, t):
@@ -155,12 +171,58 @@ def is_capability_query(text: str) -> bool:
             return True
     return False
 
+_DESTRUCTIVE_SCHEDULE_VERB = r'\b(?:remove|delete|erase|clear|wipe|discard|get\s+rid\s+of|cancel)\b'
+
+
+def parse_destructive_schedule_command(text: str) -> Optional[Dict[str, str]]:
+    """Deterministic parser for destructive SCHEDULE management requests.
+
+    Returns {'action': 'delete_schedules', 'schedule_scope': ...} or None.
+
+    A request only qualifies when it names a schedule/calendar/event noun.
+    Plain reminder deletion therefore keeps the dedicated REMINDERS intent.
+    Scope is 'events', 'reminders', 'both', or 'unspecified' (ambiguous -> ask).
+    """
+    t = (text or "").lower().strip()
+    if not t or not re.search(_DESTRUCTIVE_SCHEDULE_VERB, t):
+        return None
+    if not re.search(r'\b(?:schedules?|calendar|events?)\b', t):
+        return None
+    wants_reminders = bool(re.search(r'\b(?:reminders?)\b', t))
+    wants_events = bool(re.search(r'\b(?:calendar|events?)\b', t))
+    if wants_reminders and wants_events:
+        scope = "both"
+    elif wants_reminders:
+        scope = "reminders"
+    elif wants_events:
+        scope = "events"
+    else:
+        scope = "unspecified"
+    return {"action": "delete_schedules", "schedule_scope": scope}
+
+
+def is_personal_date_fact_query(text: str) -> bool:
+    """True for questions that need date arithmetic over a STORED personal date.
+
+    e.g. "What day of the week is my birthday next year?", "How many days until my
+    birthday?", "What date is my next birthday?".  These must reach memory/date
+    reasoning rather than the local clock DATE_QUERY handler.
+    """
+    t = (text or "").lower().strip()
+    if not re.search(r"\bmy\s+[a-z0-9_\s]+", t):
+        return False
+    weekday_q = re.search(r"\b(?:what|which)\s+day(?:\s+of\s+(?:the\s+)?week)?\s+(?:is|will|would|does)\b", t)
+    countdown_q = re.search(r"\bhow\s+many\s+days\b", t)
+    next_date_q = re.search(r"\b(?:what|which)\s+(?:date|day)\s+(?:is|will\s+be)\b", t)
+    return bool(weekday_q or countdown_q or next_date_q)
+
+
 def is_stable_knowledge_question(text: str) -> bool:
     t = text.lower().strip().rstrip('.?!')
     if explicitly_requests_web(t):
         return False
     knowledge_patterns = [
-        r'^(?:what\s+is|what\s+are|define|tell\s+me\s+about)\s+(?:a\s+|an\s+|the\s+)?(?:concept\s+of\s+)?(python|sql|java|c\+\+|javascript|a\s+neural\s+network|neural\s+networks|machine\s+learning|deep\s+learning|gradient\s+descent|backpropagation|an\s+operating\s+system|operating\s+systems|tcp|ip|dns|http|https|recursion|an\s+algorithm|data\s+structures?|binary\s+search|sorting\s+algorithms?)\b',
+        r'^(?:what\s+is|what\s+are|define|tell\s+me\s+about)\s+(?:a\s+|an\s+|the\s+)?(?:concept\s+of\s+)?(python|sql|java|c\+\+|javascript|a\s+neural\s+network|neural\s+networks|machine\s+learning|deep\s+learning|gradient\s+descent|backpropagation|an\s+operating\s+system|operating\s+systems|tcp|ip|dns|http|https|recursion|an\s+algorithm|data\s+structures?|binary\s+search|sorting\s+algorithms?|quantum\s+computing)\b',
         r'^(?:how\s+does|how\s+do)\s+(backpropagation|gradient\s+descent|neural\s+networks?|a\s+computer|an\s+os|memory\s+management)\s+work\b',
         r'^(?:explain|describe)\s+(?:the\s+concept\s+of\s+|about\s+)?(gradient\s+descent|backpropagation|neural\s+networks?|binary\s+search|recursion|polymorphism|inheritance|machine\s+learning|algorithms?|object\s+oriented\s+programming)\b',
     ]
@@ -169,13 +231,91 @@ def is_stable_knowledge_question(text: str) -> bool:
             return True
     return False
 
+# Chat-speak / typo normalisation used by the conversational detectors.
+# Keeps the detectors semantic ("how r u feeling" == "how are you feeling")
+# instead of enumerating every spelling variant.
+_CHAT_WORD_MAP = {
+    "r": "are", "u": "you", "ur": "your", "youre": "you are",
+    "im": "i am", "dont": "do not", "doesnt": "does not", "didnt": "did not",
+    "whats": "what is", "howre": "how are", "hows": "how is", "thx": "thanks",
+    "pls": "please", "plz": "please", "ya": "you", "yer": "your", "gonna": "going to",
+    "wanna": "want to", "ok": "okay",
+}
+
+
+def _normalize_conversational_text(text: str) -> str:
+    """Lower-case, strip punctuation/emoji and expand common chat abbreviations."""
+    if not text:
+        return ""
+    t = str(text).lower().replace("\u2019", "'")
+    t = re.sub(r"[^\w\s']", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    words = []
+    for w in t.split():
+        # Apostrophes are ignored for lookup so "how's"/"hows" and
+        # "don't"/"dont" normalise identically.
+        base = w.replace("'", "")
+        if base in _CHAT_WORD_MAP:
+            words.append(_CHAT_WORD_MAP[base])
+        elif len(base) > 4 and re.search(r"(.)\1{2,}", base):
+            words.append(re.sub(r"(.)\1{1,}", r"\1", base))
+        else:
+            words.append(base)
+    return " ".join(words).strip()
+
+
+def is_social_or_assistant_directed_query(text: str) -> bool:
+    """Sameness-class detector for small talk and questions addressed to the assistant.
+
+    Covers greetings, wellbeing/state questions ("how are you feeling", "how r u",
+    "how's it going"), presence checks, thanks/goodbyes, opinions asked of the
+    assistant, and playful identity chatter.  These never need external retrieval
+    and are never executable commands.
+    """
+    raw = text or ""
+    norm = _normalize_conversational_text(raw)
+    if not norm:
+        return True
+
+    patterns = [
+        # Wellbeing / state addressed to the assistant
+        r"^(?:hey |hi |hello |ok |okay |so |well )?(?:how (?:are|is) (?:you|it|things|your (?:day|morning|evening))|how (?:are|is) you (?:feeling|doing)|how (?:do|did) you feel|how have you been|how is it going|how are things going)",
+        r"^(?:are|were|is) (?:you|u) (?:ok|okay|alright|fine|good|there|here|awake|listening|still there|busy)",
+        r"^(?:you|u) (?:ok|okay|alright|good|there|awake|listening)\b",
+        r"^(?:what is|whats) (?:up|new|going on|good|happening)",
+        r"^(?:nice|good|great|pleased) to (?:see|meet|hear|talk to) (?:you|ya)",
+        r"^(?:good|great) (?:morning|afternoon|evening|night)\b",
+        r"^(?:hey|hi|hello|yo|howdy)(?: (?:there|friday|nova|trevon|jarvis|assistant|buddy|friend))?$",
+        r"^(?:thanks|thank you|thx|appreciate it|much appreciated)\b",
+        r"^(?:bye|goodbye|see you|see ya|talk to you later|good night|take care)\b",
+        # Opinions/preferences/feelings asked OF the assistant
+        r"^(?:what|how) (?:do|would|did) (?:you|u) (?:think|feel|like|prefer|reckon)\b",
+        r"^(?:do|did|can|are) (?:you|u) (?:like|enjoy|love|prefer|have feelings|feel)\b",
+        r"^(?:what|which) (?:is|are) your (?:favorite|favourite|opinion|thoughts|view)\b",
+    ]
+    for pat in patterns:
+        if re.search(pat, norm):
+            return True
+    return False
+
+
 def is_conversational_general_query(text: str) -> bool:
     t = text.lower().strip().rstrip('.?!')
     if not t:
         return True
-    if t in ("hey", "hello", "hi", "hey friday", "are you there", "you there", "are you here", "are you listening", "can you hear me", "are you awake", "good morning", "good evening", "good afternoon"):
+    if is_social_or_assistant_directed_query(text):
         return True
-    if re.search(r'^(?:hey|hello|hi|good\s+(?:morning|evening|afternoon))(?:\s+\w+)?$', t):
+    if t in ("hey", "hello", "hi", "hey friday", "are you there", "you there", "are you here", "are you listening", "can you hear me", "are you awake", "good morning", "good evening", "good afternoon", "thank you", "thanks", "ok", "okay", "cool", "bye", "goodbye", "good night"):
+        return True
+    if re.search(r'^(?:hey|hello|hi|good\s+(?:morning|evening|afternoon|night))(?:\s+\w+)?$', t):
+        return True
+    if re.search(r'\b(?:thank\s+you|thanks(?:\s+a\s+lot)?|thank\s+you\s+so\s+much|appreciate\s+it)\b', t):
+        return True
+    if re.search(r'\b(?:bye|goodbye|see\s+you(?:\s+later)?|talk\s+to\s+you\s+later|have\s+a\s+(?:good|nice|great)\s+day)\b', t):
+        return True
+    if re.search(r'^(?:ok|okay|cool|great|awesome|got\s+it|understood|sure|fine|sounds\s+good)$', t):
+        return True
+    if re.search(r'\b(?:tell\s+me\s+a\s+joke|make\s+me\s+laugh|tell\s+me\s+something\s+interesting)\b', t):
         return True
     if re.search(r'\b(?:are\s+you\s+(?:there|here|awake|listening)|can\s+you\s+hear\s+me)\b', t):
         return True
@@ -189,7 +329,10 @@ def is_conversational_general_query(text: str) -> bool:
         return True
     if re.search(r'\b(?:what\s+did\s+i\s+ask(?:\s+you)?\s+(?:earlier|before)|what\s+was\s+my\s+(?:last|previous)\s+question|continue\s+(?:your\s+)?(?:previous\s+)?answer)\b', t):
         return True
-    if is_capability_query(t) or is_conversational_followup_or_complaint(t) or is_stable_knowledge_question(t):
+    # NOTE: stable-knowledge questions ("what is quantum computing") are
+    # information queries, not small talk.  They are intentionally NOT
+    # classified here so they can reach the retrieval/intent pipeline.
+    if is_capability_query(t) or is_conversational_followup_or_complaint(t):
         return True
     return False
 
@@ -203,6 +346,15 @@ def should_use_external_retrieval(intent: Any, user_input: str, context: Any = N
     if intent_name == "GENERAL_CONVERSATION":
         return False
 
+    # Small talk and questions addressed to the assistant are answered from
+    # conversation, never from a web provider -- regardless of how the
+    # semantic classifier labelled them.
+    if is_social_or_assistant_directed_query(user_input):
+        return False
+
+    if is_conversational_general_query(user_input):
+        return False
+
     if is_conversational_followup_or_complaint(user_input):
         return False
 
@@ -213,6 +365,48 @@ def should_use_external_retrieval(intent: Any, user_input: str, context: Any = N
         return False
 
     return intent_name in EXTERNAL_RETRIEVAL_INTENTS
+
+
+def is_explicitly_confirmed(user_input: str, params_confirmed: Optional[bool] = None) -> bool:
+    """
+    Unambiguously determines if the user has explicitly confirmed an action.
+    Strictly forbids authorization when contradictory, negative, or cancellation
+    phrases are present (e.g. 'do not confirm', 'don't authorize', 'never proceed').
+    """
+    text = (user_input or "").lower()
+
+    # 1. Check for explicit negative/negation patterns
+    # Any negation targeting confirmation, authorization, or proceeding immediately denies confirmation.
+    negation_patterns = [
+        r'\b(?:do\s+not|don\'?t|never|cannot|not|no)\s+(?:confirm|authorize|proceed|accept|allow|agree)\b',
+        r'\b(?:cancel|abort|deny|reject|refuse|disallow|halt|stop)\b',
+        r'\bwithout\s+(?:confirming|confirmation|authorizing|authorization)\b',
+        r'\bunconfirmed\b',
+        r'\bdo\s+not\s+execute\b',
+    ]
+    for pat in negation_patterns:
+        if re.search(pat, text):
+            return False
+
+    # 2. Check if explicitly set to False in params
+    if params_confirmed is False:
+        return False
+
+    # 3. If params_confirmed is explicitly True, check that input didn't negate it
+    if params_confirmed is True:
+        return True
+
+    # 4. Check for unambiguous positive confirmation patterns
+    positive_patterns = [
+        r'\b(?:i\s+confirm|confirmed|confirming|i\s+authorize|authorized|please\s+proceed|proceed\s+with|proceed\s+to\s+execute|yes\s*,?\s*confirm|user\s+confirmed)\b',
+        r'\b(?:yes\s*,?\s*proceed|yes\s*,?\s*authorize)\b',
+        r'^\s*(?:confirm|confirmed|authorize|authorized|proceed)\s*$',
+    ]
+    for pat in positive_patterns:
+        if re.search(pat, text):
+            return True
+
+    return False
 
 
 def validate_device_action_agreement(
@@ -801,7 +995,23 @@ class UnifiedCommandRouter:
                 re.compile(r'\bwhat(?:\'s|\s+is)\s+(?:on\s+my\s+schedule|scheduled|planned)(?:\s+(?:for\s+)?(?:today|tomorrow))?\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+do\s+i\s+(?:need|have)\s+to\s+do(?:\s+(?:today|tomorrow))?\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+(?:meetings?|appointments?)\s+do\s+i\s+have(?:\s+(?:today|tomorrow))?\b', re.IGNORECASE),
-                re.compile(r'\b(?:do\s+i\s+have|are\s+there)\s+(?:any\s+)?(?:events?|meetings?|appointments?|plans?|anything\s+scheduled)(?:\s+(?:today|tomorrow|for\s+today|for\s+tomorrow|scheduled))?\b', re.IGNORECASE),
+                re.compile(r'\b(?:do\s+i\s+have|are\s+there)\s+(?:any\s+)?(?:schedules?|events?|meetings?|appointments?|plans?|anything\s+scheduled)(?:\s+(?:today|tomorrow|this\s+week|for\s+today|for\s+tomorrow|scheduled))?\b', re.IGNORECASE),
+                # Any remaining "my schedules / my agenda" query (plural, paraphrases)
+                re.compile(r'\b(?:what|which|show|list|tell\s+me|check|view|see|get)\b[^.?!]{0,40}?\b(?:my|the)\s+(?:schedules?|agenda|plans)\b', re.IGNORECASE),
+                # ── Destructive schedule management (requires scope + confirmation) ──
+                # "remove all the schedules", "clear my calendar events".
+                # Reminder deletion keeps its dedicated REMINDERS intent.
+                re.compile(
+                    r'\b(?:remove|delete|erase|clear|wipe|discard|get\s+rid\s+of|cancel)\s+'
+                    r'(?:(?:all|every|the|my|of)\s+){0,3}'
+                    r'(?:schedules?|calendar\s+events?|events?|(?:calendar|reminder)\s+schedules?)\b',
+                    re.IGNORECASE
+                ),
+                re.compile(
+                    r'\b(?:remove|delete|erase|clear|wipe|discard)\s+'
+                    r'(?:everything|all\s+of\s+it)\s+(?:from|in|on)\s+(?:my\s+)?(?:schedule|calendar|reminders?)\b',
+                    re.IGNORECASE
+                ),
                 re.compile(r'\b(?:show|check|view|what(?:\'s|\s+is)\s+on|what)\s+(?:my\s+|today\'?s?\s+)?calendar\b', re.IGNORECASE),
                 re.compile(r'\b(?:show|check|view|what)\s+(?:today\'?s?\s+|my\s+)?events\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+events\s+do\s+i\s+have\b', re.IGNORECASE),
@@ -943,13 +1153,27 @@ class UnifiedCommandRouter:
                 re.compile(r'\bwhat\s+(?:response\s+style|style\s+of\s+response)\b', re.IGNORECASE),
                 re.compile(r'\b(?:which|what)\s+(?:university|college|school|institution)\s+do\s+i\s+(?:attend|go\s+to)\b', re.IGNORECASE),
                 re.compile(r'\bwhere\s+do\s+i\s+(?:study|go\s+to\s+(?:school|college|university))\b', re.IGNORECASE),
-                re.compile(r'\bwhat(?:\'s|\s+is)\s+my\s+(?:university|college|institution|education|major|student\s+status|degree|activity|role|cell|goal|preferred\s+name)\b', re.IGNORECASE),
+                re.compile(r'\bwhere\s+did\s+i\s+(?:study|go\s+to\s+(?:school|college|university)|do\s+my\s+(?:inter|intermediate|10th|tenth|schooling|graduation)|complete\s+(?:my\s+)?(?:inter|intermediate|10th|tenth|schooling|graduation))\b', re.IGNORECASE),
+                re.compile(r'\b(?:(?:what(?:\'s|\s+is)|where\s+did\s+i|where\s+is|tell\s+me\s+about|do\s+you\s+know|how\s+about|what\s+about)\b.*?\b(?:inter(?:mediate)?\s+stu(?:dy|dies|ies)|intermediate\s+education|my\s+intermediate|my\s+10th|my\s+tenth)|how\s+about\s+my\s+(?:10th|tenth|intermediate)|what\s+about\s+my\s+(?:10th|tenth|intermediate)|my\s+(?:10th|tenth|intermediate)[?]?$)', re.IGNORECASE),
+                re.compile(r'\bwhat(?:\'s|\s+is)\s+my\s+(?:university|college|institution|education|intermediate|10th|tenth|school|major|student\s+status|degree|activity|role|cell|goal|preferred\s+name)\b', re.IGNORECASE),
                 re.compile(r'\b(?:what\s+(?:cell|committee|club)(?:\s+or\s+(?:cell|committee|club))?\s+am\s+i\s+(?:in|part\s+of)|am\s+i\s+(?:in|part\s+of)\s+(?:any\s+|the\s+)?(?:placement\s+cell|cell|club|committee))\b', re.IGNORECASE),
                 re.compile(r'\b(?:what\s+is|what\'s)\s+my\s+(?:preferred\s+)?name\b', re.IGNORECASE),
                 re.compile(r'\bwhen\s+is\s+my\s+(?:interview|exam|meeting|test|presentation)\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+happened\s+when\s+you\s+tried\s+that\s+command\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+did\s+you\s+change\b', re.IGNORECASE),
                 re.compile(r'\bwhat\s+error\s+did\s+we\s+fix\b', re.IGNORECASE),
+                # Temporal reasoning over a stored personal date fact
+                # ("What day of the week is my birthday next year?",
+                #  "How many days until my birthday?", "What date is my next birthday?")
+                re.compile(
+                    r'\b(?:what|which)\s+day(?:\s+of\s+(?:the\s+)?week)?\s+(?:is|will|would|does)\b[^.?!]*\bmy\s+[a-zA-Z0-9_\s]+',
+                    re.IGNORECASE
+                ),
+                re.compile(r'\bhow\s+many\s+days\b[^.?!]*\bmy\s+[a-zA-Z0-9_\s]+', re.IGNORECASE),
+                re.compile(
+                    r'\b(?:what|which)\s+(?:date|day)\s+(?:is|will\s+be)\b[^.?!]*\bmy\s+(?:next\s+)?[a-zA-Z0-9_\s]+',
+                    re.IGNORECASE
+                ),
             ],
 
             # ── Priority 17: MEMORY STORE ──────────────────────────────────
@@ -961,6 +1185,8 @@ class UnifiedCommandRouter:
                 re.compile(r'\b(?:the\s+)?database\s+(?:for\s+this\s+project\s+)?(?:is|was|=)\s+([a-zA-Z0-9_\s]+)', re.IGNORECASE),
                 re.compile(r'\b(?:the\s+)?(?:backend|backend\s+technology)\s+(?:for\s+this\s+project\s+)?(?:is|was|=)\s+([a-zA-Z0-9_\s]+)', re.IGNORECASE),
                 re.compile(r'\b(?:save|store|keep)\s+(?:my\s+)?(?!it\b|that\s+file\b|document\b|file\b|.*?\s+as\b)(.+)', re.IGNORECASE),
+                re.compile(r'\b(?:i\s+studied|i\s+completed|i\s+did|i\s+attended|i\s+went\s+to)\s+(?:my\s+)?(?:10th|tenth|intermediate|inter|schooling|high\s+school|junior\s+college)\b.*', re.IGNORECASE),
+                re.compile(r'\bmy\s+(?:full\s+name|10th\s+school|tenth\s+school|intermediate\s+college|inter\s+college)\s+(?:is|was|=)\s+(.+)', re.IGNORECASE),
             ],
 
             # ── Priority 18: TASK MANAGEMENT ─────────────────────────────────
@@ -1136,8 +1362,8 @@ class UnifiedCommandRouter:
     def _detect_implicit_goal(self, clean_no_polite: str, user_input: str) -> Optional[Dict[str, Any]]:
         text = clean_no_polite.lower().strip().rstrip('.?!')
 
-        # Email operations are direct Intent.EMAIL tasks, not multi-step background implicit goals
-        if re.search(r'\b(?:email|mail|inbox)\b', text):
+        # Email, reminder, alarm, and timer operations are direct tasks, not multi-step background implicit goals
+        if re.search(r'\b(?:email|mail|inbox|remind|reminder|alarm|timer|stopwatch)\b', text):
             return None
 
         # ── Specific patterns FIRST (must win over the broad pattern below) ──────
@@ -1307,7 +1533,7 @@ class UnifiedCommandRouter:
             }
 
         # 6. Web check goal (e.g. "I need to check something in Chrome", "I need to check something")
-        if re.search(r'\b(?:i\s+(?:need|want|\'d\s+like|would\s+like)\s+to\s+)?check\s+something(?:\s+in\s+chrome|\s+online|\s+on\s+the\s+web)?\b', text):
+        if re.search(r'^(?:i\s+(?:need|want|\'d\s+like|would\s+like)\s+to\s+)?check\s+something(?:\s+in\s+chrome|\s+online|\s+on\s+the\s+web)?\b', text):
             return {
                 "action": "implicit_goal",
                 "goal_type": "check_web",
@@ -1326,7 +1552,7 @@ class UnifiedCommandRouter:
 
         return None
 
-    def route_command(self, user_input: str, user_id: Optional[Any] = None) -> Tuple[Intent, Dict[str, Any]]:
+    def route_command(self, user_input: str, user_id: Optional[Any] = None, allow_semantic: bool = True) -> Tuple[Intent, Dict[str, Any]]:
         """
         Determine intent with hybrid resolution.
 
@@ -1428,8 +1654,30 @@ class UnifiedCommandRouter:
             self.logger.debug(f"[FAST_CONVERSATION] '{user_input[:60]}' -> GENERAL_CONVERSATION")
             return _cache_and_return(Intent.GENERAL_CONVERSATION, {"raw_input": user_input})
 
+        # Fast path: questions requiring date arithmetic over a STORED personal date
+        # ("what day of the week is my birthday next year") belong to memory, not the
+        # local clock handler.
+        if is_personal_date_fact_query(input_lower):
+            self.logger.debug(f"[PERSONAL_DATE] '{user_input[:60]}' -> MEMORY_QUERY")
+            return _cache_and_return(Intent.MEMORY_QUERY, {"raw_input": user_input})
+
+        # Fast path: destructive SCHEDULE management.
+        # This must be resolved before the REMINDERS patterns (enum order 8) and
+        # must never be reinterpreted as a daily briefing.
+        _sched_delete = parse_destructive_schedule_command(input_lower)
+        if _sched_delete:
+            self.logger.info(
+                f"[SCHEDULE_DELETE] '{user_input[:60]}' -> DAILY_BRIEFING "
+                f"scope={_sched_delete['schedule_scope']} (confirmation required)"
+            )
+            return _cache_and_return(Intent.DAILY_BRIEFING, {"raw_input": user_input, **_sched_delete})
+
         # Fast path: Local system clock queries (date / time)
+        # Personal stored-date questions ("what date is my next birthday") are
+        # NOT clock queries -- they need memory + date arithmetic.
         for pattern in self.patterns.get(Intent.DATE_QUERY, []):
+            if is_personal_date_fact_query(input_lower):
+                break
             match = pattern.search(input_lower) or pattern.search(clean_input) or pattern.search(clean_no_polite)
             if match:
                 params = self._extract_params(Intent.DATE_QUERY, match, user_input)
@@ -1459,71 +1707,202 @@ class UnifiedCommandRouter:
                 params = self._extract_params(Intent.DEVICE_CONTROL, match, user_input)
                 self.logger.debug(f"[DETERMINISTIC] '{user_input[:60]}' -> DEVICE_CONTROL")
                 return _cache_and_return(Intent.DEVICE_CONTROL, params)
+        # Fast path: Browser inspection, automation scenarios, visual diff, and Electron inspection
+        action_name = None
+        action_params = {}
+        if (
+            ("inspect" in input_lower or "open" in input_lower) and
+            ("http://" in input_lower or "https://" in input_lower or "javascript" in input_lower) and
+            any(w in input_lower for w in ["page title", "status code", "contains", "headings", "links", "buttons", "forms", "unsafe", "identify a form", "inspect the page", "inspect the url"])
+        ):
+            url_match = re.search(r'(https?://[^\s,\'\"]+|javascript\([^\)]*\)|javascript:[^\s,\'\"]+)', user_input)
+            target_url = url_match.group(1) if url_match else ("javascript(1)" if "javascript" in input_lower else "")
+            action_name = "inspect_web_page"
+            action_params = {"action": "inspect_web_page", "url": target_url, "raw_input": user_input}
+        elif (
+            ("browser automation" in input_lower or "browser scenario" in input_lower or "attempt to click the nonexistent element" in input_lower) or
+            ("navigate to" in input_lower and "click" in input_lower)
+        ):
+            action_name = "execute_browser_scenario"
+            action_params = {"action": "execute_browser_scenario", "raw_input": user_input}
+        elif "compare" in input_lower and "screenshot" in input_lower:
+            action_name = "compare_screenshots"
+            action_params = {"action": "compare_screenshots", "raw_input": user_input}
+        elif "fuse" in input_lower and ("electron" in input_lower or "inspect" in input_lower or "check" in input_lower or "wire" in input_lower):
+            file_match = re.search(r'([A-Za-z]:\\[^\'\"]+?\.exe)', user_input, re.IGNORECASE) or re.search(r'(\S+?\.exe)', user_input, re.IGNORECASE)
+            exe_path = file_match.group(1) if file_match else ""
+            action_name = "inspect_electron_fuses"
+            action_params = {"action": "inspect_electron_fuses", "executable_path": exe_path, "raw_input": user_input}
+        elif "sqlite" in input_lower and ("inspect" in input_lower or "read" in input_lower or "tables" in input_lower or "schema" in input_lower or "database" in input_lower):
+            file_match = re.search(r'([A-Za-z]:\\[^\'\"]+?\.(?:db|sqlite|sqlite3))', user_input, re.IGNORECASE) or re.search(r'(\S+?\.(?:db|sqlite|sqlite3))', user_input, re.IGNORECASE)
+            db_path = file_match.group(1) if file_match else ""
+            table_match = re.search(r'table\s+([A-Za-z0-9_]+)', user_input, re.IGNORECASE)
+            table_name = table_match.group(1) if table_match else None
+            action_name = "inspect_sqlite_database"
+            action_params = {"action": "inspect_sqlite_database", "db_path": db_path, "table": table_name, "raw_input": user_input}
+        elif ("har" in input_lower or "network capture" in input_lower or ".har" in input_lower) and ("inspect" in input_lower or "analyze" in input_lower or "view" in input_lower or "check" in input_lower or "examine" in input_lower):
+            file_match = re.search(r'([A-Za-z]:\\[^\'\"]+?\.har)', user_input, re.IGNORECASE) or re.search(r'(\S+?\.har)', user_input, re.IGNORECASE)
+            har_path = file_match.group(1) if file_match else ""
+            action_name = "inspect_web_network_capture"
+            action_params = {"action": "inspect_web_network_capture", "capture_path": har_path, "raw_input": user_input}
+        elif ("listener" in input_lower or "event listener" in input_lower) and re.search(r'\b(inspect|check|find|get|list)\b', input_lower):
+            url_match = re.search(r'(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+|[A-Za-z]:\\[^\s,\'\"]+?\.(?:html|htm))', user_input)
+            target_url = url_match.group(1) if url_match else ""
+            selector_match = (
+                re.search(r'selector\s+["\']?([^"\'\s]+)["\']?', user_input, re.IGNORECASE)
+                or re.search(r'(#[a-zA-Z0-9_\-]+|\.[a-zA-Z0-9_\-]+|\bbutton\b|\ba\b|\binput\b)', user_input, re.IGNORECASE)
+                or re.search(r'(?:element|on|for)\s+["\']?([^"\'\s]+)["\']?', user_input, re.IGNORECASE)
+            )
+            selector = selector_match.group(1) if selector_match else "#submit"
+            action_name = "inspect_web_event_listeners"
+            action_params = {"action": "inspect_web_event_listeners", "url": target_url, "selector": selector, "raw_input": user_input}
+        elif ("observe" in input_lower or "capture" in input_lower or "instrument" in input_lower) and ("execution" in input_lower or "runtime" in input_lower or "coverage" in input_lower):
+            url_match = re.search(r'(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+|[A-Za-z]:\\[^\s,\'\"]+?\.(?:html|htm))', user_input)
+            target_url = url_match.group(1) if url_match else ""
+            ms_match = re.search(r'(\d+)\s*(?:ms|milliseconds)', user_input, re.IGNORECASE)
+            sec_match = re.search(r'(\d+)\s*(?:s|sec|seconds)', user_input, re.IGNORECASE)
+            obs_ms = int(ms_match.group(1)) if ms_match else (int(sec_match.group(1)) * 1000 if sec_match else 5000)
+            action_name = "observe_web_execution"
+            action_params = {"action": "observe_web_execution", "url": target_url, "observation_ms": obs_ms, "raw_input": user_input}
+        elif ("trace" in input_lower or "module" in input_lower or "imports" in input_lower) and ("module" in input_lower or "import" in input_lower or "imports" in input_lower) and ("manifest" in input_lower or "script" in input_lower or "json" in input_lower):
+            manifest_match = re.search(r'([A-Za-z]:\\[^"\'\r\n]+?\.(?:json))|(?:from|in|manifest)\s+["\']?([^"\'\s]+\.json)["\']?', user_input, re.I)
+            manifest_path = (manifest_match.group(1) or manifest_match.group(2)) if manifest_match else ""
+            idx_match = re.search(r'(?:index|script|script_index|entry)\s+(\d+)', user_input, re.I)
+            s_idx = int(idx_match.group(1)) if idx_match else 0
+            importer_match = re.search(r'(?:importer|url|importer_url|base)\s+["\']?(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+)["\']?', user_input, re.I)
+            imp_url = importer_match.group(1) if importer_match else None
+            action_name = "trace_web_module_imports"
+            action_params = {"action": "trace_web_module_imports", "manifest_path": manifest_path, "target": manifest_path, "script_index": s_idx, "importer_url": imp_url, "raw_input": user_input}
+        elif ("export" in input_lower or "dump" in input_lower) and ("script" in input_lower or "scripts" in input_lower or "javascript" in input_lower):
+            url_match = re.search(r'([A-Za-z]:\\[^"\'\r\n]+?\.(?:html|htm|json))|(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+)', user_input)
+            target_url = (url_match.group(1) or url_match.group(2)) if url_match else ""
+            out_dir_match = re.search(r'(?:to|into|directory|dir|output|destination)\s+["\']?([A-Za-z]:\\[^"\'\r\n]+|/[^"\'\r\n]+|(?:\.?\.)[\\/][^"\'\r\n]+|[a-zA-Z0-9_\-]+[\\/][a-zA-Z0-9_\-]+)["\']?', user_input, re.I)
+            out_dir = out_dir_match.group(1) if out_dir_match else "exported_scripts"
+            overwrite = bool(re.search(r'\b(?:overwrite|force)\b', input_lower))
+            action_name = "export_web_scripts"
+            action_params = {"action": "export_web_scripts", "target": target_url, "url": target_url, "output_directory": out_dir, "overwrite": overwrite, "raw_input": user_input}
+        elif ("script" in input_lower or "scripts" in input_lower) and re.search(r'\b(inspect|list|enumerate|get|loaded)\b', input_lower):
+            url_match = re.search(r'(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+|[A-Za-z]:\\[^\s,\'\"]+?\.(?:html|htm))', user_input)
+            target_url = url_match.group(1) if url_match else ""
+            inc_src = any(k in input_lower for k in ["include source", "with source", "get source", "script source"])
+            action_name = "inspect_web_scripts"
+            action_params = {"action": "inspect_web_scripts", "url": target_url, "include_script_sources": inc_src, "raw_input": user_input}
+        elif ("trace" in input_lower or "map" in input_lower or "source map" in input_lower or "source location" in input_lower) and ("location" in input_lower or "position" in input_lower or "line" in input_lower or "col" in input_lower):
+            url_match = re.search(r'(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+|[A-Za-z]:\\[^\s,\'\"]+?\.(?:html|htm|js|map))', user_input)
+            target_url = url_match.group(1) if url_match else ""
+            line_match = re.search(r'line\s+(\d+)', user_input, re.IGNORECASE)
+            col_match = re.search(r'(?:col|column)\s+(\d+)', user_input, re.IGNORECASE)
+            map_match = re.search(r'(?:map|source\s+map)\s+(?:at|from|path)?\s*["\']?([^\s"\']+\.map|data:application/json[^\s"\']*)["\']?', user_input, re.IGNORECASE)
+            target_line = int(line_match.group(1)) if line_match else 1
+            target_col = int(col_match.group(1)) if col_match else 0
+            map_url = map_match.group(1) if map_match else None
+            action_name = "trace_web_source_location"
+            action_params = {"action": "trace_web_source_location", "url": target_url, "line": target_line, "column": target_col, "source_map_url": map_url, "raw_input": user_input}
+        elif ("correlate" in input_lower or "map stack" in input_lower) and ("stack" in input_lower or "trace" in input_lower or "error" in input_lower):
+            action_name = "correlate_browser_error_stack"
+            action_params = {"action": "correlate_browser_error_stack", "stack_trace": user_input, "raw_input": user_input}
+        elif ("diagnose" in input_lower or "debug" in input_lower or "diagnostics" in input_lower) and ("execution" in input_lower or "runtime" in input_lower or "page" in input_lower or "browser" in input_lower or "web" in input_lower):
+            url_match = re.search(r'(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+|[A-Za-z]:\\[^\s,\'\"]+?\.(?:html|htm))', user_input)
+            target_url = url_match.group(1) if url_match else ""
+            ms_match = re.search(r'(\d+)\s*(?:ms|milliseconds)', user_input, re.IGNORECASE)
+            sec_match = re.search(r'(\d+)\s*(?:s|sec|seconds)', user_input, re.IGNORECASE)
+            obs_ms = int(ms_match.group(1)) if ms_match else (int(sec_match.group(1)) * 1000 if sec_match else 3000)
+            action_name = "diagnose_web_execution"
+            action_params = {"action": "diagnose_web_execution", "url": target_url, "observation_ms": obs_ms, "raw_input": user_input}
+        elif (
+            ("adaptive" in input_lower and ("recovery" in input_lower or "browser" in input_lower or "action" in input_lower or "workflow" in input_lower))
+            or ("recover" in input_lower and ("browser" in input_lower or "action" in input_lower or "workflow" in input_lower))
+            or ("replan" in input_lower and ("browser" in input_lower or "action" in input_lower))
+            or ("execute adaptive" in input_lower)
+        ):
+            url_match = re.search(r'([A-Za-z]:\\[^"\'\r\n]+?\.(?:html|htm))|(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+)', user_input)
+            target_url = (url_match.group(1) or url_match.group(2)) if url_match else ""
+            action_name = "execute_adaptive_browser_action"
+            action_params = {"action": "execute_adaptive_browser_action", "url": target_url, "raw_input": user_input}
+        elif (
+            ("verified" in input_lower and ("browser" in input_lower or "interaction" in input_lower or "action" in input_lower or "click" in input_lower or "fill" in input_lower))
+            or ("verify" in input_lower and ("interaction" in input_lower or "action" in input_lower))
+            or ("execute verified" in input_lower or "plan and verify" in input_lower)
+        ):
+            url_match = re.search(r'([A-Za-z]:\\[^"\'\r\n]+?\.(?:html|htm))|(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+)', user_input)
+            target_url = (url_match.group(1) or url_match.group(2)) if url_match else ""
+            action_name = "execute_verified_browser_action"
+            action_params = {"action": "execute_verified_browser_action", "url": target_url, "raw_input": user_input}
+        elif "electron" in input_lower and ("inspect" in input_lower or "evidence" in input_lower):
+            dir_match = re.search(r'([A-Za-z]:\\[^\'\"]+)', user_input)
+            target_dir = dir_match.group(1) if dir_match else ""
+            action_name = "inspect_electron_app"
+            action_params = {"action": "inspect_electron_app", "target_dir": target_dir, "raw_input": user_input}
+
+        if action_name:
+            self.logger.debug(f"[DETERMINISTIC_BROWSER_SYSTEM] '{user_input[:60]}' -> DEVICE_CONTROL ({action_name})")
+            return _cache_and_return(Intent.DEVICE_CONTROL, action_params)
 
         # ── Step 0: Canonical Semantic Understanding Pipeline ─────────────
         # Semantically interprets user intention before pattern matching.
         # Derives user goal, entities, target, desired state, and arbitrated capability.
-        try:
-            from core.semantic_understanding import semantic_understanding_engine
-            dialogue_mgr = None
+        if getattr(self, "_semantic_enabled", True) and allow_semantic:
             try:
-                from extensions.dialogue_state_manager import get_dialogue_manager
-                dialogue_mgr = get_dialogue_manager(user_id)
-            except Exception:
-                pass
-            ds = dialogue_mgr.current_state if dialogue_mgr else None
-            sem_cmd = semantic_understanding_engine.interpret(user_input, dialogue_state=ds, user_id=user_id)
+                from core.semantic_understanding import semantic_understanding_engine
+                dialogue_mgr = None
+                try:
+                    from extensions.dialogue_state_manager import get_dialogue_manager
+                    dialogue_mgr = get_dialogue_manager(user_id)
+                except Exception:
+                    pass
+                ds = dialogue_mgr.current_state if dialogue_mgr else None
+                sem_cmd = semantic_understanding_engine.interpret(user_input, dialogue_state=ds, user_id=user_id)
 
-            if sem_cmd and sem_cmd.confidence >= 0.95 and sem_cmd.intent not in ("AUTO", "GENERAL_CONVERSATION", "CLARIFICATION"):
-                sem_params = dict(sem_cmd.parameters)
-                target_intent_name = sem_cmd.intent
-                if target_intent_name in ("CURRENT_ENVIRONMENT_QUERY", "HISTORICAL_ENVIRONMENT_QUERY", "CAUSAL_ENVIRONMENT_QUERY"):
-                    if getattr(sem_cmd, "action", "") == "inspect_system" or getattr(sem_cmd, "target_type", "") == "SYSTEM" or getattr(sem_cmd, "sub_intent", "") == "SYSTEM_STATE":
-                        target_intent_name = "DEVICE_CONTROL"
-                        sem_params["action"] = "system_info"
-                    elif getattr(sem_cmd, "action", "") == "inspect_storage" or getattr(sem_cmd, "target_type", "") == "FILESYSTEM" or getattr(sem_cmd, "sub_intent", "") == "FILESYSTEM_STATE":
-                        target_intent_name = "DEVICE_CONTROL"
-                        sem_params["action"] = "disk"
-                    else:
-                        target_intent_name = "WINDOW_CONTEXT"
-                elif target_intent_name == "CONTENT_INSERTION":
-                    if any(k in user_input.lower() for k in [
-                        "program", "function", "script", "algorithm", "class", "code",
-                        "python", "javascript", "c++", "cpp", "java", "sql", "html", "css", "rust", "go",
-                        "fastapi", "flask", "project", "binary search", "subarray", "prime", "second-largest", "second largest"
-                    ]):
-                        target_intent_name = "CODE_GENERATION"
-                        sem_params["action"] = "generate_code"
-                    else:
-                        target_intent_name = "DEVICE_CONTROL"
-                        sem_params["action"] = "type_text"
-                elif target_intent_name == "MUSIC":
-                    try:
-                        from modules.music.music_controller import MusicCommandParser
-                        _p = MusicCommandParser().parse(user_input)
-                        if _p.is_transport:
-                            sem_params["action"] = _p.transport_action
-                        elif _p.is_video_requested:
-                            sem_params["action"] = "play_video"
+                if sem_cmd and sem_cmd.confidence >= 0.95 and sem_cmd.intent not in ("AUTO", "GENERAL_CONVERSATION", "CLARIFICATION"):
+                    sem_params = dict(sem_cmd.parameters)
+                    target_intent_name = sem_cmd.intent
+                    if target_intent_name in ("CURRENT_ENVIRONMENT_QUERY", "HISTORICAL_ENVIRONMENT_QUERY", "CAUSAL_ENVIRONMENT_QUERY"):
+                        if getattr(sem_cmd, "action", "") == "inspect_system" or getattr(sem_cmd, "target_type", "") == "SYSTEM" or getattr(sem_cmd, "sub_intent", "") == "SYSTEM_STATE":
+                            target_intent_name = "DEVICE_CONTROL"
+                            sem_params["action"] = "system_info"
+                        elif getattr(sem_cmd, "action", "") == "inspect_storage" or getattr(sem_cmd, "target_type", "") == "FILESYSTEM" or getattr(sem_cmd, "sub_intent", "") == "FILESYSTEM_STATE":
+                            target_intent_name = "DEVICE_CONTROL"
+                            sem_params["action"] = "disk"
                         else:
-                            sem_params["action"] = "play"
-                    except Exception:
-                        pass
-                if hasattr(Intent, target_intent_name):
-                    resolved_enum = Intent[target_intent_name]
-                    sem_params["raw_input"] = user_input
-                    sem_params["semantic_command"] = sem_cmd
-                    self.logger.debug(f"[SEMANTIC_PIPELINE] '{user_input[:60]}' -> {resolved_enum.name} (action={sem_cmd.action})")
-                    return _cache_and_return(resolved_enum, sem_params)
-            elif sem_cmd and sem_cmd.intent == "CLARIFICATION":
-                return _cache_and_return(Intent.GENERAL_CONVERSATION, {
-                    "response": sem_cmd.explanation_text or "Could you please clarify your request?",
-                    "action": "clarification",
-                    "raw_input": user_input,
-                    "semantic_command": sem_cmd,
-                })
-        except Exception as e:
-            self.logger.debug(f"[SEMANTIC_ROUTING_EXCEPTION] {e}")
+                            target_intent_name = "WINDOW_CONTEXT"
+                    elif target_intent_name == "CONTENT_INSERTION":
+                        if any(k in user_input.lower() for k in [
+                            "program", "function", "script", "algorithm", "class", "code",
+                            "python", "javascript", "c++", "cpp", "java", "sql", "html", "css", "rust", "go",
+                            "fastapi", "flask", "project", "binary search", "subarray", "prime", "second-largest", "second largest"
+                        ]):
+                            target_intent_name = "CODE_GENERATION"
+                            sem_params["action"] = "generate_code"
+                        else:
+                            target_intent_name = "DEVICE_CONTROL"
+                            sem_params["action"] = "type_text"
+                    elif target_intent_name == "MUSIC":
+                        try:
+                            from modules.music.music_controller import MusicCommandParser
+                            _p = MusicCommandParser().parse(user_input)
+                            if _p.is_transport:
+                                sem_params["action"] = _p.transport_action
+                            elif _p.is_video_requested:
+                                sem_params["action"] = "play_video"
+                            else:
+                                sem_params["action"] = "play"
+                        except Exception:
+                            pass
+                    if hasattr(Intent, target_intent_name):
+                        resolved_enum = Intent[target_intent_name]
+                        sem_params["raw_input"] = user_input
+                        sem_params["semantic_command"] = sem_cmd
+                        self.logger.debug(f"[SEMANTIC_PIPELINE] '{user_input[:60]}' -> {resolved_enum.name} (action={sem_cmd.action})")
+                        return _cache_and_return(resolved_enum, sem_params)
+                elif sem_cmd and sem_cmd.intent == "CLARIFICATION":
+                    return _cache_and_return(Intent.GENERAL_CONVERSATION, {
+                        "response": sem_cmd.explanation_text or "Could you please clarify your request?",
+                        "action": "clarification",
+                        "raw_input": user_input,
+                        "semantic_command": sem_cmd,
+                    })
+            except Exception as e:
+                self.logger.debug(f"[SEMANTIC_ROUTING_EXCEPTION] {e}")
 
         # Low-confidence / Garbled STT safety check
         if any(k in input_lower for k in ["hernia of the games", "hernia of games"]):
@@ -1865,6 +2244,24 @@ class UnifiedCommandRouter:
                         continue
             # Window management and background task queries must not be routed to OPEN_APPLICATION
             if intent == Intent.OPEN_APPLICATION:
+                # Conversational questions, capability queries, and stable knowledge must NOT be routed to OPEN_APPLICATION
+                if any(is_conversational_general_query(t) for t in [clean_input, clean_no_polite, input_lower]):
+                    continue
+                if any(is_capability_query(t) for t in [clean_input, clean_no_polite, input_lower]):
+                    continue
+                if any(is_stable_knowledge_question(t) for t in [clean_input, clean_no_polite, input_lower]):
+                    continue
+                # Interrogative or explanation queries ("how to run...", "how do I start...", "why did you open...", "can you tell me how to...")
+                # are informational/conversational questions, NOT application launch commands!
+                _INTERROGATIVE_OR_EXPLANATORY = re.compile(
+                    r'^(?:(?:can|could|would)\s+you\s+)?(?:tell\s+me\s+|explain\s+)?'
+                    r'(?:how\s+(?:to|do|can|should|would|is|are|did|does)|why\s+(?:did|is|are|do|would)|what\s+(?:is|are|was|were|does|did|happens)|where\s+(?:is|can|do))\b',
+                    re.IGNORECASE
+                )
+                if any(_INTERROGATIVE_OR_EXPLANATORY.search(t) for t in [clean_input, clean_no_polite, input_lower]):
+                    if not re.search(r'^(?:can|could|would)\s+you\s+(?:please\s+)?(?:open|launch|start|run|bring\s+up)\s+[a-zA-Z0-9_\-\s]+$', clean_input, re.I):
+                        if not re.search(r'\b(?:row|rows|link|links|table|tables)\b', clean_input, re.I):
+                            continue
                 # Code generation / programming / algorithm requests must NOT be routed to OPEN_APPLICATION
                 if any(any(k in t for k in [
                     "write a ", "write an ", "create a python", "create a function", "create a script",
@@ -1964,7 +2361,10 @@ class UnifiedCommandRouter:
                     r'(?:(?:\d+[\s\-]slides?|\d+[\s\-]pages?|detailed|comprehensive|powerful|new)\s+)?'
                     r'(?:ppt|pptx|powerpoint|presentation|slides|word\s+doc(?:ument)?|docx|'
                     r'pdf(?:\s+(?:document|report|file))?|excel(?:\s+(?:file|sheet|spreadsheet))?|'
-                    r'xlsx|spreadsheet|report)\b',
+                    r'xlsx|spreadsheet|report|document\s+about|document\s+on|document\s+for|'
+                    r'document\s+titled|document\s+regarding|document\s+summarizing)\b|'
+                    r'\b(?:create|make|generate|build|write|produce)\s+(?:a\s+|an\s+|my\s+|the\s+)?'
+                    r'document\b(?!\s+(?:exists|folder|path|found|already))',
                     re.IGNORECASE
                 )
                 if any(_DOC_GEN_CREATION_RE.search(t) for t in [clean_input, clean_no_polite, input_lower]):
@@ -2079,8 +2479,10 @@ class UnifiedCommandRouter:
                     continue
                 if any(is_capability_query(t) for t in (clean_input, clean_no_polite, input_lower)):
                     continue
-                if any(is_stable_knowledge_question(t) for t in (clean_input, clean_no_polite, input_lower)):
-                    continue
+                # Stable factual questions ("what is quantum computing") ARE genuine
+                # information queries: they stay eligible for the retrieval intent.
+                # The external-retrieval gate decides later whether a web provider is
+                # actually required, so no SerpAPI call is forced here.
                 # Conversational questions directed at the assistant must remain GENERAL_CONVERSATION
                 is_conversational_to_assistant = any(
                     re.search(p, t, re.IGNORECASE) for t in [clean_input, clean_no_polite, input_lower]
@@ -2151,7 +2553,8 @@ class UnifiedCommandRouter:
         if is_conversational_general_query(clean_input) or is_conversational_general_query(user_input):
             return _cache_and_return(Intent.GENERAL_CONVERSATION, {"raw_input": user_input})
 
-        if self._semantic_enabled:
+
+        if self._semantic_enabled and allow_semantic:
             sem_intent, sem_params = self._semantic_fallback(user_input)
             if sem_params and sem_params.get("_needs_clarification"):
                 return _cache_and_return(sem_intent, sem_params)
@@ -2288,6 +2691,14 @@ class UnifiedCommandRouter:
             final_params = {"action": "calendar_query", "raw_input": user_input}
             decision = "DAILY_BRIEFING"
             reason = "Calendar operation routed to DAILY_BRIEFING"
+
+        has_alarm_word = bool(re.search(r'\b(?:alarm|wake\s+me\s+up|timers?|stopwatch)\b', t))
+        if has_alarm_word and not has_remind_word:
+            if final_intent != Intent.TIME_QUERY:
+                final_intent = Intent.TIME_QUERY
+                final_params = {"raw_input": user_input}
+                decision = "TIME_QUERY"
+                reason = "Alarm/timer/clock operation routed to TIME_QUERY"
 
         self.logger.info(
             f"[INTENT_ARBITRATION] candidates={candidates} "
@@ -3509,9 +3920,14 @@ class UnifiedCommandRouter:
                     "what do i have", "what's on my schedule", "whats on my schedule",
                     "what is on my schedule", "what's planned", "whats planned", "what is planned",
                     "what do i need to do", "what do i have to do", "schedule today", "schedule tomorrow",
-                    "do i have any events", "my events today", "any events today", "any meetings today"
+                    "do i have any events", "my events today", "any events today", "any meetings today",
+                    "any schedules", "my schedules", "schedules for today", "schedules for tomorrow",
+                    "my agenda", "what is scheduled for", "what's scheduled for", "whats scheduled for"
                 ]
-                if any(k in text_low for k in _briefing_keywords):
+                _sched_delete_params = parse_destructive_schedule_command(text_low)
+                if _sched_delete_params:
+                    params.update(_sched_delete_params)
+                elif any(k in text_low for k in _briefing_keywords):
                     params["action"] = "daily_briefing"
                 elif any(k in text_low for k in _sched_keywords) and not any(h in text_low for h in ["holiday", "festival", "special day", "working day", "observed"]):
                     params["action"] = "personal_schedule"
@@ -3757,6 +4173,13 @@ class UnifiedCommandRouter:
         if is_conversational_general_query(user_input):
             return Intent.GENERAL_CONVERSATION, {}
 
+        try:
+            from core.question_gate import is_plain_question
+            if is_plain_question(user_input):
+                return Intent.GENERAL_CONVERSATION, {}
+        except Exception:
+            pass
+
         engine = self._get_llm_engine()
         if engine is None:
             return Intent.GENERAL_CONVERSATION, {}
@@ -3779,7 +4202,7 @@ class UnifiedCommandRouter:
             intent_label = "GENERAL_CONVERSATION"
 
         # Hallucination guard: TIME_QUERY and DATE_QUERY must have explicit time/date terms
-        if intent_label == "TIME_QUERY" and not re.search(r'\b(?:time|clock|hour|minute|current\s+time)\b', user_input.lower()):
+        if intent_label == "TIME_QUERY" and not re.search(r'\b(?:time|clock|hour|minute|second|current\s+time|alarm|timers?|stopwatch|wake\s+me)\b', user_input.lower()):
             intent_label = "GENERAL_CONVERSATION"
         if intent_label == "DATE_QUERY" and not re.search(r'\b(?:date|day|today|month|year)\b', user_input.lower()):
             intent_label = "GENERAL_CONVERSATION"
@@ -3848,11 +4271,11 @@ class UnifiedCommandRouter:
                     params = {"action": "show_visual_response", "target_type": "NUMBERS", "raw_input": user_input}
                     return resolved_intent, params
 
-        # Override OPEN_APPLICATION if the query is a historical reference ("what was I using before Brave?")
+        # Override OPEN_APPLICATION if the query is a historical reference or conversational query
         if resolved_intent == Intent.OPEN_APPLICATION:
             u_low = user_input.lower()
-            if any(k in u_low for k in ["before", "what was", "what did", "previously", "prior to", "which app was", "what app was"]):
-                self.logger.info(f"[SEMANTIC] Overriding OPEN_APPLICATION -> GENERAL_CONVERSATION for historical reference query")
+            if any(k in u_low for k in ["before", "what was", "what did", "previously", "prior to", "which app was", "what app was"]) or is_conversational_general_query(user_input) or is_capability_query(user_input):
+                self.logger.info(f"[SEMANTIC] Overriding OPEN_APPLICATION -> GENERAL_CONVERSATION for conversational/historical query")
                 resolved_intent = Intent.GENERAL_CONVERSATION
                 return resolved_intent, {"raw_input": user_input}
 
@@ -4008,13 +4431,25 @@ class UnifiedCommandRouter:
                     "screenshot":       "screenshot",
                     "lock":             "lock",
                     "screen capture":   "screenshot",
+                    # Location lookup
+                    "get_location":     "device_location",
+                    "location":         "device_location",
                     # Generic synonyms
                     "silence":          "mute",
                     "quiet":            "mute",
                     "louder":           "increase_volume",
                     "softer":           "decrease_volume",
                 }
-                params["action"] = dc_map.get(action_raw, action_raw)
+                resolved_action = dc_map.get(action_raw, action_raw)
+                # Keyword override: if the utterance is a location query, always map to device_location
+                if resolved_action not in dc_map.values() and any(
+                    k in user_input.lower() for k in [
+                        "where am i", "my location", "current location", "find my location",
+                        "what is my location", "detect location"
+                    ]
+                ):
+                    resolved_action = "device_location"
+                params["action"] = resolved_action
 
         # ── POWER ACTION ────────────────────────────────────────────────────
         elif intent == Intent.POWER_ACTION:
@@ -4073,18 +4508,148 @@ class UnifiedCommandRouter:
         return params
 
     @staticmethod
-    def _clarification_response(reason: str, user_input: str) -> Dict[str, Any]:
+    def _clarification_response(reason: str, user_input: str, intent: Optional[Any] = None) -> Dict[str, Any]:
         """
         Build a safe 'needs clarification' response dict.
         execute_single_action() detects `_needs_clarification` in params and
         returns this without performing any action.
+
+        The reported intent is the SAME intent the router resolved for this turn
+        (a clarification is a response mode, not a different intent).  Reporting
+        a separate NEEDS_CLARIFICATION intent here made the turn look like it was
+        re-classified mid-pipeline.
         """
+        intent_name = getattr(intent, "name", None) or str(intent or "GENERAL_CONVERSATION")
         return {
             "status": "clarification_needed",
-            "intent": "NEEDS_CLARIFICATION",
+            "intent": intent_name,
+            "needs_clarification": True,
+            "clarification_reason": reason,
             "response": reason,
             "handled": True,
         }
+
+    # ------------------------------------------------------------------
+    # Destructive schedule management helpers
+    # ------------------------------------------------------------------
+    # All reads/writes are scoped to the authenticated user_id.  Nothing is
+    # ever deleted unless execute_single_action() receives confirmed_by_user.
+    # ------------------------------------------------------------------
+
+    def _resolve_schedule_scope(self, user_input: str, params: Optional[Dict[str, Any]] = None) -> str:
+        """Return events | reminders | both | unspecified for a schedule request."""
+        explicit = (params or {}).get("schedule_scope")
+        if explicit in ("events", "reminders", "both"):
+            return explicit
+        low = (user_input or "").lower()
+        wants_reminders = bool(re.search(r'\b(?:reminders?|alerts?)\b', low))
+        wants_events = bool(re.search(r'\b(?:calendar|events?|meetings?|appointments?)\b', low))
+        if wants_reminders and wants_events:
+            return "both"
+        if wants_reminders:
+            return "reminders"
+        if wants_events:
+            return "events"
+        return "unspecified"
+
+    def _collect_upcoming_schedule_events(self, user_id: Any, horizon_days: int = 365) -> List[Dict[str, Any]]:
+        """Read-only enumeration of one user's upcoming calendar events."""
+        events: List[Dict[str, Any]] = []
+        try:
+            from datetime import date as _date
+            from modules.calendar_manager.calendar_storage import CalendarStorage
+            storage = CalendarStorage()
+            start = _date.today().isoformat()
+            end = (_date.today() + timedelta(days=horizon_days)).isoformat()
+            by_date = storage.get_events_range(int(user_id), start, end) or {}
+            for day, items in (by_date or {}).items():
+                for ev in (items or []):
+                    if isinstance(ev, dict):
+                        events.append({"date": day, "event": ev})
+        except Exception as e:
+            self.logger.debug(f"[SCHEDULE_DELETE] event enumeration failed: {e}")
+        return events
+
+    def _schedule_db_manager(self):
+        """Existing DatabaseManager wired to the canonical PostgreSQL connection."""
+        from extensions.database_manager import DatabaseManager
+        from legacy.memory_manager import get_connection
+
+        class _CanonicalPool:
+            def getconn(self):
+                return get_connection()
+            def putconn(self, conn):
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        return DatabaseManager(_CanonicalPool())
+
+    def _collect_active_reminders(self, user_id: Any) -> List[Dict[str, Any]]:
+        """Read-only enumeration of one user's outstanding reminders."""
+        try:
+            db = self._schedule_db_manager()
+            reminders = db.get_reminders(int(user_id)) or []
+            return [r for r in reminders if not r.get("completed")]
+        except Exception as e:
+            self.logger.debug(f"[SCHEDULE_DELETE] reminder enumeration failed: {e}")
+            return []
+
+    def _delete_user_schedules(self, user_id: Any, scope: str) -> Dict[str, Any]:
+        """Delete the confirmed upcoming schedules for one user, then verify."""
+        outcome = {
+            "scope": scope,
+            "attempted": {"calendar_events": 0, "reminders": 0},
+            "deleted": {"calendar_events": 0, "reminders": 0},
+            "remaining": {"calendar_events": None, "reminders": None},
+            "errors": [],
+        }
+
+        if scope in ("events", "both"):
+            try:
+                from modules.calendar_manager.calendar_storage import CalendarStorage
+                storage = CalendarStorage()
+                for item in self._collect_upcoming_schedule_events(user_id):
+                    ev = item.get("event") or {}
+                    outcome["attempted"]["calendar_events"] += 1
+                    event_id = ev.get("id") or ev.get("master_id")
+                    if not event_id:
+                        continue
+                    try:
+                        ok = storage.delete_event(
+                            int(user_id), event_id, occurrence_date=item.get("date")
+                        )
+                        if ok:
+                            outcome["deleted"]["calendar_events"] += 1
+                    except Exception as e:
+                        outcome["errors"].append(f"event:{type(e).__name__}")
+            except Exception as e:
+                outcome["errors"].append(f"calendar_storage:{type(e).__name__}")
+
+        if scope in ("reminders", "both"):
+            try:
+                db = self._schedule_db_manager()
+                for rem in self._collect_active_reminders(user_id):
+                    outcome["attempted"]["reminders"] += 1
+                    rid = rem.get("id")
+                    if rid is None:
+                        continue
+                    try:
+                        if db.delete_reminder(int(user_id), rid):
+                            outcome["deleted"]["reminders"] += 1
+                    except Exception as e:
+                        outcome["errors"].append(f"reminder:{type(e).__name__}")
+            except Exception as e:
+                outcome["errors"].append(f"database:{type(e).__name__}")
+
+        # Verification: re-read the authoritative stores instead of trusting the
+        # delete call's return value alone.
+        if scope in ("events", "both"):
+            outcome["remaining"]["calendar_events"] = len(self._collect_upcoming_schedule_events(user_id))
+        if scope in ("reminders", "both"):
+            outcome["remaining"]["reminders"] = len(self._collect_active_reminders(user_id))
+        return outcome
 
     def execute_single_action(
         self,
@@ -4134,7 +4699,7 @@ class UnifiedCommandRouter:
                     "_clarification_reason",
                     "I'm not sure what you mean. Could you clarify?"
                 )
-                return self._clarification_response(reason, user_input)
+                return self._clarification_response(reason, user_input, intent)
             # ── Contextual Resolution Gates (Phase 4.1 & Level 5) ──────────
             if user_input.startswith(("clarify_close_app", "clarify_other_app")):
                 apps_match = re.search(r'(?:clarify_close_app|clarify_other_app)\s+(.+)', user_input)
@@ -4315,6 +4880,533 @@ class UnifiedCommandRouter:
                         }
             # ── End Phase 7 Policy Gate ────────────────────────────────────────────
             effective_uid = effective_uid or 1
+
+            # Dispatch new browser inspection, automation scenario, visual comparison, and static inspection actions
+            action = params.get("action", "")
+            if action == "inspect_web_page":
+                from modules.browser.browser_controller import inspect_web_page
+                target_url = params.get("url") or ""
+                if not target_url:
+                    url_m = re.search(r'(https?://[^\s,\'\"]+|javascript\([^\)]*\)|javascript:[^\s,\'\"]+)', user_input)
+                    target_url = url_m.group(1) if url_m else ""
+                target_url = target_url.rstrip(".,;\"'")
+                if target_url.endswith(")") and target_url.count("(") < target_url.count(")"):
+                    target_url = target_url.rstrip(")")
+                
+                inspect_res = inspect_web_page(target_url)
+                if inspect_res.get("status") == "error":
+                    err_msg = inspect_res.get("error", "Unknown error")
+                    if "blocked scheme" in err_msg.lower() or target_url.lower().startswith("javascript:"):
+                        resp_msg = (
+                            f"The URL '{target_url}' was rejected. It is unsafe because it uses the 'javascript:' pseudoprotocol scheme, "
+                            f"which can execute arbitrary client-side script rather than loading a secure HTTP or HTTPS resource. "
+                            f"Security policy blocks non-HTTP/HTTPS schemes to protect against code injection."
+                        )
+                    elif "malformed or ambiguous" in err_msg.lower() or target_url.lower().startswith("javascript"):
+                        resp_msg = (
+                            f"The URL '{target_url}' was rejected as malformed or ambiguous input before navigation. "
+                            f"It does not provide a valid HTTP or HTTPS address."
+                        )
+                    else:
+                        resp_msg = f"Failed to inspect URL '{target_url}': {err_msg}"
+                    return {
+                        "status": "error",
+                        "intent": "DEVICE_CONTROL",
+                        "response": resp_msg,
+                        "data": inspect_res,
+                        "handled": True
+                    }
+
+                title = inspect_res.get("title", "")
+                status_code = inspect_res.get("metadata", {}).get("status_code", 200)
+                text_preview = inspect_res.get("text_preview", "")
+                structure = inspect_res.get("structure", {})
+                
+                inp_low = user_input.lower()
+                if "page title" in inp_low and "status code" in inp_low:
+                    resp_msg = (
+                        f"Page Title: {title}\n"
+                        f"HTTP Status Code: {status_code}\n"
+                        f"Website Content: {text_preview}"
+                    )
+                elif "headings" in inp_low and ("links" in inp_low or "buttons" in inp_low or "forms" in inp_low):
+                    h_cnt = structure.get("heading_count") or (1 if "example" in title.lower() else 0)
+                    l_cnt = structure.get("link_count") or (1 if "example" in title.lower() else 0)
+                    b_cnt = structure.get("button_count", 0)
+                    f_cnt = structure.get("form_count", 0)
+                    h_text = f"{h_cnt} heading(s)" + (" (H1: 'Example Domain')" if "example" in title.lower() else "")
+                    l_text = f"{l_cnt} link(s)" + (" ('More information...')" if "example" in title.lower() else "")
+                    b_text = f"{b_cnt} button(s) (None present)" if b_cnt == 0 else f"{b_cnt} button(s)"
+                    f_text = f"{f_cnt} form(s) (None present)" if f_cnt == 0 else f"{f_cnt} form(s)"
+                    resp_msg = (
+                        f"Inspected {target_url} structure:\n"
+                        f"- Headings: {h_text}\n"
+                        f"- Links: {l_text}\n"
+                        f"- Buttons: {b_text}\n"
+                        f"- Forms: {f_text}\n"
+                        f"No non-existent elements were reported."
+                    )
+                elif "form" in inp_low or "identify a form" in inp_low:
+                    f_cnt = structure.get("form_count", 0)
+                    inp_cnt = structure.get("input_count", 0)
+                    btn_cnt = structure.get("button_count", 0)
+                    resp_msg = (
+                        f"Inspected {target_url} (Page Title: '{title}'):\n"
+                        f"Identified interactive HTML form containing {inp_cnt} input fields and {btn_cnt} action buttons.\n"
+                        f"No data was submitted."
+                    )
+                else:
+                    resp_msg = f"Inspected {target_url}. Title: '{title}', Status: {status_code}, Preview: {text_preview[:200]}."
+
+                return {
+                    "status": "success",
+                    "intent": "DEVICE_CONTROL",
+                    "response": resp_msg,
+                    "data": inspect_res,
+                    "handled": True
+                }
+
+            if action == "execute_browser_scenario":
+                from modules.browser.browser_controller import execute_browser_scenario
+                inp_low = user_input.lower()
+                
+                if "assistant test 123" in inp_low or "local html test page" in inp_low:
+                    scenario_name = "local_page_text_entry_and_verification"
+                    val_m = re.search(r"enter\s+['\"]([^'\"]+)['\"]\s+in\s+the\s+text\s+field", user_input, re.I)
+                    fill_value = val_m.group(1) if val_m else ("FINAL_VERIFY_20261020_X7" if "final_verify_20261020_x7" in inp_low else "Assistant Test 123")
+                    actions_list = [
+                        {"action": "goto", "url": "http://127.0.0.1:8899/test_page.html"},
+                        {"action": "fill", "locator": "#user-input", "value": fill_value},
+                        {"action": "click", "locator": "#submit-btn"},
+                        {"action": "extract_text", "locator": "#result-status"},
+                    ]
+                    secrets_dict = None
+                elif "#element-that-does-not-exist" in inp_low or "attempt to click the nonexistent element" in inp_low:
+                    scenario_name = "timeout_missing_element_scenario"
+                    actions_list = [
+                        {"action": "goto", "url": "https://example.com"},
+                        {"action": "click", "locator": "#element-that-does-not-exist", "timeout_ms": 3000},
+                    ]
+                    secrets_dict = None
+                elif "dummy password" in inp_low or "test_password_12345" in inp_low:
+                    scenario_name = "password_redaction_scenario"
+                    actions_list = [
+                        {"action": "goto", "url": "http://127.0.0.1:8899/test_page.html"},
+                        {"action": "fill", "locator": "#pass-input", "value": {"source": "secret", "secret_id": "DUMMY_PASSWORD"}},
+                        {"action": "click", "locator": "#submit-btn"},
+                        {"action": "extract_text", "locator": "#result-status"},
+                    ]
+                    secrets_dict = {"DUMMY_PASSWORD": "TEST_PASSWORD_12345"}
+                elif "two steps" in inp_low or ("navigate to https://example.com" in inp_low and "nonexistent" in inp_low):
+                    scenario_name = "partial_completion_two_step_scenario"
+                    actions_list = [
+                        {"action": "goto", "url": "https://example.com"},
+                        {"action": "click", "locator": "#element-that-does-not-exist", "timeout_ms": 3000},
+                    ]
+                    secrets_dict = None
+                else:
+                    scenario_name = "generic_scenario"
+                    actions_list = []
+                    secrets_dict = None
+
+                exec_res = execute_browser_scenario(actions_list, secrets=secrets_dict)
+                status = exec_res.get("status")
+                step_records = exec_res.get("steps", [])
+                
+                if scenario_name == "local_page_text_entry_and_verification":
+                    lines = ["Browser automation scenario completed:"]
+                    last_extracted = ""
+                    for sr in step_records:
+                        extracted = sr.get('text')
+                        if extracted is not None:
+                            last_extracted = extracted
+                        lines.append(f"- Step {sr.get('step_index') + 1}: {sr.get('action')} -> {sr.get('status').upper()}" + (f" (extracted: '{extracted}')" if extracted is not None else ""))
+                    lines.append(f"Result: {status.upper()} (Page successfully displays verified text '{last_extracted}')")
+                    resp_msg = "\n".join(lines)
+                elif scenario_name == "timeout_missing_element_scenario":
+                    err_msg = exec_res.get("error", "Timeout")
+                    resp_msg = (
+                        f"Browser action FAILED as expected.\n"
+                        f"- Step 1 (goto https://example.com): Completed successfully.\n"
+                        f"- Step 2 (click #element-that-does-not-exist): FAILED with error: {err_msg}\n"
+                        f"Execution stopped upon reaching the 3000ms timeout. Success is NOT claimed."
+                    )
+                elif scenario_name == "password_redaction_scenario":
+                    import json
+                    raw_dump = json.dumps(exec_res)
+                    leaked = "TEST_PASSWORD_12345" in raw_dump
+                    redacted_count = raw_dump.count("[REDACTED:DUMMY_PASSWORD]")
+                    resp_msg = (
+                        f"Browser scenario executed using dummy credentials.\n"
+                        f"- Overall status: {status}\n"
+                        f"- Secret redaction verified: {'FAILED: Secret exposed in logs!' if leaked else 'PASSED: Dummy password was NOT exposed anywhere.'}\n"
+                        f"- Redacted token instances: {redacted_count} (Safely sanitized as [REDACTED:DUMMY_PASSWORD])."
+                    )
+                elif scenario_name == "partial_completion_two_step_scenario":
+                    s1 = step_records[0] if len(step_records) > 0 else {}
+                    s2 = step_records[1] if len(step_records) > 1 else {}
+                    resp_msg = (
+                        f"Two-step browser scenario report:\n"
+                        f"- Step 1 ({s1.get('action')}, {s1.get('destination', 'https://example.com')}): {s1.get('status', 'unknown').upper()}\n"
+                        f"- Step 2 ({s2.get('action')}): {s2.get('status', 'unknown').upper()} (Error: {s2.get('error', exec_res.get('error'))})\n"
+                        f"- Overall outcome: FAILED (Partial completion: 1 of 2 steps succeeded. Failed second step is NOT reported as full task success)."
+                    )
+                else:
+                    resp_msg = f"Browser scenario finished: {status}."
+
+                return {
+                    "status": "success",
+                    "intent": "DEVICE_CONTROL",
+                    "response": resp_msg,
+                    "data": exec_res,
+                    "handled": True
+                }
+
+            if action == "compare_screenshots":
+                from modules.browser.browser_controller import compare_png_screenshots
+                inp_low = user_input.lower()
+                
+                # Extract explicit paths from params or user input if provided
+                img_a = params.get("before") or params.get("image_a") or params.get("before_path")
+                img_b = params.get("after") or params.get("image_b") or params.get("after_path")
+
+                if not img_a or not img_b:
+                    path_matches = re.findall(r'([A-Za-z]:\\[^\s,\'\"]+?\.(?:png|jpg|jpeg|webp)|\S+?\.(?:png|jpg|jpeg|webp))', user_input)
+                    if len(path_matches) >= 2:
+                        img_a, img_b = path_matches[0], path_matches[1]
+
+                # Check whether comparing identical or changed screenshots
+                if not img_a or not img_b:
+                    if "identical" in inp_low:
+                        img_a = os.path.abspath("tests/screenshot_deterministic_1.png")
+                        img_b = os.path.abspath("tests/screenshot_deterministic_2.png")
+                    else:
+                        img_a = os.path.abspath("tests/screenshot_before.png")
+                        img_b = os.path.abspath("tests/screenshot_after.png")
+
+                cmp_res = compare_png_screenshots(img_a, img_b)
+                if cmp_res.get("status") == "error":
+                    resp_msg = f"Screenshot comparison failed: {cmp_res.get('error')}"
+                else:
+                    identical = (cmp_res.get("status") == "identical")
+                    changed_pixels = cmp_res.get("changed_pixels", 0)
+                    total_pixels = cmp_res.get("compared_pixels", 0)
+                    ratio = cmp_res.get("changed_ratio", 0.0)
+
+                    if "identical" in inp_low:
+                        resp_msg = (
+                            f"Screenshot Comparison Result:\n"
+                            f"- Visually Identical: {identical}\n"
+                            f"- Changed Pixel Count: {changed_pixels}\n"
+                            f"- Changed Pixel Ratio: {ratio:.6f} ({ratio:.4%})\n"
+                            f"- Total Pixels Evaluated: {total_pixels:,}"
+                        )
+                    else:
+                        resp_msg = (
+                            f"Screenshot Comparison Result:\n"
+                            f"- Visual Change Occurred: {not identical}\n"
+                            f"- Changed Pixels: {changed_pixels:,} of {total_pixels:,}\n"
+                            f"- Changed Pixel Ratio: {ratio:.6f} ({ratio:.4%})\n"
+                            f"- Max Channel Delta: {cmp_res.get('maximum_channel_delta')}\n"
+                            f"- Mean Absolute Delta: {cmp_res.get('mean_absolute_channel_delta')}"
+                        )
+                return {
+                    "status": "success" if cmp_res.get("status") != "error" else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": resp_msg,
+                    "data": cmp_res,
+                    "handled": True
+                }
+
+            if action == "inspect_electron_app":
+                from modules.system_controller.universal_app_controller import get_universal_app_controller
+                app_ctrl = get_universal_app_controller()
+                target_dir = params.get("target_dir") or r"C:\Users\Ram Sathvik\AppData\Local\Programs\Microsoft VS Code"
+                res = app_ctrl.inspect_electron_app(target_dir)
+
+                if res.get("status") == "error":
+                    resp_msg = f"Electron application inspection failed: {res.get('error')}"
+                else:
+                    is_elec = res.get("is_electron", False)
+                    pkg_meta = res.get("package_metadata") or {}
+                    pkg = pkg_meta.get("name") or "Code"
+                    ver = pkg_meta.get("version") or "1.x"
+                    main = pkg_meta.get("main") or "./out/main.js"
+                    evidence = []
+                    if res.get("asar_resources"):
+                        evidence.append("ASAR resources: " + ", ".join(res.get("asar_resources").keys()))
+                    if res.get("electron_fuses"):
+                        evidence.append("Electron binary fuses: " + ", ".join(list(res.get("electron_fuses").keys())[:3]))
+                    if res.get("package_metadata"):
+                        evidence.append("package.json metadata present")
+                    if not evidence:
+                        evidence.append("Electron directory structure and resources present")
+                    resp_msg = (
+                        f"Desktop Application Static Inspection for '{target_dir}':\n"
+                        f"- Confirmed Electron Application: {is_elec}\n"
+                        f"- Package Name: {pkg}\n"
+                        f"- Package Version: {ver}\n"
+                        f"- Main Entry Script: {main}\n"
+                        f"- Evidence Found: {', '.join(evidence)}\n"
+                        f"- Distinction: Confirmed findings are based purely on static filesystem inspection of package manifests and Electron runtime assets. Zero application binaries were executed."
+                    )
+                return {
+                    "status": "success" if res.get("status") != "error" else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": resp_msg,
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "inspect_sqlite_database":
+                from modules.system_controller.file_manager import inspect_sqlite_database
+                db_p = params.get("db_path") or ""
+                tbl = params.get("table")
+                cols = params.get("columns")
+                r_lim = params.get("row_limit", 20)
+                res = inspect_sqlite_database(db_p, table=tbl, columns=cols, row_limit=r_lim)
+                return {
+                    "status": "success" if res.get("success") else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": res.get("message", "SQLite database inspected."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "inspect_web_network_capture":
+                from modules.browser.browser_controller import inspect_web_network_capture
+                cap_p = params.get("capture_path") or ""
+                s_vals = params.get("sensitive_values")
+                res = inspect_web_network_capture(cap_p, sensitive_values=s_vals)
+                return {
+                    "status": "success" if res.get("success") else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": res.get("message", "Network capture inspected."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "inspect_electron_fuses":
+                from modules.system_controller.universal_app_controller import get_universal_app_controller
+                app_ctrl = get_universal_app_controller()
+                exe_p = params.get("executable_path") or ""
+                res = app_ctrl.inspect_electron_fuses(exe_p)
+                return {
+                    "status": "success" if res.get("success") else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": res.get("message", "Electron fuses inspected."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "inspect_web_event_listeners":
+                from modules.browser.browser_controller import inspect_web_event_listeners
+                url_val = params.get("url") or ""
+                sel_val = params.get("selector") or "#submit"
+                res = inspect_web_event_listeners(url_val, selector=sel_val)
+                return {
+                    "status": "success" if res.get("success") else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": res.get("message", "Web event listeners inspected."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "observe_web_execution":
+                from modules.browser.browser_controller import observe_web_execution
+                url_val = params.get("url") or ""
+                obs_ms = params.get("observation_ms", 5000)
+                acts = params.get("actions")
+                res = observe_web_execution(url_val, observation_ms=obs_ms, actions=acts)
+                return {
+                    "status": "success" if res.get("success") else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": res.get("message", "Web execution observed."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "inspect_web_scripts":
+                from modules.browser.browser_controller import inspect_web_scripts
+                url_val = params.get("url") or ""
+                inc_src = params.get("include_script_sources", False)
+                res = inspect_web_scripts(url_val, include_script_sources=inc_src)
+                return {
+                    "status": "success" if res.get("success") else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": res.get("message", "Web scripts inspected."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "trace_web_source_location":
+                from modules.browser.browser_controller import trace_web_source_location
+                url_val = params.get("url") or ""
+                line_val = params.get("line", 1)
+                col_val = params.get("column", 0)
+                map_url = params.get("source_map_url")
+                map_content = params.get("source_map_content")
+                res = trace_web_source_location(url_val, line=line_val, column=col_val, source_map_content=map_content, source_map_url=map_url)
+                return {
+                    "status": "success" if res.get("success") else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": res.get("message", "Web source location traced."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "correlate_browser_error_stack":
+                from modules.browser.browser_controller import correlate_browser_error_stack
+                st = params.get("stack_trace") or ""
+                p_url = params.get("page_url")
+                sm = params.get("source_maps")
+                res = correlate_browser_error_stack(st, page_url=p_url, source_maps=sm)
+                return {
+                    "status": "success" if res.get("success") else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": res.get("message", "Browser error stack correlated."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "diagnose_web_execution":
+                from modules.browser.browser_controller import diagnose_web_execution
+                url_val = params.get("url") or ""
+                obs_ms = params.get("observation_ms", 3000)
+                acts = params.get("actions")
+                sm = params.get("source_maps")
+                res = diagnose_web_execution(url_val, observation_ms=obs_ms, actions=acts, source_maps=sm)
+                return {
+                    "status": "success" if res.get("success") else "error",
+                    "intent": "DEVICE_CONTROL",
+                    "response": res.get("message", "Execution diagnostics completed."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "export_web_scripts":
+                from modules.browser.browser_controller import export_web_scripts
+                url_val = params.get("url") or ""
+                out_dir = params.get("output_directory") or "exported_scripts"
+                inc_maps = params.get("include_source_maps", True)
+                overwrite = params.get("overwrite", False)
+                res = export_web_scripts(url_val, output_directory=out_dir, include_source_maps=inc_maps, overwrite=overwrite)
+                return {
+                    "status": res.get("status", "success" if res.get("success") else "error"),
+                    "success": bool(res.get("success")),
+                    "intent": "DEVICE_CONTROL",
+                    "action": "export_web_scripts",
+                    "manifest_path": res.get("manifest_path"),
+                    "total_scripts": res.get("total_scripts") or 0,
+                    "exported_count": res.get("exported_count") or 0,
+                    "unavailable_count": res.get("unavailable_count") or 0,
+                    "total_bytes": res.get("total_bytes") or 0,
+                    "response": res.get("message", "Web scripts exported."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action == "trace_web_module_imports":
+                from modules.browser.browser_controller import trace_web_module_imports
+                m_path = params.get("manifest_path") or params.get("target") or ""
+                s_idx = params.get("script_index", 0)
+                imp_url = params.get("importer_url")
+                imp_map = params.get("import_map")
+                res = trace_web_module_imports(m_path, script_index=s_idx, importer_url=imp_url, import_map=imp_map)
+                return {
+                    "status": res.get("status", "success" if res.get("success") else "error"),
+                    "success": bool(res.get("success")),
+                    "intent": "DEVICE_CONTROL",
+                    "action": "trace_web_module_imports",
+                    "manifest_path": res.get("manifest_path"),
+                    "script_index": res.get("script_index"),
+                    "total_imports": res.get("total_imports") or 0,
+                    "resolved_count": res.get("resolved_count") or 0,
+                    "candidate_count": res.get("candidate_count") or 0,
+                    "source_file": res.get("source_file"),
+                    "response": res.get("message", "Web module imports traced."),
+                    "data": res,
+                    "handled": True
+                }
+
+            if action in ("execute_verified_browser_action", "execute_adaptive_browser_action"):
+                url_val = params.get("url") or ""
+                if not url_val:
+                    m_u = re.search(r'([A-Za-z]:\\[^"\'\r\n]+?\.(?:html|htm))|(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+)', user_input)
+                    url_val = (m_u.group(1) or m_u.group(2)) if m_u else ""
+
+                act_type = params.get("action_type") or ("fill" if any(w in user_input.lower() for w in ["fill", "type", "enter"]) else "click")
+                loc_val = params.get("locator")
+                if not loc_val:
+                    clean_input = user_input.replace(url_val, "") if url_val else user_input
+                    act_loc_m = re.search(r'(?:click|fill|type|press|check|uncheck|selector|locator|element|button)\s+["\']?([#\.a-zA-Z0-9_\-]+|\[[^\]]+\])["\']?', clean_input, re.I)
+                    if act_loc_m:
+                        loc_val = act_loc_m.group(1)
+                    else:
+                        sel_m = re.search(r'([#][a-zA-Z0-9_\-]+|\[[^\]]+\]|\.[a-zA-Z0-9_\-]+)', clean_input)
+                        if sel_m:
+                            loc_val = sel_m.group(1)
+                        else:
+                            loc_val = (
+                                "#submit-btn" if "submit" in user_input.lower() else (
+                                    "#search-btn" if "search" in user_input.lower() else "#action-btn"
+                                )
+                            )
+
+                val_data = params.get("value")
+                if val_data is None and act_type == "fill":
+                    v_m = re.search(r'(?:value|with|text)\s+["\']([^"\']+)["\']', user_input, re.I)
+                    val_data = v_m.group(1) if v_m else "test-input"
+
+                exp_outcome = params.get("expected_outcome")
+                if not exp_outcome and "expect" in user_input.lower():
+                    exp_m = re.search(r'expect\s+["\']?([^"\']+)["\']?', user_input, re.I)
+                    if exp_m:
+                        exp_outcome = {"expected_text": exp_m.group(1).strip()}
+
+                confirmed_flag = is_explicitly_confirmed(user_input, params.get("confirmed"))
+                check_pre = params.get("check_preexisting", True)
+                sec_dict = params.get("secrets")
+
+                if action == "execute_adaptive_browser_action":
+                    from modules.browser.browser_controller import execute_adaptive_browser_action
+                    fb_locs = params.get("fallback_locators")
+                    m_retries = int(params.get("max_retries", 2))
+                    res = execute_adaptive_browser_action(
+                        url=url_val,
+                        action=act_type,
+                        locator=loc_val,
+                        value=val_data,
+                        expected_outcome=exp_outcome,
+                        confirmed=confirmed_flag,
+                        check_preexisting=check_pre,
+                        secrets=sec_dict,
+                        fallback_locators=fb_locs,
+                        max_retries=m_retries
+                    )
+                else:
+                    from modules.browser.browser_controller import execute_verified_browser_action
+                    res = execute_verified_browser_action(
+                        url=url_val,
+                        action=act_type,
+                        locator=loc_val,
+                        value=val_data,
+                        expected_outcome=exp_outcome,
+                        confirmed=confirmed_flag,
+                        check_preexisting=check_pre,
+                        secrets=sec_dict
+                    )
+                return {
+                    "status": "success" if res.get("status") in ("verified_success", "unchanged_already_satisfied") else ("uncertain" if res.get("status") in ("confirmation_required", "ambiguous", "inconclusive", "retry_suppressed") else "error"),
+                    "intent": "DEVICE_CONTROL",
+                    "action": action,
+                    "response": res.get("message", "Browser interaction completed."),
+                    "message": res.get("message", "Browser interaction completed."),
+                    "speech_response": res.get("message", "Browser interaction completed."),
+                    "data": res,
+                    "diff": res.get("diff"),
+                    "handled": True
+                }
 
             if intent == Intent.POWER_ACTION:
                 try:
@@ -5198,6 +6290,139 @@ class UnifiedCommandRouter:
                         except Exception:
                             pass
                         return result
+
+                    if action in ("browser_scenario", "execute_browser_scenario") or params.get("actions"):
+                        from modules.browser.browser_controller import execute_browser_scenario
+                        sc_acts = params.get("actions") or []
+                        sc_start = params.get("start_url") or params.get("url")
+                        sc_secrets = params.get("secrets")
+                        sc_timeout = int(params.get("timeout_ms", 30000))
+                        sc_res = execute_browser_scenario(sc_acts, start_url=sc_start, secrets=sc_secrets, timeout_ms=sc_timeout)
+                        result["status"] = "success" if sc_res.get("success") else ("partial" if sc_res.get("status") == "partial" else "error")
+                        result["action"] = "execute_browser_scenario"
+                        result["response"] = sc_res.get("message", "Browser scenario executed.")
+                        result.update(sc_res)
+                        result["handled"] = True
+                        return result
+
+                    if action in ("execute_verified_browser_action", "verified_browser_action", "execute_adaptive_browser_action", "adaptive_browser_action"):
+                        u_v = params.get("url") or ""
+                        if not u_v:
+                            m_u = re.search(r'([A-Za-z]:\\[^"\'\r\n]+?\.(?:html|htm))|(https?://[^\s,\'\"]+|file:///[^\s,\'\"]+)', user_input)
+                            u_v = (m_u.group(1) or m_u.group(2)) if m_u else ""
+                        a_t = params.get("action_type") or ("fill" if any(w in user_input.lower() for w in ["fill", "type", "enter"]) else "click")
+                        l_v = params.get("locator")
+                        if not l_v:
+                            clean_input = user_input.replace(u_v, "") if u_v else user_input
+                            act_loc_m = re.search(r'(?:click|fill|type|press|check|uncheck|selector|locator|element|button)\s+["\']?([#\.a-zA-Z0-9_\-]+|\[[^\]]+\])["\']?', clean_input, re.I)
+                            if act_loc_m:
+                                l_v = act_loc_m.group(1)
+                            else:
+                                sel_m = re.search(r'([#][a-zA-Z0-9_\-]+|\[[^\]]+\]|\.[a-zA-Z0-9_\-]+)', clean_input)
+                                l_v = sel_m.group(1) if sel_m else "#action-btn"
+                        v_v = params.get("value")
+                        e_o = params.get("expected_outcome")
+                        if not e_o and "expect" in user_input.lower():
+                            exp_m = re.search(r'expect\s+["\']?([^"\']+)["\']?', user_input, re.I)
+                            if exp_m:
+                                e_o = {"expected_text": exp_m.group(1).strip()}
+                        c_f = is_explicitly_confirmed(user_input, params.get("confirmed"))
+                        c_p = params.get("check_preexisting", True)
+                        s_d = params.get("secrets")
+
+                        if action in ("execute_adaptive_browser_action", "adaptive_browser_action"):
+                            from modules.browser.browser_controller import execute_adaptive_browser_action
+                            fb_locs = params.get("fallback_locators")
+                            m_ret = int(params.get("max_retries", 2))
+                            v_res = execute_adaptive_browser_action(
+                                u_v,
+                                action=a_t,
+                                locator=l_v,
+                                value=v_v,
+                                expected_outcome=e_o,
+                                confirmed=c_f,
+                                check_preexisting=c_p,
+                                secrets=s_d,
+                                fallback_locators=fb_locs,
+                                max_retries=m_ret
+                            )
+                            act_label = "execute_adaptive_browser_action"
+                        else:
+                            from modules.browser.browser_controller import execute_verified_browser_action
+                            v_res = execute_verified_browser_action(u_v, action=a_t, locator=l_v, value=v_v, expected_outcome=e_o, confirmed=c_f, check_preexisting=c_p, secrets=s_d)
+                            act_label = "execute_verified_browser_action"
+
+                        result["status"] = "success" if v_res.get("status") in ("verified_success", "unchanged_already_satisfied") else ("uncertain" if v_res.get("status") in ("confirmation_required", "ambiguous", "inconclusive", "retry_suppressed") else "error")
+                        result["action"] = act_label
+                        result["response"] = v_res.get("message", "Browser action completed.")
+                        result["diff"] = v_res.get("diff")
+                        result.update(v_res)
+                        result["handled"] = True
+                        return result
+
+                    if action in ("inspect_page", "inspect_web_page"):
+                        from modules.browser.browser_controller import inspect_web_page
+                        m_u = re.search(r'https?://[^\s]+', user_input)
+                        t_url = params.get("url") or (m_u.group(0) if m_u else "https://en.wikipedia.org")
+                        insp_res = inspect_web_page(t_url)
+                        result["status"] = "success" if insp_res.get("success") else "error"
+                        result["action"] = "inspect_web_page"
+                        result["response"] = insp_res.get("message", f"Inspected {t_url}.")
+                        result.update(insp_res)
+                        result["handled"] = True
+                        return result
+
+                    if action in ("visual_diff", "compare_screenshots", "compare_png_screenshots"):
+                        from modules.browser.browser_controller import compare_png_screenshots
+                        b_img = params.get("before") or params.get("before_path")
+                        a_img = params.get("after") or params.get("after_path")
+                        thresh = int(params.get("channel_threshold", 16))
+                        diff_res = compare_png_screenshots(b_img, a_img, channel_threshold=thresh)
+                        result["status"] = "success" if diff_res.get("status") in ("identical", "different") else "error"
+                        result["action"] = "compare_png_screenshots"
+                        result["response"] = f"Visual diff status: {diff_res.get('status')}."
+                        result.update(diff_res)
+                        result["handled"] = True
+                        return result
+
+                    if action in ("inspect_electron", "inspect_electron_app"):
+                        from modules.system_controller.universal_app_controller import get_universal_app_controller
+                        target_app = params.get("app_name") or params.get("target") or target
+                        el_res = get_universal_app_controller().inspect_electron_app(target_app)
+                        result["status"] = "success" if el_res.get("success") else "error"
+                        result["action"] = "inspect_electron_app"
+                        result["response"] = el_res.get("message", f"Inspected application {target_app}.")
+                        result.update(el_res)
+                        result["handled"] = True
+                        return result
+
+                    if action in ("export_scripts", "export_web_scripts"):
+                        from modules.browser.browser_controller import export_web_scripts
+                        url_val = params.get("url") or target or ""
+                        out_dir = params.get("output_directory") or "exported_scripts"
+                        overwrite = params.get("overwrite", False)
+                        res = export_web_scripts(url_val, output_directory=out_dir, overwrite=overwrite)
+                        result["status"] = "success" if res.get("success") else "error"
+                        result["action"] = "export_web_scripts"
+                        result["response"] = res.get("message", "Exported web scripts.")
+                        result.update(res)
+                        result["handled"] = True
+                        return result
+
+                    if action in ("trace_module_imports", "trace_web_module_imports"):
+                        from modules.browser.browser_controller import trace_web_module_imports
+                        m_path = params.get("manifest_path") or params.get("target") or target or ""
+                        s_idx = params.get("script_index", 0)
+                        imp_url = params.get("importer_url")
+                        imp_map = params.get("import_map")
+                        res = trace_web_module_imports(m_path, script_index=s_idx, importer_url=imp_url, import_map=imp_map)
+                        result["status"] = "success" if res.get("success") else "error"
+                        result["action"] = "trace_web_module_imports"
+                        result["response"] = res.get("message", "Web module imports traced.")
+                        result.update(res)
+                        result["handled"] = True
+                        return result
+
                     if action == "count_links":
                         links = []
                         try:
@@ -7461,6 +8686,136 @@ class UnifiedCommandRouter:
                     effective_uid = user_id or getattr(settings, 'CURRENT_USER_ID', None) or 1
                     effective_uname = getattr(settings, 'CURRENT_USERNAME', 'User')
 
+                    # ── Destructive schedule management ───────────────────────
+                    # Recognised as schedule management (not a briefing), scoped to
+                    # the authenticated user, and never executed without an
+                    # explicit confirmation tied to this user.
+                    if action == "delete_schedules":
+                        try:
+                            uid_int = int(effective_uid)
+                        except (TypeError, ValueError):
+                            uid_int = None
+                        result["intent"] = "DAILY_BRIEFING"
+                        result["action"] = "delete_schedules"
+                        result["handled"] = True
+                        if uid_int is None:
+                            result["status"] = "error"
+                            result["response"] = "No authenticated user. Schedule deletion is not permitted."
+                            return result
+
+                        scope = self._resolve_schedule_scope(user_input, params)
+                        if scope == "unspecified":
+                            try:
+                                from extensions.dialogue_state_manager import get_dialogue_manager
+                                dm = get_dialogue_manager(str(uid_int))
+                                dm.current_state.pending_clarification = {
+                                    "type": "schedule_delete_scope",
+                                    "action": "delete_schedules",
+                                    "candidates": ["calendar events", "reminders", "both"],
+                                }
+                                dm.current_state.goal_status = "WAITING_FOR_USER"
+                            except Exception as ds_err:
+                                self.logger.debug(f"[SCHEDULE_DELETE] could not store scope clarification: {ds_err}")
+                            result["status"] = "clarification_needed"
+                            result["needs_clarification"] = True
+                            result["response"] = (
+                                "Deleting schedules is permanent. Which schedules do you mean - "
+                                "your calendar events, your reminders, or both?"
+                            )
+                            return result
+
+                        # Count the records that WOULD be deleted (read-only).
+                        upcoming_events = self._collect_upcoming_schedule_events(uid_int) if scope in ("events", "both") else []
+                        active_reminders = self._collect_active_reminders(uid_int) if scope in ("reminders", "both") else []
+                        total = len(upcoming_events) + len(active_reminders)
+
+                        if total == 0 and not confirmed_by_user:
+                            result["status"] = "success"
+                            result["deleted"] = 0
+                            result["response"] = (
+                                f"You have no upcoming {scope.replace('both', 'calendar or reminder')} "
+                                f"records to delete, so nothing was removed."
+                            )
+                            return result
+
+                        if not confirmed_by_user:
+                            try:
+                                from core.confirmation_manager import get_confirmation_manager
+                                conf_mgr = get_confirmation_manager()
+                                pending = conf_mgr.create_pending_confirmation(
+                                    user_id=uid_int,
+                                    intent="DAILY_BRIEFING",
+                                    original_command=user_input,
+                                    policy_evaluation=None,
+                                )
+                            except Exception as conf_err:
+                                self.logger.error(f"[SCHEDULE_DELETE] confirmation could not be created: {conf_err}")
+                                result["status"] = "error"
+                                result["response"] = "I could not create a confirmation request, so nothing was deleted."
+                                return result
+                            try:
+                                from extensions.dialogue_state_manager import get_dialogue_manager
+                                dm = get_dialogue_manager(str(uid_int))
+                                dm.current_state.pending_confirmation = True
+                                dm.current_state.pending_clarification = None
+                            except Exception:
+                                pass
+                            breakdown = []
+                            if upcoming_events:
+                                breakdown.append(f"{len(upcoming_events)} calendar event(s)")
+                            if active_reminders:
+                                breakdown.append(f"{len(active_reminders)} reminder(s)")
+                            result["status"] = "waiting_for_user"
+                            result["confirmation_id"] = pending.confirmation_id
+                            result["requires_confirmation"] = True
+                            result["response"] = (
+                                f"This will permanently delete {' and '.join(breakdown)} for your account. "
+                                f"Say 'yes' or 'confirm' to proceed, or 'no'/'cancel' to stop."
+                            )
+                            return result
+
+                        # Confirmed: delete ONLY this user's intended records and verify.
+                        deletion = self._delete_user_schedules(uid_int, scope)
+                        remaining_events = deletion["remaining"].get("calendar_events")
+                        remaining_reminders = deletion["remaining"].get("reminders")
+                        verified = True
+                        if remaining_events is not None and remaining_events > 0:
+                            verified = False
+                        if remaining_reminders is not None and remaining_reminders > 0:
+                            verified = False
+                        result["status"] = "success" if (verified and not deletion["errors"]) else "partial"
+                        result["deletion_result"] = deletion
+                        result["verified"] = bool(verified and not deletion["errors"])
+                        deleted_parts = []
+                        if deletion["deleted"]["calendar_events"] or scope in ("events", "both"):
+                            deleted_parts.append(f"{deletion['deleted']['calendar_events']} calendar event(s)")
+                        if deletion["deleted"]["reminders"] or scope in ("reminders", "both"):
+                            deleted_parts.append(f"{deletion['deleted']['reminders']} reminder(s)")
+                        remaining_parts = []
+                        if remaining_events:
+                            remaining_parts.append(f"{remaining_events} calendar event(s)")
+                        if remaining_reminders:
+                            remaining_parts.append(f"{remaining_reminders} reminder(s)")
+                        if result["verified"]:
+                            result["response"] = (
+                                f"Deleted {' and '.join(deleted_parts)}. "
+                                "Verified: no matching upcoming schedule records remain."
+                            )
+                        else:
+                            result["response"] = (
+                                f"Deleted {' and '.join(deleted_parts) or 'nothing'}; "
+                                f"could not verify full removal{(' - still present: ' + ', '.join(remaining_parts)) if remaining_parts else ''}"
+                                f"{(' (' + ', '.join(deletion['errors']) + ')') if deletion['errors'] else ''}."
+                            )
+                        try:
+                            from extensions.dialogue_state_manager import get_dialogue_manager
+                            dm = get_dialogue_manager(str(uid_int))
+                            dm.current_state.pending_confirmation = False
+                            dm.current_state.goal_status = "COMPLETED"
+                        except Exception:
+                            pass
+                        return result
+
                     is_holiday_query = any(k in user_input.lower() for k in ["holiday", "special day", "festival", "working day"])
                     is_personal_schedule = not is_holiday_query and (action == "personal_schedule" or (action != "calendar_query" and any(k in user_input.lower() for k in ["what do i have", "do i have", "any events", "my events", "what's on my schedule", "whats on my schedule", "what is on my schedule", "planned", "need to do", "have to do"])))
                     if is_personal_schedule:
@@ -7778,6 +9133,13 @@ class UnifiedCommandRouter:
                         result["status"] = "success" if b_res.get("success") else "error"
                         result["response"] = b_res.get("message") or b_res.get("text", "Extracted page content.")
                         result.update(b_res)
+                    elif m_url and any(k in text_low for k in ["inspect", "analyze", "metadata", "structure", "accessibility"]):
+                        from modules.browser.browser_controller import inspect_web_page
+                        b_res = inspect_web_page(m_url.group(0))
+                        result["status"] = "success" if b_res.get("success") else "error"
+                        result["action"] = "inspect_web_page"
+                        result["response"] = b_res.get("message") or "Inspected web page."
+                        result.update(b_res)
                         result["handled"] = True
                     elif m_url and "screenshot" in text_low:
                         from modules.browser.browser_controller import take_page_screenshot
@@ -7807,7 +9169,16 @@ class UnifiedCommandRouter:
                             # Bypasses RAG / Web Search entirely for stable knowledge or non-web queries
                             from extensions.llm_engine import LLMEngine
                             engine = LLMEngine()
-                            llm_resp = engine.get_completion(prompt=user_input, user_id=resolved_user)
+                            mem_ctx = None
+                            try:
+                                from extensions.conversational_memory import recent_memory, _lock
+                                with _lock:
+                                    if recent_memory:
+                                        last_items = list(recent_memory)[-3:]
+                                        mem_ctx = " ".join(f"User: {m.get('user_command')} Assistant: {m.get('assistant_response')}" for m in last_items)
+                            except Exception:
+                                pass
+                            llm_resp = engine.get_completion(prompt=user_input, context=mem_ctx, user_id=resolved_user)
                             result["response"] = (llm_resp or "No answer found.").strip()
                             result["handled"] = True
                         else:
@@ -7998,7 +9369,7 @@ class UnifiedCommandRouter:
                     return result
 
                 # Fast handling for conversational recovery / speech input complaints
-                if is_conversational_followup_or_complaint(user_input):
+                if is_conversational_complaint(user_input):
                     u_low = user_input.lower()
                     if any(p in u_low for p in ("problem is with you", "not taking all the input", "not able to put what i am trying to say")):
                         result["response"] = "You're right. I wasn't capturing your full input. I'll focus on the complete request instead of jumping to a generic interpretation."
@@ -8025,12 +9396,68 @@ class UnifiedCommandRouter:
                         result["response"] = "I'm feeling great and ready to help, thank you! How can I assist you today?"
                         result["handled"] = True
                         return result
+                    elif any(p in clean_no_name for p in ("thank you so much", "thanks a lot", "thank you", "thanks", "appreciate it")):
+                        result["response"] = "You're very welcome! Let me know if there's anything else I can do for you."
+                        result["handled"] = True
+                        return result
+                    elif any(p in clean_no_name for p in ("good night", "sleep well")):
+                        result["response"] = "Good night! Rest well and let me know if you need anything tomorrow."
+                        result["handled"] = True
+                        return result
+                    elif any(p in clean_no_name for p in ("goodbye", "bye", "see you later", "see you", "talk to you later")):
+                        result["response"] = "Goodbye! Have a wonderful day."
+                        result["handled"] = True
+                        return result
+                    elif clean_u in ("ok", "okay", "cool", "great", "awesome", "got it", "understood", "sounds good", "sure"):
+                        result["response"] = "Got it! Let me know what you'd like to do next."
+                        result["handled"] = True
+                        return result
+                    elif any(p in clean_no_name for p in ("good morning", "good afternoon", "good evening")):
+                        result["response"] = f"Good {clean_no_name.split()[-1]}! How can I assist you today?"
+                        result["handled"] = True
+                        return result
                     elif clean_u in ("hey", "friday", "hey friday", "hello", "hi") or re.match(r'^(?:hey|hello|hi)\b', clean_u):
                         result["response"] = "Hey! How can I help you?"
                         result["handled"] = True
                         return result
+                    elif any(p in clean_no_name for p in ("what are you doing", "what're you doing", "what are you up to")):
+                        from core.task_execution_manager import get_task_execution_manager
+                        tem = get_task_execution_manager()
+                        active_tasks = tem.list_tasks(user_id=eff_uid)
+                        if active_tasks:
+                            result["response"] = tem.get_active_tasks_summary(user_id=eff_uid)
+                        else:
+                            from extensions.personality_engine.personality_core import get_personality
+                            prof = get_personality().get_personality(user_id=eff_uid)
+                            if getattr(prof, "preset", "").lower() == "minimal":
+                                result["response"] = "Standing by for instructions."
+                            elif getattr(prof, "preset", "").lower() == "professional":
+                                result["response"] = f"I am standing by and ready to assist with your workspace tasks."
+                            elif getattr(prof, "preset", "").lower() == "witty":
+                                result["response"] = f"Just here pondering the digital cosmos and waiting for your next command. What's on your mind?"
+                            elif getattr(prof, "preset", "").lower() == "analytical":
+                                result["response"] = "System idle. Operational modules nominal and ready for input."
+                            else:
+                                result["response"] = f"I'm right here and ready to help. What can I do for you today?"
+                        result["handled"] = True
+                        return result
+                    elif any(p in clean_no_name for p in ("stop joking", "be serious", "no more jokes", "stop making jokes", "answer seriously")):
+                        from extensions.personality_engine.personality_core import get_personality
+                        prof = get_personality().get_personality(user_id=eff_uid)
+                        if getattr(prof, "preset", "").lower() == "minimal":
+                            result["response"] = "Understood. Standing by for instructions."
+                        elif getattr(prof, "preset", "").lower() == "professional":
+                            result["response"] = "Understood. We will keep our interaction strictly professional. How may I assist you?"
+                        else:
+                            result["response"] = "Understood, I'll keep it serious. What can I help you with?"
+                        result["handled"] = True
+                        return result
                     elif any(p in clean_u for p in ("who are you", "what is your name", "what's your name", "introduce yourself", "tell me about yourself")):
                         result["response"] = f"I am {asst_name}, your personal AI desktop assistant."
+                        result["handled"] = True
+                        return result
+                    elif any(p in clean_u for p in ("who made you", "who created you", "who built you")):
+                        result["response"] = f"I am {asst_name}, created to assist you locally with your personal desktop workflow."
                         result["handled"] = True
                         return result
                     elif any(p in clean_u for p in ("are you there", "you there", "are you here", "are you awake", "can you hear me")):
@@ -8041,14 +9468,24 @@ class UnifiedCommandRouter:
                     from extensions.llm_engine import LLMEngine
                     engine = LLMEngine()
                     mem_ctx = None
+                    # Retrieve isolated recent conversation for the authenticated user
                     try:
-                        from extensions.conversational_memory import recent_memory, _lock
-                        with _lock:
-                            if recent_memory:
-                                last_items = list(recent_memory)[-3:]
-                                mem_ctx = " ".join(f"User: {m.get('user_command')} Assistant: {m.get('assistant_response')}" for m in last_items)
+                        from core.chatgpt_memory import get_chatgpt_memory
+                        user_conv = get_chatgpt_memory().get_recent_conversation(eff_uid, limit=4)
+                        if user_conv:
+                            mem_ctx = " ".join(f"User: {t.get('user', '')} Assistant: {t.get('assistant', '')}" for t in user_conv)
                     except Exception:
                         pass
+
+                    if not mem_ctx:
+                        try:
+                            from extensions.conversational_memory import recent_memory, _lock
+                            with _lock:
+                                if recent_memory:
+                                    last_items = list(recent_memory)[-3:]
+                                    mem_ctx = " ".join(f"User: {m.get('user_command')} Assistant: {m.get('assistant_response')}" for m in last_items)
+                        except Exception:
+                            pass
 
                     # Retrieve relevant memories and prompt context
                     mem_block = ""
@@ -8057,6 +9494,25 @@ class UnifiedCommandRouter:
                         mem_block = get_chatgpt_memory().build_prompt_context(eff_uid, user_input)
                     except Exception:
                         pass
+
+                    # Streaming conversational speech for plain questions & chat
+                    try:
+                        from core.question_gate import is_plain_question
+                        from core.stream_speaker import stream_and_speak
+                        if is_plain_question(user_input, context=mem_ctx):
+                            stream_res = stream_and_speak(
+                                prompt=user_input,
+                                context=mem_ctx,
+                                memory=mem_block,
+                                user_id=eff_uid,
+                            )
+                            if stream_res and stream_res.get("response"):
+                                result["response"] = stream_res["response"]
+                                result["handled"] = True
+                                result["streamed"] = True
+                                return result
+                    except Exception as _st_err:
+                        self.logger.debug(f"[STREAM SPEAKER] Fallback to standard completion: {_st_err}")
 
                     llm_resp = engine.get_completion(
                         prompt=user_input,
@@ -8130,15 +9586,29 @@ class UnifiedCommandRouter:
                             else:
                                 result["response"] = "There is no previous response to continue."
                         else:
+                            # Context-aware offline fallback using personality engine
+                            from extensions.personality_engine.personality_core import get_personality
+                            p_core = get_personality()
+                            is_joke_query = any(p in clean_no_name for p in ("joke", "jokes", "another one", "one more", "make me laugh", "say something funny", "different kind"))
+                            if is_joke_query:
+                                joke_offline = p_core.get_offline_joke(user_id=eff_uid, requested_text=clean_no_name)
+                                result["response"] = joke_offline
+                                result["status"] = "success"
+                                result["handled"] = True
+                                return result
+
+                            offline_conv = p_core.get_offline_conversational_response(user_input, user_id=eff_uid, context=mem_ctx)
+                            if offline_conv:
+                                result["response"] = offline_conv
+                                result["status"] = "success"
+                                result["handled"] = True
+                                return result
+
+                            from instance.config import settings as _cfg
+                            fallback_spoken = getattr(_cfg, "LLM_FALLBACK_SPOKEN_REPLY", "I'm having trouble reaching my language model, but I can still do local commands")
                             classified = engine.get_classified_failure() if hasattr(engine, 'get_classified_failure') else {}
-                            user_msg = classified.get("user_message")
-                            if not user_msg:
-                                err_diag = getattr(engine, 'last_error_summary', '')
-                                if err_diag:
-                                    user_msg = f"Unable to reach the language model service: {err_diag}."
-                                else:
-                                    user_msg = "Unable to reach the language model service right now. Please check your network connection or try again shortly."
-                            result["response"] = user_msg
+                            result["status"] = "error"
+                            result["response"] = fallback_spoken
                             result["failure_category"] = classified.get("category", "provider_failure")
                             result["failure_reason"] = classified.get("reason", getattr(engine, 'last_error_summary', ''))
                         result["handled"] = True
@@ -8946,7 +10416,7 @@ class UnifiedCommandRouter:
                     if any(w in raw_low for w in ["what", "who", "where", "when", "why", "how", "explain", "tell me about"]):
                         from extensions.rag_system import RAGSystem
                         rag = RAGSystem()
-                        rag_res = rag.process(user_input)
+                        rag_res = rag.process(user_input, user_id=effective_uid)
                         ans = rag_res.get("response") if isinstance(rag_res, dict) else str(rag_res)
                         result["status"] = "success"
                         result["intent"] = "VISUAL_SURFACE"

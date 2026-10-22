@@ -310,9 +310,11 @@ class ConfigurationService:
                 # Normalize volume if given as 0-100 percentage
                 vol = vol_raw / 100.0 if vol_raw > 1.0 else vol_raw
 
+                prov = self.get_preference(user_id, "voice_provider", self.get_preference(user_id, "assistant_voice_provider", None))
+
                 # Apply profile to TTS engine
                 from legacy.tts import apply_voice_profile
-                apply_voice_profile(voice_id=vid if vid else None, rate=rate, volume=vol, user_id=user_id)
+                apply_voice_profile(voice_id=vid if vid else None, rate=rate, volume=vol, user_id=user_id, provider=prov)
 
                 # Sync with TTSBackendManager
                 from extensions.system.tts_backend import get_tts_backend_manager

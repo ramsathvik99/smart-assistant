@@ -49,11 +49,13 @@ class EnvironmentSnapshot:
     open_documents: List[Dict[str, Any]] = field(default_factory=list)
     active_document: Optional[Dict[str, Any]] = None
     recent_documents: List[str] = field(default_factory=list)
+    browser_state: Optional[Dict[str, Any]] = None
     observed_categories: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert snapshot to a clean dictionary representation."""
         d = asdict(self)
+        d["browser_state"] = self.browser_state
         # Flatten common keys for direct compatibility with existing observation consumers
         d["caps_lock"] = self.toggle_keys.get("caps_lock")
         d["num_lock"] = self.toggle_keys.get("num_lock")
@@ -179,6 +181,13 @@ def select_relevant_categories(
         w in text for w in ["pdf", "document", "summarize", "big picture", "compare", "read to me", "read this", "read aloud", "read these"]
     ):
         categories.add("document")
+        categories.add("window")
+
+    # 11. Browser Observation
+    if intent in ("BROWSER_OPERATIONS", "RAG_SEARCH") or any(
+        w in text for w in ["browser", "webpage", "website", "url", "inspect page", "search web", "google", "chrome", "edge"]
+    ) or (target_hint and (target_hint.startswith("http://") or target_hint.startswith("https://"))):
+        categories.add("browser")
         categories.add("window")
 
     # Personal, informational, reminder or conversational intents do NOT observe or verify OS desktop windows
@@ -471,6 +480,20 @@ def observe_environment(
                     "document_type": ext,
                     "application": snapshot.active_application or "viewer",
                 }
+
+    # ── 11. Browser Observation ──────────────────────────────────────────────
+    if "browser" in categories:
+        try:
+            b_state = {}
+            if snapshot.active_application in ("chrome", "msedge", "firefox", "brave", "browser"):
+                b_state["active_browser"] = snapshot.active_application
+                b_state["window_title"] = snapshot.foreground_window_title
+            if target_file and (str(target_file).startswith("http://") or str(target_file).startswith("https://")):
+                from modules.browser.browser_controller import inspect_web_page
+                b_state["target_inspection"] = inspect_web_page(str(target_file), include_accessibility=False, timeout_ms=3000)
+            snapshot.browser_state = b_state if b_state else {"active_browser": None}
+        except Exception:
+            snapshot.browser_state = {"active_browser": None}
 
     return snapshot
 
@@ -778,6 +801,15 @@ def compare_snapshots(
         changes.append("BRIGHTNESS_CHANGED")
         details["system_brightness"] = {"transition": f"brightness {before.brightness} -> brightness {after.brightness}", "before": before.brightness, "after": after.brightness}
         summaries.append(f"Brightness changed from {before.brightness}% to {after.brightness}%")
+
+    # 13. Browser Page / Navigation Changes
+    if before.browser_state and after.browser_state:
+        b_target = (before.browser_state.get("target_inspection") or {}).get("final_url")
+        a_target = (after.browser_state.get("target_inspection") or {}).get("final_url")
+        if a_target and b_target != a_target:
+            changes.append("BROWSER_PAGE_CHANGED")
+            details["browser"] = {"before_url": b_target, "after_url": a_target}
+            summaries.append(f"Browser page changed to '{a_target}'")
 
     diff.has_changes = len(changes) > 0
     diff.changes = changes

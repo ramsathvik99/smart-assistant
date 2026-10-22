@@ -526,6 +526,481 @@ class UniversalAppController:
             "interaction_methods": ["ui_automation", "keyboard_navigation"] if is_running else ["app_launch"],
         }
 
+    # ── 4b. STATIC ELECTRON / APPLICATION INTROSPECTION ─────────────────────
+
+    def inspect_electron_app(self, app_path_or_name: str) -> Dict[str, Any]:
+        """
+        Safely inspects an installed Windows desktop application to determine if it is
+        an Electron-based application, inspecting its ASAR resources, package metadata,
+        and Electron binary fuses statically without executing untrusted scripts.
+        """
+        resolved_exe: Optional[str] = None
+        target_name = app_path_or_name.strip()
+
+        # 1. Resolve path if provided directly
+        if os.path.exists(target_name):
+            if os.path.isfile(target_name):
+                resolved_exe = os.path.abspath(target_name)
+            elif os.path.isdir(target_name):
+                for f in os.listdir(target_name):
+                    if f.lower().endswith(".exe"):
+                        resolved_exe = os.path.abspath(os.path.join(target_name, f))
+                        break
+
+        # 2. If not a direct file, check running processes
+        if not resolved_exe:
+            try:
+                for p in psutil.process_iter(["name", "exe"]):
+                    p_name = (p.info.get("name") or "").lower()
+                    if target_name.lower() in p_name:
+                        resolved_exe = p.info.get("exe")
+                        if resolved_exe and os.path.exists(resolved_exe):
+                            break
+            except Exception:
+                pass
+
+        # 3. Check common installation directories
+        if not resolved_exe:
+            cand_dirs = [
+                os.environ.get("LOCALAPPDATA", ""),
+                os.environ.get("PROGRAMFILES", ""),
+                os.environ.get("PROGRAMFILES(X86)", ""),
+            ]
+            for c_dir in cand_dirs:
+                if not c_dir or not os.path.exists(c_dir):
+                    continue
+                # Common subpaths
+                for sub in [target_name, f"Programs\\{target_name}"]:
+                    full_p = os.path.join(c_dir, sub)
+                    if os.path.exists(full_p):
+                        if os.path.isdir(full_p):
+                            for f in os.listdir(full_p):
+                                if f.lower().endswith(".exe"):
+                                    resolved_exe = os.path.join(full_p, f)
+                                    break
+                        elif full_p.lower().endswith(".exe"):
+                            resolved_exe = full_p
+                    if resolved_exe:
+                        break
+                if resolved_exe:
+                    break
+
+        if not resolved_exe or not os.path.exists(resolved_exe):
+            return {
+                "success": False,
+                "is_electron": False,
+                "app_name": target_name,
+                "message": f"Could not locate an executable for '{target_name}' to inspect."
+            }
+
+        app_dir = os.path.dirname(resolved_exe) if resolved_exe else (target_name if os.path.isdir(target_name) else "")
+        resources_dir = os.path.join(app_dir, "resources")
+        if not os.path.exists(resources_dir) and os.path.isdir(app_dir):
+            # Check immediate subdirectories for resources (e.g. VS Code version folders)
+            for sub in os.listdir(app_dir):
+                sub_p = os.path.join(app_dir, sub, "resources")
+                if os.path.exists(sub_p):
+                    resources_dir = sub_p
+                    break
+
+        app_asar = os.path.join(resources_dir, "app.asar") if resources_dir else ""
+        electron_asar = os.path.join(resources_dir, "electron.asar") if resources_dir else ""
+
+        is_electron = False
+        asar_info = {}
+
+        if (app_asar and os.path.exists(app_asar)) or (electron_asar and os.path.exists(electron_asar)):
+            is_electron = True
+            if os.path.exists(app_asar):
+                try:
+                    st = os.stat(app_asar)
+                    asar_info["app_asar"] = {
+                        "path": app_asar,
+                        "size_bytes": st.st_size,
+                        "modified": st.st_mtime,
+                        "present": True
+                    }
+                except Exception:
+                    asar_info["app_asar"] = {"present": True}
+        elif resources_dir and os.path.exists(os.path.join(resources_dir, "app")):
+            is_electron = True
+            asar_info["app_folder"] = {
+                "path": os.path.join(resources_dir, "app"),
+                "unpacked": True,
+                "present": True
+            }
+
+        # Full Electron Fuse Wire Inspection (REA Port: src/electron/ElectronFuseReader.ts & electronFuses.ts)
+        fuse_report = self.inspect_electron_fuses(resolved_exe) if resolved_exe else {}
+        fuses_found: Dict[str, Any] = {}
+        if fuse_report.get("classification") == "CONFIRMED":
+            is_electron = True
+            fuses_found = fuse_report.get("fuses_dict", {})
+
+        # Look for package.json in resources or app_dir
+        pkg_meta = {}
+        pkg_json_path = os.path.join(resources_dir, "app", "package.json")
+        if not os.path.exists(pkg_json_path):
+            pkg_json_path = os.path.join(app_dir, "package.json")
+        if os.path.exists(pkg_json_path):
+            try:
+                import json
+                with open(pkg_json_path, "r", encoding="utf-8", errors="ignore") as jf:
+                    data = json.load(jf)
+                    pkg_meta = {
+                        "name": data.get("name"),
+                        "version": data.get("version"),
+                        "description": data.get("description"),
+                        "main": data.get("main"),
+                    }
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "is_electron": is_electron,
+            "app_name": target_name,
+            "executable_path": resolved_exe,
+            "resources_directory": resources_dir if os.path.exists(resources_dir) else None,
+            "asar_resources": asar_info,
+            "package_metadata": pkg_meta if pkg_meta else None,
+            "electron_fuses": fuses_found if fuses_found else None,
+            "electron_fuse_report": fuse_report if fuse_report.get("success") else None,
+            "limitations": [
+                "Static inspection does not grant arbitrary control over internal application state.",
+                "UI Automation and accessibility remain the authoritative runtime interaction mechanisms."
+            ],
+            "message": f"Application '{target_name}' is {'an Electron application' if is_electron else 'a standard Windows native/packaged application'}."
+        }
+
+    # ── 4c. STANDALONE ELECTRON SECURITY FUSE INSPECTOR ──────────────────────
+
+    def inspect_electron_fuses(self, executable_path: str) -> Dict[str, Any]:
+        """
+        Inspects the binary fuse wire stored in an Electron executable.
+        
+        Ported directly from REA (src/electron/ElectronFuseReader.ts & src/domain/electron/electronFuses.ts).
+        Preserves all REA invariants:
+        - Sentinel search: 32-byte ASCII sentinel 'dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX'.
+        - Chunked 256 KiB streaming window with 31-byte carry-over to detect straddling sentinels.
+        - Container recognition: verifies Windows PE (MZ + PE offset), Linux ELF, or Mach-O magic.
+        - Quad-state classification: CONFIRMED, ABSENT, UNSUPPORTED, INCONCLUSIVE.
+        - Decodes all 9 Version 1 fuses and derives runtime implications.
+        - Enforces maximum file budget of 1 GiB.
+        - Zero execution: strictly static binary introspection without launching or modifying the target.
+        """
+        import struct
+        import hashlib
+
+        ELECTRON_FUSE_SENTINEL = b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX"
+        MAX_FILE_BYTES = 1024 * 1024 * 1024  # 1 GiB limit
+        CHUNK_BYTES = 256 * 1024             # 256 KiB chunk window
+
+        FUSE_V1_NAMES = [
+            "RunAsNode",
+            "EnableCookieEncryption",
+            "EnableNodeOptionsEnvironmentVariable",
+            "EnableNodeCliInspectArguments",
+            "EnableEmbeddedAsarIntegrityValidation",
+            "OnlyLoadAppFromAsar",
+            "LoadBrowserProcessSpecificV8Snapshot",
+            "GrantFileProtocolExtraPrivileges",
+            "WasmTrapHandlers",
+        ]
+
+        LIMITATIONS = [
+            "Fuse state does not prove the application enables Inspector through other means, such as app.commandLine or a remote-debugging switch in application code.",
+            "A missing sentinel means fuse state is unknown, not that every fuse is disabled."
+        ]
+
+        if not executable_path or not isinstance(executable_path, str):
+            return {
+                "success": False,
+                "status": "error",
+                "classification": "UNSUPPORTED",
+                "message": "Invalid or missing executable path for fuse inspection."
+            }
+
+        abs_path = os.path.abspath(executable_path.strip(' "\''))
+
+        if not os.path.exists(abs_path):
+            return {
+                "success": False,
+                "status": "error",
+                "classification": "UNSUPPORTED",
+                "message": f"Executable not found: {abs_path}"
+            }
+
+        if not os.path.isfile(abs_path):
+            return {
+                "success": False,
+                "status": "error",
+                "classification": "UNSUPPORTED",
+                "message": f"Expected a regular file: {abs_path}"
+            }
+
+        file_size = os.path.getsize(abs_path)
+        if file_size > MAX_FILE_BYTES:
+            return {
+                "success": False,
+                "status": "error",
+                "classification": "UNSUPPORTED",
+                "message": f"Selected file exceeds maximum limit of 1 GiB ({file_size} bytes)."
+            }
+
+        # Check binary container format (PE, ELF, Mach-O)
+        container_format = "unknown"
+        try:
+            with open(abs_path, "rb") as f:
+                head = f.read(64)
+            if len(head) >= 2 and head[0:2] == b"MZ":
+                # PE check: verify offset at 0x3C points to PE\0\0
+                if len(head) >= 64:
+                    pe_offset = struct.unpack_from("<I", head, 0x3C)[0]
+                    if 64 <= pe_offset <= file_size - 4:
+                        with open(abs_path, "rb") as f:
+                            f.seek(pe_offset)
+                            sig = f.read(4)
+                        if sig == b"PE\x00\x00":
+                            container_format = "pe"
+            elif len(head) >= 4 and head[0:4] == b"\x7fELF":
+                container_format = "elf"
+            elif len(head) >= 4 and (
+                head[0:4] in (b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe")
+                or head[0:4] in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+            ):
+                container_format = "mach-o"
+        except Exception:
+            pass
+
+        if container_format == "unknown":
+            return {
+                "success": False,
+                "status": "error",
+                "classification": "UNSUPPORTED",
+                "artifact": {
+                    "path": abs_path,
+                    "bytes": file_size,
+                    "format": "unsupported"
+                },
+                "limitations": LIMITATIONS,
+                "message": f"Selected artifact '{os.path.basename(abs_path)}' is not a recognized Windows PE, Linux ELF, or Mach-O executable."
+            }
+
+        # Scan for sentinel using sliding window with carry-over
+        sentinel_len = len(ELECTRON_FUSE_SENTINEL)
+        carry_len = sentinel_len - 1
+        carry = b""
+        sentinel_offsets: List[int] = []
+        hasher = hashlib.sha256()
+
+        position = 0
+        try:
+            with open(abs_path, "rb") as bf:
+                while position < file_size:
+                    chunk = bf.read(CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+                    window = carry + chunk
+                    window_start = position - len(carry)
+
+                    from_pos = 0
+                    while from_pos <= len(window) - sentinel_len:
+                        idx = window.find(ELECTRON_FUSE_SENTINEL, from_pos)
+                        if idx < 0:
+                            break
+                        hit_offset = window_start + idx
+                        if hit_offset not in sentinel_offsets:
+                            sentinel_offsets.append(hit_offset)
+                            if len(sentinel_offsets) >= 32:
+                                break
+                        from_pos = idx + 1
+
+                    carry = window[-carry_len:] if len(window) >= carry_len else window
+                    position += len(chunk)
+        except Exception as read_err:
+            return {
+                "success": False,
+                "status": "error",
+                "classification": "INCONCLUSIVE",
+                "message": f"Error scanning executable: {read_err}"
+            }
+
+        file_sha = hasher.hexdigest()
+        sentinel_count = len(sentinel_offsets)
+
+        # Classification: ABSENT
+        if sentinel_count == 0:
+            return {
+                "success": True,
+                "status": "success",
+                "classification": "ABSENT",
+                "artifact": {
+                    "path": abs_path,
+                    "sha256": file_sha,
+                    "bytes": file_size,
+                    "format": container_format
+                },
+                "sentinel_count": 0,
+                "fuses": [],
+                "fuses_dict": {},
+                "runtime_implications": [],
+                "limitations": LIMITATIONS + [
+                    f"Executable contains no Electron fuse sentinel; fuse state is unknown, not disabled."
+                ],
+                "message": f"Executable '{os.path.basename(abs_path)}' contains 0 Electron fuse sentinels (ABSENT). Not an Electron binary or fuses were not wired."
+            }
+
+        # Multiple sentinels or truncated: evaluate wire at first sentinel
+        sentinel_offset = sentinel_offsets[0]
+        wire_start = sentinel_offset + sentinel_len
+        available_wire = file_size - wire_start
+
+        if available_wire < 2:
+            return {
+                "success": True,
+                "status": "success",
+                "classification": "INCONCLUSIVE",
+                "artifact": {
+                    "path": abs_path,
+                    "sha256": file_sha,
+                    "bytes": file_size,
+                    "format": container_format
+                },
+                "sentinel_count": sentinel_count,
+                "sentinel_offset": sentinel_offset,
+                "limitations": LIMITATIONS + [
+                    f"Electron fuse wire at offset {sentinel_offset} is truncated before wire version."
+                ],
+                "message": f"Electron fuse wire at offset {sentinel_offset} is truncated (INCONCLUSIVE)."
+            }
+
+        try:
+            with open(abs_path, "rb") as bf:
+                bf.seek(wire_start)
+                header = bf.read(2)
+                wire_version = header[0]
+                declared_length = header[1]
+
+                fuses_bytes = bf.read(min(declared_length, file_size - (wire_start + 2)))
+        except Exception as wire_err:
+            return {
+                "success": False,
+                "status": "error",
+                "classification": "INCONCLUSIVE",
+                "message": f"Failed reading fuse wire: {wire_err}"
+            }
+
+        if len(fuses_bytes) < declared_length:
+            return {
+                "success": True,
+                "status": "success",
+                "classification": "INCONCLUSIVE",
+                "artifact": {
+                    "path": abs_path,
+                    "sha256": file_sha,
+                    "bytes": file_size,
+                    "format": container_format
+                },
+                "sentinel_count": sentinel_count,
+                "wire_version": wire_version,
+                "declared_length": declared_length,
+                "limitations": LIMITATIONS + [
+                    f"Electron fuse wire at offset {sentinel_offset} is truncated ({len(fuses_bytes)} of {declared_length} bytes read)."
+                ],
+                "message": f"Electron fuse wire at offset {sentinel_offset} is incomplete (INCONCLUSIVE)."
+            }
+
+        # Decode fuse bytes
+        fuses_list = []
+        fuses_dict = {}
+
+        for idx, raw_b in enumerate(fuses_bytes):
+            if raw_b == 0x30:
+                state_str = "disabled"
+            elif raw_b == 0x31:
+                state_str = "enabled"
+            elif raw_b == 0x72:
+                state_str = "removed"
+            else:
+                state_str = "unknown"
+
+            fuse_name = FUSE_V1_NAMES[idx] if (wire_version == 1 and idx < len(FUSE_V1_NAMES)) else None
+            fuses_list.append({
+                "index": idx,
+                "name": fuse_name,
+                "state": state_str,
+                "raw_byte": raw_b
+            })
+            if fuse_name:
+                key_name = re.sub(r'(?<!^)(?=[A-Z])', '_', fuse_name).lower()
+                fuses_dict[key_name] = state_str
+
+        # Derive runtime implications (REA domain/electron/electronFuses.ts)
+        implications = []
+        # Index 0: RunAsNode
+        run_as_node_fuse = next((f for f in fuses_list if f["index"] == 0), None)
+        if run_as_node_fuse:
+            implications.append({
+                "subject": "electron_run_as_node",
+                "fuse_index": 0,
+                "outcome": "honored" if run_as_node_fuse["state"] == "enabled" else "not_honored"
+            })
+        # Index 3: EnableNodeCliInspectArguments
+        inspect_fuse = next((f for f in fuses_list if f["index"] == 3), None)
+        if inspect_fuse:
+            implications.append({
+                "subject": "node_cli_inspect_arguments",
+                "fuse_index": 3,
+                "outcome": "honored" if inspect_fuse["state"] == "enabled" else "not_honored"
+            })
+        # Index 4: EnableEmbeddedAsarIntegrityValidation
+        asar_integ_fuse = next((f for f in fuses_list if f["index"] == 4), None)
+        if asar_integ_fuse:
+            implications.append({
+                "subject": "embedded_asar_integrity_validation",
+                "fuse_index": 4,
+                "outcome": "enforced" if asar_integ_fuse["state"] == "enabled" else "not_enforced"
+            })
+        # Index 5: OnlyLoadAppFromAsar
+        only_asar_fuse = next((f for f in fuses_list if f["index"] == 5), None)
+        if only_asar_fuse:
+            implications.append({
+                "subject": "only_load_app_from_asar",
+                "fuse_index": 5,
+                "outcome": "restricted_to_app_asar" if only_asar_fuse["state"] == "enabled" else "not_restricted_to_app_asar"
+            })
+
+        speech_parts = [
+            f"Electron binary fuses for '{os.path.basename(abs_path)}' (CONFIRMED, wire v{wire_version}): "
+        ]
+        inspect_state = next((f["state"] for f in fuses_list if f["index"] == 3), "unknown")
+        run_node_state = next((f["state"] for f in fuses_list if f["index"] == 0), "unknown")
+        speech_parts.append(f"NodeCliInspect: {inspect_state}, RunAsNode: {run_node_state}.")
+
+        return {
+            "success": True,
+            "status": "success",
+            "classification": "CONFIRMED",
+            "artifact": {
+                "path": abs_path,
+                "sha256": file_sha,
+                "bytes": file_size,
+                "format": container_format
+            },
+            "sentinel_count": sentinel_count,
+            "sentinel_offset": sentinel_offset,
+            "wire_version": wire_version,
+            "declared_length": declared_length,
+            "fuses": fuses_list,
+            "fuses_dict": fuses_dict,
+            "runtime_implications": implications,
+            "limitations": LIMITATIONS,
+            "message": "".join(speech_parts)
+        }
+
+
     # ── 5. DISPATCH TO ADAPTERS OR UNIVERSAL ENGINE ─────────────────────────
 
     def execute_app_action(

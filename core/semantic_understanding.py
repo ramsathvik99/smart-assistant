@@ -1191,6 +1191,10 @@ class SemanticUnderstandingEngine:
         if t in stopword_acronyms:
             return None
 
+        # URLs, links, domain names, and javascript schemes are websites, not desktop applications
+        if t.startswith(("http://", "https://", "www.", "javascript:", "javascript(")) or "://" in t or ("." in t and "/" in t) or any(t.endswith(ext) for ext in (".com", ".org", ".net", ".edu", ".io", ".gov", ".asp", ".html", ".php")):
+            return None
+
         # Ordinals and conversational referents are not applications
         if t in ("one", "it", "that", "this", "link", "page", "file", "folder", "first", "second", "third", "fourth", "fifth", "last", "1st", "2nd", "3rd", "4th", "5th") or re.search(r'\b(?:first|second|third|fourth|fifth|last|1st|2nd|3rd|4th|5th)\s+(?:one|item|link|file|tab)\b', t):
             return None
@@ -1299,8 +1303,8 @@ class SemanticUnderstandingEngine:
         if t in mapping:
             return mapping[t]
 
-        # Reject generic file, artifact, or media terms from being treated as applications
-        if any(w in t.split() for w in ("file", "files", "document", "documents", "doc", "pdf", "docx", "pptx", "xlsx", "report", "presentation", "sheet", "saved", "link", "result", "results", "source", "sources", "item", "copy")):
+        # Reject generic file, artifact, media, script, or abstract terms from being treated as applications
+        if any(w in t.split() for w in ("file", "files", "document", "documents", "doc", "pdf", "docx", "pptx", "xlsx", "report", "presentation", "sheet", "saved", "link", "result", "results", "source", "sources", "item", "copy", "script", "scripts", "code", "program", "function", "algorithm", "marathon", "business")):
             return None
 
         # Plausible generic desktop application
@@ -2427,7 +2431,7 @@ class SemanticUnderstandingEngine:
             m_want = re.search(r'^(?:i\s+want|i\s+need)\s+([a-zA-Z0-9_\-\s]+?)(?:\s+(?:running|open|up|now))?$', norm)
             if m_want:
                 app_launch_cand = m_want.group(1).strip()
-        if not app_launch_cand:
+        if not app_launch_cand and not re.search(r'^(?:how\s+(?:to|do|can|should|would|is|are|did|does)|why\s+(?:did|is|are|do|would)|what\s+(?:is|are|was|were|does|did|happens)|where\s+(?:is|can|do))\b', norm):
             m_direct = re.search(r'\b(?:open|launch|start|run)\s+(.+)', norm)
             if m_direct:
                 app_launch_cand = m_direct.group(1).strip()
@@ -2766,7 +2770,7 @@ class SemanticUnderstandingEngine:
         """
         raw_text = user_input.strip()
         text_low = raw_text.lower()
-        clean_text = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+|would\s+you\s+|friday\s+|trevon\s+|hey\s+friday\s+|hey\s+trevon\s+)+', '', text_low).strip()
+        clean_text = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+|would\s+you\s+|friday\s+|trevon\s+|hey\s+friday\s+|hey\s+trevon\s+|and\s+|nd\s+)+', '', text_low).strip()
         clean_low = clean_text.rstrip('.?!,').strip()
         norm = clean_low
 
@@ -3267,12 +3271,57 @@ class SemanticUnderstandingEngine:
             )
 
         # --------------------------------------------------------------------
+        # 0c2b. Jokes, Humor & Conversational Entertainment Follow-ups
+        # --------------------------------------------------------------------
+        joke_patterns = [
+            r'\b(?:tell\s+me|give\s+me|say)\s+(?:a|another|some\s+other|a\s+different)\s+jokes?\b',
+            r'\b(?:tell\s+me\s+a\s+joke|make\s+me\s+laugh|say\s+something\s+funny)\b',
+            r'\b(?:tell\s+any\s+other\s+jokes?|another\s+joke|some\s+other\s+joke|different\s+joke)\b',
+            r'^\s*(?:another\s+one|one\s+more|tell\s+me\s+another|another|next\s+one)\s*[\.!\?]?\s*$',
+            r'^\s*(?:that\s+one\s+was\s+bad|that\s+was\s+bad|not\s+funny|tell\s+me\s+a\s+different\s+kind|different\s+kind)\s*[\.!\?]?\s*$',
+        ]
+        stop_joke_patterns = [
+            r'\b(?:stop\s+joking|no\s+more\s+jokes|be\s+serious|answer\s+seriously|stop\s+making\s+jokes)\b',
+        ]
+        if any(re.search(p, clean_low) for p in stop_joke_patterns) or clean_low in ("stop joking", "be serious", "answer seriously"):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User requests to stop joking and switch to serious tone.",
+                intent="GENERAL_CONVERSATION",
+                action="stop_joking",
+                action_required=False,
+                confidence=0.99
+            )
+
+        if any(re.search(p, clean_low) for p in joke_patterns) or clean_low in ("another one", "one more", "different kind", "tell me another"):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User is requesting casual entertainment/joke.",
+                intent="GENERAL_CONVERSATION",
+                action="joke",
+                action_required=False,
+                confidence=0.98
+            )
+
+        # Casual status chat: "what are you doing?"
+        if re.search(r'\b(?:what\s+are\s+you\s+doing|what\'?re\s+you\s+doing|what\s+are\s+you\s+up\s+to|what\'?s\s+up)\b', clean_low):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User is making casual conversational inquiry about assistant status.",
+                intent="GENERAL_CONVERSATION",
+                action="status_chat",
+                action_required=False,
+                confidence=0.98
+            )
+
+        # --------------------------------------------------------------------
         # 0c3. Contextual Content Acquisition & Research
         # --------------------------------------------------------------------
-        if any(re.search(p, text_low) for p in [
+        is_joke_or_chat = bool(re.search(r'\b(?:jokes?|laugh|funny)\b', text_low)) or clean_low in ("another one", "one more", "different kind")
+        if not is_joke_or_chat and any(re.search(p, text_low) for p in [
             r'\b(?:gather|collect|find|research)\s+(?:all\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s+(?:information|info|facts|details)\b',
             r'\b(?:gather|collect|find|search\s+for|look\s+up|get)\s+(?:some\s+|all\s+(?:the\s+)?|any\s+|the\s+)?information\s+(?:about|on|for)\s+(.+)',
-            r'\b(?:tell\s+me|find\s+out)\s+(?:something|some\s+information|all\s+information)\s+about\s+(.+)',
+            r'\b(?:tell\s+me|find\s+out)\s+(?:something\s+|some\s+information\s+|all\s+information\s+)?about\s+(.+)',
             r'\bresearch\s+(?:normalization\s+in\s+dbms|this\s+topic|this\s+concept|.+)',
             r'\bget\s+(?:the\s+)?code\s+(?:for|of)\s+(.+)',
             r'\bget\s+(?:the\s+)?(?:python|javascript|cpp|c\+\+|java)\s+implementation(?:\s+(?:for|of)\s+(.+))?',
@@ -3816,10 +3865,31 @@ class SemanticUnderstandingEngine:
             "how are you doing", "how's it going", "how are things", "what's up",
             "whats up", "thanks", "thank you", "thank you so much", "many thanks"
         )
-        if norm in conv_identity_phrases or clean_low in conv_identity_phrases or text_low in conv_identity_phrases:
+        is_conv = (
+            norm in conv_identity_phrases
+            or clean_low in conv_identity_phrases
+            or text_low in conv_identity_phrases
+        )
+        if not is_conv:
+            try:
+                from core.unified_command_router import (
+                    is_conversational_general_query,
+                    is_capability_query,
+                    is_stable_knowledge_question,
+                )
+                if (
+                    is_conversational_general_query(raw_text)
+                    or is_capability_query(raw_text)
+                    or is_stable_knowledge_question(raw_text)
+                ):
+                    is_conv = True
+            except Exception:
+                pass
+
+        if is_conv:
             return SemanticIntentRepresentation(
                 user_input=raw_text,
-                interpreted_meaning="Conversational greeting, small talk, or identity inquiry.",
+                interpreted_meaning="Conversational greeting, small talk, identity inquiry, or knowledge query.",
                 intent="GENERAL_CONVERSATION",
                 request_type="CONVERSATION",
                 action_required=False,
@@ -3847,33 +3917,49 @@ class SemanticUnderstandingEngine:
                     last_turn = dialogue_state.turns[-1]
                     ctx_summary["previous_request"] = getattr(last_turn, "user_input", "")
 
-            llm_result = llm.semantic_reasoning(raw_text, structured_context=ctx_summary, timeout_budget=4.5)
-            if llm_result and isinstance(llm_result, dict):
+            llm_result = llm.semantic_reasoning(raw_text, structured_context=ctx_summary, timeout_budget=4.5, user_id=user_id)
+            if llm_result and isinstance(llm_result, dict) and llm_result.get("source") == "semantic_llm":
                 req_t = llm_result.get("request_type", "INSTRUCTION")
-                act_req = bool(llm_result.get("action_required", True))
+                # The semantic contract uses requires_action; accept the legacy
+                # action_required spelling but never invent a default.
+                if "requires_action" in llm_result:
+                    act_req = bool(llm_result.get("requires_action"))
+                else:
+                    act_req = bool(llm_result.get("action_required", False))
                 goal = llm_result.get("goal") or raw_text
-                caps = llm_result.get("capabilities", [])
-                primary_cap = caps[0] if caps else "AUTO"
+                caps = llm_result.get("capabilities")
+                if not isinstance(caps, list):
+                    caps = []
+                primary_cap = (caps[0] if caps else None) or llm_result.get("capability") or "AUTO"
+                primary_cap = str(primary_cap).strip().upper()
+                if primary_cap not in getattr(llm, "REASONING_CAPABILITIES", [primary_cap]):
+                    primary_cap = "AUTO"
                 params = llm_result.get("parameters", {})
                 refs = llm_result.get("references", {})
+                # Confidence must come from the validated object; a missing or
+                # malformed score means the reasoning pass failed, not "certain".
+                confidence = llm._coerce_confidence(llm_result.get("confidence"))
 
                 # Strict guarantee: Non-action request types must never trigger action
                 if req_t in ("NEGATION", "HYPOTHETICAL", "QUESTION", "EXPLANATION", "CONVERSATION"):
                     act_req = False
 
-                return SemanticIntentRepresentation(
-                    user_input=raw_text,
-                    interpreted_meaning=goal,
-                    intent=primary_cap,
-                    request_type=req_t,
-                    action_required=act_req,
-                    is_negation=(req_t == "NEGATION"),
-                    entities=[{"value": v, "type": k} for k, v in params.items()] if isinstance(params, dict) else [],
-                    references=list(refs.keys()) if isinstance(refs, dict) else [],
-                    resolved_references=refs if isinstance(refs, dict) else {},
-                    target_entity=params.get("application") or params.get("target") or params.get("destination") if isinstance(params, dict) else None,
-                    confidence=float(llm_result.get("confidence", 0.90)),
-                )
+                if confidence is None:
+                    logger.debug("[SEMANTIC_ENGINE] Reasoning object missing confidence; ignoring")
+                else:
+                    return SemanticIntentRepresentation(
+                        user_input=raw_text,
+                        interpreted_meaning=goal,
+                        intent=primary_cap,
+                        request_type=req_t,
+                        action_required=act_req,
+                        is_negation=(req_t == "NEGATION"),
+                        entities=[{"value": v, "type": k} for k, v in params.items()] if isinstance(params, dict) else [],
+                        references=list(refs.keys()) if isinstance(refs, dict) else [],
+                        resolved_references=refs if isinstance(refs, dict) else {},
+                        target_entity=(params.get("application") or params.get("target") or params.get("destination")) if isinstance(params, dict) else None,
+                        confidence=confidence,
+                    )
         except Exception as e:
             logger.debug(f"[SEMANTIC_ENGINE] LLM reasoning fallback skipped: {e}")
 

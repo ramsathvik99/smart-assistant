@@ -159,6 +159,103 @@ class FastPathProcessor:
             return cls._build_result("DATE_QUERY", resp, dialogue_mgr)
 
         # ---------------------------------------------------------------------
+        # 1.1b Weather Queries (Skips LLM, calls Open-Meteo API directly)
+        # ---------------------------------------------------------------------
+        weather_patterns = (
+            "what's the weather", "whats the weather", "what is the weather",
+            "how's the weather", "hows the weather", "how is the weather",
+            "weather today", "weather right now", "current weather",
+            "weather outside", "is it raining", "is it going to rain",
+            "will it rain", "temperature outside", "what's the temperature",
+            "whats the temperature", "how hot is it", "how cold is it",
+            "weather forecast", "weather report",
+        )
+        if (norm_low in weather_patterns
+            or any(norm_low.startswith(wp) for wp in ("what's the weather", "whats the weather", "what is the weather", "how's the weather", "hows the weather", "weather in", "weather for"))
+            or re.match(r'^(?:what(?:\'s|\s+is)\s+the\s+weather|how(?:\'s|\s+is)\s+the\s+weather|weather\s+(?:in|for|at)\s+)\b', norm_low)):
+            try:
+                from extensions.weather_engine import get_weather_for_query
+                resp = get_weather_for_query(clean_text)
+                if resp:
+                    return cls._build_result("WEATHER", resp, dialogue_mgr)
+            except Exception:
+                pass  # Fall through to normal pipeline
+
+        # ---------------------------------------------------------------------
+        # 1.2 Volume, Audio Control & Media Fast Path (Deterministic, Zero Latency)
+        # ---------------------------------------------------------------------
+        m_vol = (
+            re.match(r'^(?:set\s+)?volume\s+(?:to\s+)?(\d{1,3})\s*(?:%|percent)?$', norm_low)
+            or re.match(r'^set\s+(?:the\s+)?volume\s+to\s+(\d{1,3})\s*(?:%|percent)?$', norm_low)
+        )
+        if m_vol:
+            lvl = max(0, min(100, int(m_vol.group(1))))
+            try:
+                from modules.system_controller import set_volume
+                set_volume(lvl)
+            except Exception:
+                pass
+            return cls._build_result("DEVICE_CONTROL", f"Volume set to {lvl}%.", dialogue_mgr)
+
+        if norm_low in ("mute", "mute volume", "mute sound", "turn off sound", "silence"):
+            try:
+                from modules.system_controller import set_volume
+                set_volume(0)
+            except Exception:
+                pass
+            return cls._build_result("DEVICE_CONTROL", "Volume muted.", dialogue_mgr)
+
+        if norm_low in ("unmute", "unmute volume", "unmute sound"):
+            try:
+                from modules.system_controller import set_volume
+                set_volume(50)
+            except Exception:
+                pass
+            return cls._build_result("DEVICE_CONTROL", "Volume unmuted.", dialogue_mgr)
+
+        # Media Pause & Resume Fast Path
+        if norm_low in ("pause", "pause music", "pause playback", "pause song", "pause audio", "pause the music"):
+            try:
+                from modules.music.music_controller import get_music_controller
+                get_music_controller().pause()
+            except Exception:
+                pass
+            return cls._build_result("MUSIC", "Music paused.", dialogue_mgr)
+
+        if norm_low in ("resume", "resume music", "resume playback", "unpause", "resume the music", "resume song"):
+            try:
+                from modules.music.music_controller import get_music_controller
+                get_music_controller().resume()
+            except Exception:
+                pass
+            return cls._build_result("MUSIC", "Music resumed.", dialogue_mgr)
+
+        # Music Play Fast Path ("play [song/artist]" → direct music controller)
+        m_play = re.match(r'^play\s+(.+)$', norm_low)
+        if m_play and not any(k in norm_low for k in ("and", "then", "after", "video", "movie", "from", "on spotify", "on youtube")):
+            play_query = m_play.group(1).strip()
+            if play_query and len(play_query) > 1:
+                try:
+                    from modules.music.music_controller import play_music
+                    play_music(play_query)
+                    return cls._build_result("MUSIC", f"Playing {play_query}.", dialogue_mgr)
+                except Exception:
+                    pass  # Fall through to normal pipeline
+
+        # Open Named Installed Application Fast Path
+        m_open = re.match(r'^(?:open|launch|start|bring\s+up)\s+([a-zA-Z0-9\s\.\-_]+)$', norm_low)
+        if m_open and not any(k in norm_low for k in ("and", "then", "after", "document", "folder", "website", "file", "url", "camera")):
+            app_req = m_open.group(1).strip()
+            if app_req in cls.KNOWN_APP_MAPPINGS:
+                cmd_id, display_name = cls.KNOWN_APP_MAPPINGS[app_req]
+                try:
+                    from legacy.actions import open_app
+                    open_app(display_name)
+                    return cls._build_result("OPEN_APPLICATION", f"Opened {display_name}.", dialogue_mgr)
+                except Exception:
+                    pass
+
+        # ---------------------------------------------------------------------
         # 1b. Runtime Capabilities & Registry Query
         # ---------------------------------------------------------------------
         from core.capability_registry import get_capability_registry
@@ -563,9 +660,22 @@ class FastPathProcessor:
         # ---------------------------------------------------------------------
         # 7. Concurrent Task Dashboard & Progress Queries (Section 11 & 19)
         # ---------------------------------------------------------------------
-        # A. What are you doing / Active tasks / Update
+        # A1. Casual "What are you doing?" - only routes to TASK_MANAGEMENT if tasks are actively running
         if low in (
             "what are you doing", "what are you doing?", "what are you doing right now", "what are you doing right now?",
+            "what're you doing", "what're you doing?"
+        ):
+            from core.task_execution_manager import get_task_execution_manager
+            tem = get_task_execution_manager()
+            uid = int(user_id) if str(user_id).isdigit() else 1
+            active_tasks = tem.list_tasks(user_id=uid)
+            if active_tasks:
+                summary = tem.get_active_tasks_summary(user_id=uid)
+                return cls._build_result("TASK_MANAGEMENT", summary, dialogue_mgr)
+            # If no tasks are running, fall through to natural conversational handling
+
+        # A2. Explicit Task Management & Progress Queries
+        if low in (
             "what is running", "what is running?", "whats running", "what's running", "what's running?",
             "what tasks are running", "what tasks are running?", "what task is running", "what task is running?",
             "what is still running", "what is still running?", "what task is still running", "what task is still running?",

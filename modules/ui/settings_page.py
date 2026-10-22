@@ -1399,8 +1399,8 @@ class SettingsPage(QWidget):
 
         # Discover real system voices synchronously
         try:
-            from legacy.tts import enumerate_voices
-            self._settings_all_voices = enumerate_voices()
+            from extensions.system.voice_catalog import get_voice_catalog
+            self._settings_all_voices = get_voice_catalog()
         except Exception as e:
             print(f"[SETTINGS] Failed to enumerate voices: {e}")
             self._settings_all_voices = []
@@ -1468,8 +1468,8 @@ class SettingsPage(QWidget):
 
         if not getattr(self, '_settings_all_voices', None):
             try:
-                from legacy.tts import enumerate_voices
-                self._settings_all_voices = enumerate_voices()
+                from extensions.system.voice_catalog import get_voice_catalog
+                self._settings_all_voices = get_voice_catalog()
             except Exception as e:
                 print(f"[SETTINGS] Failed to enumerate voices: {e}")
                 self._settings_all_voices = []
@@ -1545,7 +1545,13 @@ class SettingsPage(QWidget):
             name_row.addStretch()
             info_box.addLayout(name_row)
 
-            provider_label = "Microsoft SAPI5" if voice_info.get("provider") == "sapi5" else "Microsoft OneCore"
+            prov = voice_info.get("provider", "sapi5")
+            if prov == "neural":
+                provider_label = "Natural"
+            elif prov == "sapi5":
+                provider_label = "Basic Windows voice"
+            else:
+                provider_label = voice_info.get("category", "Basic Windows voice")
             meta_lbl = QLabel(f"{voice_info.get('language', 'English')} • {provider_label}")
             meta_lbl.setFont(QFont(F.PRIMARY, 9))
             meta_lbl.setStyleSheet(f"color: {C.TEXT_MUTED};")
@@ -1654,10 +1660,10 @@ class SettingsPage(QWidget):
         rate     = params["rate"]
         volume   = params["volume"]
 
-        provider = "sapi5"
+        provider = "neural"
         for v in getattr(self, '_settings_all_voices', []):
             if v.get("id") == vid:
-                provider = v.get("provider", "sapi5")
+                provider = v.get("provider", "neural")
                 break
 
         try:
@@ -1722,8 +1728,8 @@ class SettingsPage(QWidget):
         """
         if not getattr(self, '_settings_all_voices', None):
             try:
-                from legacy.tts import enumerate_voices
-                self._settings_all_voices = enumerate_voices()
+                from extensions.system.voice_catalog import get_voice_catalog
+                self._settings_all_voices = get_voice_catalog()
             except Exception as e:
                 print(f"[SETTINGS] Failed to enumerate voices: {e}")
                 self._settings_all_voices = []

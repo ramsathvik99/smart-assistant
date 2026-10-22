@@ -10,6 +10,8 @@ import urllib.request
 import urllib.parse
 from typing import Dict, Any, Optional
 
+from core.net_ssl import get_ssl_context
+
 logger = logging.getLogger(__name__)
 
 # WMO Weather interpretation codes (WW)
@@ -123,7 +125,7 @@ class WeatherEngine:
             url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded}&count=1&language=en&format=json"
             req = urllib.request.Request(url, headers={"User-Agent": "NovaAssistant/1.0"})
 
-            with urllib.request.urlopen(req, timeout=4) as response:
+            with urllib.request.urlopen(req, timeout=4, context=get_ssl_context()) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 results = data.get("results")
                 if results and len(results) > 0:
@@ -164,7 +166,7 @@ class WeatherEngine:
             )
             req = urllib.request.Request(url, headers={"User-Agent": "NovaAssistant/1.0"})
 
-            with urllib.request.urlopen(req, timeout=4) as response:
+            with urllib.request.urlopen(req, timeout=4, context=get_ssl_context()) as response:
                 payload = json.loads(response.read().decode("utf-8"))
                 current = payload.get("current", {})
 
@@ -240,7 +242,7 @@ class WeatherEngine:
                 f"&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto"
             )
             req = urllib.request.Request(url, headers={"User-Agent": "NovaAssistant/1.0"})
-            with urllib.request.urlopen(req, timeout=4) as response:
+            with urllib.request.urlopen(req, timeout=4, context=get_ssl_context()) as response:
                 payload = json.loads(response.read().decode("utf-8"))
                 daily = payload.get("daily", {})
                 times = daily.get("time", [])[:days]

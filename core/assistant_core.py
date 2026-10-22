@@ -482,3 +482,10 @@ assistant_core = AssistantCore()
 def get_assistant_core() -> AssistantCore:
     """Return the global AssistantCore singleton."""
     return assistant_core
+
+
+def get_current_user_id() -> Optional[int]:
+    """Return the currently authenticated user ID from AssistantCore or None."""
+    ctx = assistant_core.get_user_context()
+    return ctx.get("user_id")
+

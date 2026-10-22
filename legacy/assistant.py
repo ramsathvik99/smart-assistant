@@ -345,9 +345,11 @@ def process_input(text, user_id=None):
     correlation_id = f"turn_{int(now_mono * 1000)}_{my_epoch}"
     tracker = None
     try:
-        from core.latency_instrumentation import start_new_tracker
-        tracker = start_new_tracker(correlation_id)
-        tracker.record("transcription_complete_timestamp", now_mono)
+        from core.latency_instrumentation import get_current_tracker
+        tracker = get_current_tracker()
+        tracker.request_id = correlation_id
+        if not tracker.timestamps.get("transcription_complete_timestamp"):
+            tracker.record("transcription_complete_timestamp", now_mono)
         tracker.record("routing_start_timestamp", time.monotonic())
     except Exception:
         tracker = None
@@ -356,6 +358,14 @@ def process_input(text, user_id=None):
     try:
         from extensions.system.tts_coordinator import get_tts_coordinator
         get_tts_coordinator().interrupt_speech()
+    except Exception:
+        pass
+
+    # Initialize hard turn deadline for interactive budget enforcement
+    try:
+        from core.turn_deadline import set_current_turn_deadline, TurnDeadline
+        _budget_sec = float(CONFIG.get("LLM_INTERACTIVE_BUDGET", 5.0))
+        set_current_turn_deadline(TurnDeadline(budget_seconds=_budget_sec))
     except Exception:
         pass
 
@@ -368,11 +378,18 @@ def process_input(text, user_id=None):
     # Forward to Brain (PHASE 6: multi-intent + dialogue state + goal planner)
     # Falls back transparently to unified_command_router for single-intent commands.
     try:
+        current_uid = None
         try:
-            from instance.config import settings as _cfg
-            current_uid = getattr(_cfg, 'CURRENT_USER_ID', None) or _cfg.get_last_user()
+            from core.assistant_core import get_current_user_id
+            current_uid = get_current_user_id()
         except Exception:
-            current_uid = None
+            pass
+        if current_uid is None:
+            try:
+                from instance.config import settings as _cfg
+                current_uid = getattr(_cfg, 'CURRENT_USER_ID', None)
+            except Exception:
+                current_uid = None
 
         effective_uid = user_id or current_uid
 
@@ -490,8 +507,9 @@ def process_input(text, user_id=None):
             if tracker:
                 tracker.record("tts_request_timestamp", time.monotonic())
 
-            # Use TTS Coordinator with COMMAND priority and conversational metadata
-            speak(spoken_response, priority=TTSPriority.COMMAND, metadata=meta)
+            # Use TTS Coordinator with COMMAND priority and conversational metadata (skip if already streamed)
+            if not (result and isinstance(result, dict) and result.get("streamed")):
+                speak(spoken_response, priority=TTSPriority.COMMAND, metadata=meta)
 
             # Store in conversational memory
             try:
@@ -524,7 +542,7 @@ def process_input(text, user_id=None):
                     import logging
                     logging.getLogger("legacy.assistant").warning(f"Failed to update dialogue continuation state: {d_err}")
 
-        if tracker:
+        if tracker and not spoken_response:
             tracker.print_breakdown()
 
         return response

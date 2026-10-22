@@ -286,6 +286,16 @@ class ClockController:
         clean = text.lower().strip()
         now = datetime.datetime.now()
 
+        # Normalize common word numbers to digits
+        _WORD_NUMS = {
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+            "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40,
+            "forty-five": 45, "fifty": 50, "sixty": 60
+        }
+        for w, n in _WORD_NUMS.items():
+            clean = re.sub(rf'\b{w}\b', str(n), clean)
+
         # 1. Relative durations: "in 10 minutes", "in 1 hour", "for 30 seconds", "in 2 hours 15 minutes"
         m_rel = re.search(
             r'\b(?:in|for|after)\s+(?:(\d+)\s*h(?:our)?s?)?\s*(?:(\d+)\s*m(?:in(?:ute)?)?s?)?\s*(?:(\d+)\s*s(?:ec(?:ond)?)?s?)?',
@@ -298,8 +308,15 @@ class ClockController:
             total_secs = hrs * 3600 + mins * 60 + secs
             if total_secs > 0:
                 target = now + datetime.timedelta(seconds=total_secs)
-                label_part = re.sub(r'\b(?:set|an?|alarm|timer|for|in|after|\d+\s*(?:hours?|hrs?|minutes?|mins?|seconds?|secs?))\b', '', clean).strip()
-                return target, label_part or "Alarm"
+                label_part = re.sub(
+                    r'\b(?:could\s+you|can\s+you|would\s+you|will\s+you|please|hey\s+friday|friday|set|an?|alarm|timer|wake\s+me\s+up|for|in|after|\d+\s*(?:hours?|hrs?|minutes?|mins?|seconds?|secs?))\b',
+                    '',
+                    clean,
+                    flags=re.IGNORECASE
+                ).strip(' .?!,')
+                if not label_part or label_part.lower() in ("to", "me", "up", "a", "an", "the", "it"):
+                    label_part = "Alarm"
+                return target, label_part
 
         # 2. Clock formats: "7:30 am", "7:30", "18:00", "6 am", "7 pm", "6:30 in the morning", "8 at night"
         m_clock = re.search(
@@ -329,8 +346,15 @@ class ClockController:
             if "tomorrow" in clean or target <= now:
                 target += datetime.timedelta(days=1)
 
-            label_part = re.sub(r'\b(?:set|an?|alarm|wake\s+me\s+up|at|for|\d{1,2}(?::\d{2})?|\b(?:am|pm|morning|night|tomorrow))\b', '', clean).strip()
-            return target, label_part or "Alarm"
+            label_part = re.sub(
+                r'\b(?:could\s+you|can\s+you|would\s+you|will\s+you|please|hey\s+friday|friday|set|an?|alarm|wake\s+me\s+up|at|for|\d{1,2}(?::\d{2})?|\b(?:am|pm|morning|night|tomorrow))\b',
+                '',
+                clean,
+                flags=re.IGNORECASE
+            ).strip(' .?!,')
+            if not label_part or label_part.lower() in ("to", "me", "up", "a", "an", "the", "it"):
+                label_part = "Alarm"
+            return target, label_part
 
         return None
 
@@ -338,6 +362,14 @@ class ClockController:
     def parse_duration_seconds(text: str) -> int:
         """Parses duration string like '5 minutes 30 seconds' into total seconds."""
         clean = text.lower().strip()
+        _WORD_NUMS = {
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+            "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40,
+            "forty-five": 45, "fifty": 50, "sixty": 60
+        }
+        for w, n in _WORD_NUMS.items():
+            clean = re.sub(rf'\b{w}\b', str(n), clean)
         secs = 0
         h = re.search(r'(\d+)\s*(?:hours?|hrs?)', clean)
         m = re.search(r'(\d+)\s*(?:minutes?|mins?)', clean)
@@ -372,8 +404,25 @@ class ClockController:
 
             target_time, auto_label = parsed
             alarm_label = label or auto_label or "Alarm"
-            alarm_id = str(uuid.uuid4())[:8]
 
+            # Check for existing identical active alarm (within 10s window) for this user to prevent duplicates
+            user_alarms = self._alarms.get(user_id, [])
+            for existing in user_alarms:
+                if existing.is_active and abs((existing.target_time - target_time).total_seconds()) < 10:
+                    time_str = existing.target_time.strftime("%I:%M %p")
+                    msg = f"An alarm is already set for {time_str} ({existing.label})."
+                    return {
+                        "success": True,
+                        "status": "success",
+                        "alarm_id": existing.alarm_id,
+                        "target_time": existing.target_time.isoformat(),
+                        "time_str": time_str,
+                        "label": existing.label,
+                        "message": msg,
+                        "response": msg
+                    }
+
+            alarm_id = str(uuid.uuid4())[:8]
             now = datetime.datetime.now()
             delay = max(0.1, (target_time - now).total_seconds())
 
@@ -394,7 +443,10 @@ class ClockController:
             time_str = target_time.strftime("%I:%M %p")
             is_tomorrow = target_time.date() > now.date()
             day_str = " tomorrow" if is_tomorrow else ""
-            msg = f"Alarm set for {time_str}{day_str} ({alarm_label})."
+            if delay < 60:
+                msg = f"Alarm set for {time_str}{day_str} (in {int(delay)} seconds)."
+            else:
+                msg = f"Alarm set for {time_str}{day_str} ({alarm_label})."
             logger.info(f"[ALARM] User {user_id} set alarm {alarm_id} for {target_time.isoformat()}")
 
             return {

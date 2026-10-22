@@ -241,6 +241,12 @@ class VoiceLifecycleManager:
         with self._lock:
             self._set_state_locked("processing", "Processing…")
 
+    def on_thinking(self, message: str = "Working on it…") -> None:
+        """Called when an operation takes longer than 1.5s to provide visual feedback."""
+        with self._lock:
+            if self._state not in ("speaking", "error"):
+                self._set_state_locked("processing", message)
+
     def on_tts_started(self) -> None:
         """Called when TTS playback begins."""
         with self._lock:

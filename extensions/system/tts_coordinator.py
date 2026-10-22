@@ -168,6 +168,12 @@ class TTSCoordinator:
             adapted_text = text
             meta = metadata or {}
 
+        try:
+            from core.speech_safety import make_speakable
+            adapted_text = make_speakable(adapted_text)
+        except Exception:
+            pass
+
         if not adapted_text.strip():
             return
 

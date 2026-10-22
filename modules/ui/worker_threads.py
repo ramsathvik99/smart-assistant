@@ -4,7 +4,9 @@ All long-running backend operations run here, never on the Qt GUI thread.
 """
 
 import traceback
+from typing import Optional, Any, Dict, List
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21,17 +23,30 @@ class CommandWorker(QObject):
     def __init__(self):
         super().__init__()
         self._command = ""
+        self._user_id = None
 
-    def set_command(self, text: str):
+    def set_command(self, text: str, user_id: Optional[int] = None):
         self._command = text
+        self._user_id = user_id
 
     def run(self):
         cmd = self._command
+        uid = self._user_id
+        if not uid:
+            try:
+                from instance.config import settings
+                uid = getattr(settings, 'CURRENT_USER_ID', None)
+                if not uid:
+                    from core.assistant_core import assistant_core
+                    uid = assistant_core.get_current_user_id()
+            except Exception:
+                uid = None
+
         self.started.emit(cmd)
         self.state_changed.emit("thinking")
         try:
             from legacy.assistant import process_input
-            response = process_input(cmd)
+            response = process_input(cmd, user_id=uid)
             self.state_changed.emit("idle")
             self.finished.emit(cmd, response or "")
         except Exception as e:
@@ -55,10 +70,10 @@ class CommandThread(QThread):
         self._worker.error.connect(self.error_sig)
         self._worker.state_changed.connect(self.state_sig)
 
-    def execute(self, command: str):
+    def execute(self, command: str, user_id: Optional[int] = None):
         if self.isRunning():
             return False
-        self._worker.set_command(command)
+        self._worker.set_command(command, user_id=user_id)
         self.start()
         return True
 

@@ -179,7 +179,33 @@ class SpeechAdapter:
             if m_date:
                 return f"Today is {m_date.group(0)}."
 
-        # ── 1. Action Confirmations ──────────────────────────────────────────
+        # ── 0.5 Action Failure & Unverified Actions (Truth in Speech) ────────
+        is_failure = (
+            response_type in ("action_failure", "error_recovery")
+            or act_res.get("status") in ("error", "failed")
+            or act_res.get("execution_success") is False
+            or act_res.get("success") is False
+            or act_res.get("verified") is False
+            or "could not find" in s.lower()
+            or "cannot find" in s.lower()
+            or "not found" in s.lower()
+        )
+        if is_failure:
+            if intent_up == "OPEN_APPLICATION" or any(w in inp_low for w in ("open ", "launch ", "start ", "go ", "run ")):
+                m_app = re.match(r'^(?:open|launch|start|bring up|go|run)\s+(?:the\s+)?(.+?)(?:\s+app|\s+application)?[\.!\?]?$', effective_input.strip(), re.I)
+                target = m_app.group(1).strip() if m_app else ""
+                if not target:
+                    m_find = re.search(r"(?:find|locate|for)\s+['\"]?([A-Za-z0-9_-]+)['\"]?", s, re.I)
+                    if m_find:
+                        target = m_find.group(1).strip()
+                if not target:
+                    target = "that application"
+                if "could not find" in s.lower() or "not found" in s.lower() or "locate" in s.lower():
+                    return f"I couldn't find an app called {target} on your system."
+                return f"I couldn't open {target}."
+            first_sentence = re.split(r'[\.\n]', s)[0].strip()
+            return first_sentence if first_sentence else "I encountered an issue executing that request."
+
         # ── 1. Action Confirmations ──────────────────────────────────────────
         is_doc_cmd = (
             intent_up in ("DOCUMENT_GENERATION", "CREATE_DOCUMENT")
@@ -393,6 +419,13 @@ class SpeechAdapter:
 
         # 10. Fix sentence flow, punctuation, and natural pauses
         s = self._polish_speech_cadence(s)
+
+        # 11. Safety check: ensure no raw stack traces, URLs, file paths, or SSL errors
+        try:
+            from core.speech_safety import make_speakable
+            s = make_speakable(s)
+        except Exception:
+            pass
 
         # Metrics measurement: spoken char count, spoken word count, playback duration
         words = s.split()

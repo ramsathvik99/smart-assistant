@@ -187,6 +187,26 @@ class RAGResponseGenerator:
                 role = "User" if msg.get("role") == "user" else _hist_label
                 msgs.append(f"{role}: {msg.get('content')}")
             history_context = "\n".join(msgs)
+        elif not history_context:
+            try:
+                from extensions.conversational_memory import recent_memory, _lock
+                with _lock:
+                    if recent_memory:
+                        try:
+                            from instance.config import settings as _cfg
+                            _hist_label = _cfg.get_assistant_name() or "Assistant"
+                        except Exception:
+                            _hist_label = "Assistant"
+                        msgs = []
+                        for m in list(recent_memory)[-3:]:
+                            if m.get("user_command"):
+                                msgs.append(f"User: {m.get('user_command')}")
+                            if m.get("assistant_response"):
+                                msgs.append(f"{_hist_label}: {m.get('assistant_response')}")
+                        if msgs:
+                            history_context = "\n".join(msgs)
+            except Exception:
+                pass
 
         # Build structured factual context with canonical runtime temporal anchor
         truth_context = self._format_truth_context(data)
@@ -310,6 +330,7 @@ class RAGResponseGenerator:
                             if srcs:
                                 joined += "\n\nSources:\n" + "\n".join(srcs)
                             print("[PIPELINE - GENERATION] LLM unavailable; recovered with top retrieval snippets.")
+                            return joined
                 classified = getattr(self.llm, "get_classified_failure", lambda: {})()
                 if classified and classified.get("user_message"):
                     return f"I am unable to reach my language model service: {classified.get('user_message')}"
@@ -336,6 +357,15 @@ class RAGResponseGenerator:
                 direct_fallback = self.extract_direct_answer(data)
                 if direct_fallback:
                     return direct_fallback
+                items = data.get("organic_items") or []
+                if items:
+                    snippets = [it.get("snippet") for it in items[:2] if it.get("snippet")]
+                    if snippets:
+                        srcs = [f"[{i+1}] {it.get('title', '')} ({it.get('link', '')})" for i, it in enumerate(items[:2]) if it.get("link")]
+                        joined = " ".join(snippets)
+                        if srcs:
+                            joined += "\n\nSources:\n" + "\n".join(srcs)
+                        return joined
             classified = getattr(self.llm, "get_classified_failure", lambda: {})()
             if classified and classified.get("user_message"):
                 return f"I am unable to reach my language model service: {classified.get('user_message')}"

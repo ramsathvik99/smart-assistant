@@ -20,7 +20,8 @@ from .file_manager import (
     inspect_zip_archive,
     extract_zip_archive,
     extract_text_content,
-    profile_file_content
+    profile_file_content,
+    inspect_sqlite_database
 )
 from .app_launcher import launch_application, discover_installed_games, launch_game
 from .action_executor import (
@@ -112,6 +113,7 @@ __all__ = [
     'extract_zip_archive',
     'extract_text_content',
     'profile_file_content',
+    'inspect_sqlite_database',
     'launch_application',
     'discover_installed_games',
     'launch_game',

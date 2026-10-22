@@ -52,6 +52,7 @@ _voice_id:     str | None = None   # SAPI5 voice id string; None = pyttsx3 defau
 _voice_rate:   int        = 135    # words-per-minute (conversational default: 125-145 wpm)
 _voice_volume: float      = 1.0   # 0.0 – 1.0
 _last_playback_metrics: dict = {}
+_speech_start_time: float = 0.0
 
 def get_last_playback_metrics() -> dict:
     return dict(_last_playback_metrics)
@@ -207,26 +208,30 @@ def validate_user_voice(
 ) -> tuple[str, str]:
     """
     Validate requested voice_id against active/target provider.
-    Rejects test IDs, SAPI registry IDs on Neural backends, and Neural strings on SAPI backends.
+    Decision order:
+    1. Explicit provider argument or saved voice_provider wins.
+    2. Otherwise use the active backend.
+    3. Do not infer SAPI from the text of an id unless the id really is a SAPI token.
     Returns (valid_provider, valid_voice_id).
     """
     prefs = user_prefs or {}
-    target_prov = (provider or prefs.get("voice_engine") or prefs.get("voice_provider") or prefs.get("assistant_voice_provider") or "").lower()
+    explicit_prov = provider or prefs.get("voice_provider") or prefs.get("assistant_voice_provider")
 
     vid_str = str(voice_id).strip() if voice_id else ""
     vid_lower = vid_str.lower()
+    is_sapi_token = vid_lower.startswith("hkey_") or "speech\\voices\\tokens" in vid_lower or "software\\microsoft\\speech" in vid_lower
 
-    if not target_prov:
-        if "hkey_" in vid_lower or "speech\\voices" in vid_lower or "onecore" in vid_lower or "desktop" in vid_lower:
+    if explicit_prov:
+        target_prov = str(explicit_prov).lower()
+    else:
+        try:
+            from extensions.system.tts_backend import get_tts_backend_manager
+            target_prov = get_tts_backend_manager().get_backend().name.lower()
+        except Exception:
+            target_prov = os.getenv("TTS_PROVIDER", "neural").lower()
+
+        if not target_prov and is_sapi_token:
             target_prov = "sapi"
-        elif "neural" in vid_lower:
-            target_prov = "neural"
-        else:
-            try:
-                from extensions.system.tts_backend import get_tts_backend_manager
-                target_prov = get_tts_backend_manager().get_backend().name
-            except Exception:
-                target_prov = os.getenv("TTS_PROVIDER", "neural").lower()
 
     gender = prefs.get("gender") or prefs.get("voice_gender")
     language = prefs.get("language") or prefs.get("voice_language")
@@ -287,6 +292,8 @@ def apply_voice_profile(voice_id: str | None, rate: int = 135, volume: float = 1
     _voice_id     = valid_voice
     _voice_rate   = target_rate
     _voice_volume = target_volume
+    prov_label = "edge-tts" if valid_provider == "neural" else "windows-sapi"
+    print(f"[VOICE] Active speech engine: {valid_provider} ({prov_label}, {_voice_id})")
     print(f"[VOICE] Applying voice: {_voice_id} (provider={valid_provider})")
     print(f"[TTS] Voice profile applied — id={_voice_id!r}, rate={_voice_rate}, volume={_voice_volume}")
 
@@ -379,11 +386,19 @@ _tts_queue = queue.Queue()
 # Threading primitives & barge-in state
 _worker_lock      = threading.Lock()   # prevents double-start race on _ensure_tts_worker
 _tts_active       = threading.Event()  # set while the worker is actually synthesizing speech
+_speech_start_time: float = 0.0        # monotonic timestamp when current speech started
 _tts_interrupted  = threading.Event()  # set when barge-in or stop is requested
 _tts_state_lock   = threading.Lock()
 _active_sp_voice  = None               # active COM SpVoice object for instant purge
 _active_tts_text  = ""                 # text currently being spoken
 _last_interrupted_speech = None        # {'text': ..., 'timestamp': ...}
+
+
+def get_speech_start_time() -> float:
+    """Return monotonic timestamp when the current active TTS speech began, or 0.0 if idle."""
+    if _tts_active.is_set():
+        return _speech_start_time
+    return 0.0
 
 
 def _tts_worker():
@@ -395,6 +410,12 @@ def _tts_worker():
         if text is None:          # poison-pill shutdown signal
             _tts_queue.task_done()
             break
+
+        try:
+            from core.speech_safety import make_speakable
+            text = make_speakable(text)
+        except Exception:
+            pass
 
         # Automatically detect script if lang_hint is default English/omitted
         if text and (not lang_hint or str(lang_hint).lower() in ("en", "auto", "en-us", "en-gb", "en-in")):
@@ -425,6 +446,8 @@ def _tts_worker():
             _active_tts_text = text
 
         _start_animation()
+        global _speech_start_time
+        _speech_start_time = time.monotonic()
         _tts_active.set()         # mark TTS as speaking
         try:
             from core.voice_lifecycle import get_voice_lifecycle
@@ -466,7 +489,7 @@ def _tts_worker():
                         text,
                         voice=req_voice,
                         language=lang_hint,
-                        rate=_voice_rate / 155.0,
+                        rate=1.0,
                         volume=_voice_volume,
                         metadata=meta,
                     )
@@ -550,6 +573,14 @@ def _tts_worker():
                 get_voice_lifecycle().on_tts_finished()
             except Exception:
                 pass
+            try:
+                from core.latency_instrumentation import get_current_tracker
+                trk = get_current_tracker()
+                if trk.timestamps.get("tts_playback_end_timestamp") is None:
+                    trk.record("tts_playback_end_timestamp", time.monotonic())
+                trk.print_breakdown()
+            except Exception:
+                pass
             _tts_queue.task_done()
             try:
                 from legacy.sst import get_echo_guard
@@ -587,6 +618,13 @@ def is_speaking() -> bool:
     Callers (e.g. sst.listen()) can poll this to avoid self-listening.
     """
     return _tts_active.is_set() or not _tts_queue.empty()
+
+
+def get_speech_start_time() -> float:
+    """Return the monotonic timestamp when current speech started, or 0.0 if idle."""
+    if _tts_active.is_set():
+        return _speech_start_time
+    return 0.0
 
 
 def wait_for_silence(timeout: float = 15.0) -> bool:
@@ -799,6 +837,12 @@ def speak(text, lang_hint='en', block=False, user_id=None):
     try:
         from extensions.system.speech_adapter import adapt_for_speech
         text, _ = adapt_for_speech(text)
+    except Exception:
+        pass
+
+    try:
+        from core.speech_safety import make_speakable
+        text = make_speakable(text)
     except Exception:
         pass
 

@@ -82,8 +82,8 @@ class ReminderHandler:
         
         # Time patterns
         self.time_patterns = {
-            # Relative time: "in 10 seconds", "in 5 minutes", "in 2 hours"
-            'relative': re.compile(r'\bin\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', re.IGNORECASE),
+            # Relative time: "in 10 seconds", "in 5 minutes", "for 1 min", "in 2 hours"
+            'relative': re.compile(r'\b(?:in|for|after)\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', re.IGNORECASE),
             
             # Specific time: "at 6 PM", "at 14:30", "at 2pm", "1:00 pm", "1 pm"
             'specific': re.compile(r'(?:\bat\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b', re.IGNORECASE),
@@ -108,6 +108,14 @@ class ReminderHandler:
     def _normalize_input(self, text: str) -> str:
         """Normalize common speech recognition typos, shorthand, and punctuation in times."""
         t = text
+        _WORD_NUMS = {
+            "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+            "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+            "fifteen": "15", "twenty": "20", "thirty": "30", "forty": "40",
+            "forty-five": "45", "fifty": "50", "sixty": "60"
+        }
+        for w, n in _WORD_NUMS.items():
+            t = re.sub(rf'\b{w}\b', n, t, flags=re.IGNORECASE)
         t = re.sub(r'\bshedule\b', 'schedule', t, flags=re.IGNORECASE)
         t = re.sub(r'\bmeting\b', 'meeting', t, flags=re.IGNORECASE)
         t = re.sub(r'\bmeet\b', 'meeting', t, flags=re.IGNORECASE)
@@ -537,7 +545,7 @@ class ReminderHandler:
             task_text = re.sub(pattern, '', task_text, flags=re.IGNORECASE)
         
         # Remove time-related phrases (more comprehensive)
-        task_text = re.sub(r'\bin\s+\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', '', task_text, flags=re.IGNORECASE)
+        task_text = re.sub(r'\b(?:in|for|after)\s+\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\b', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\b(?:today|tomorrow|tonight)\s*(?:(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b)?', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\b(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b', '', task_text, flags=re.IGNORECASE)
         task_text = re.sub(r'\bat\s+\d{1,2}(?::\d{2})?\b', '', task_text, flags=re.IGNORECASE)

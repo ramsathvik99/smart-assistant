@@ -83,14 +83,15 @@ class ResponseFormatter:
             }
         }
     
-    def format_response(self, text: str, intent: str | None = None, context: Dict[str, Any] | None = None) -> str:
+    def format_response(self, text: str, intent: str | None = None, context: Dict[str, Any] | None = None, user_id: int | None = None) -> str:
         """
-        Format response according to NOVA's personality and intent.
+        Format response according to assistant's personality and intent.
         
         Args:
             text: The raw response text
             intent: The intent type (SYSTEM, REMINDER, BROWSER, AI, ERROR, etc.)
             context: Additional context for formatting decisions
+            user_id: Authenticated user ID for per-account personality resolution
             
         Returns:
             Formatted response string
@@ -98,9 +99,10 @@ class ResponseFormatter:
         if not text or not text.strip():
             return ""
         
-        # Get personality for context
+        # Get personality for context & user
         context_type = context.get("type") if context else None
-        personality = self.personality.get_personality(context_type)
+        eff_uid = user_id or (context.get("user_id") if context else None)
+        personality = self.personality.get_personality(context_type, user_id=eff_uid)
         
         # Apply intent-specific formatting
         if intent and intent in self.intent_templates:
@@ -260,10 +262,10 @@ def get_response_formatter() -> ResponseFormatter:
         _response_formatter = ResponseFormatter()
     return _response_formatter
 
-def format_response(text: str, intent: str | None = None, context: Dict[str, Any] | None = None) -> str:
+def format_response(text: str, intent: str | None = None, context: Dict[str, Any] | None = None, user_id: int | None = None) -> str:
     """Convenience function to format a response"""
     formatter = get_response_formatter()
-    return formatter.format_response(text, intent, context)
+    return formatter.format_response(text, intent, context, user_id=user_id)
 
 def reset_response_formatter():
     """Reset the global response formatter instance (for testing)"""

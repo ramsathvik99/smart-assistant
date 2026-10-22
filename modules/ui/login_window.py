@@ -2371,7 +2371,8 @@ class SetupVoiceView(QWidget):
     def _load_voices_async(self):
         def _worker():
             try:
-                voices = enumerate_voices()
+                from extensions.system.voice_catalog import get_voice_catalog
+                voices = get_voice_catalog()
             except Exception:
                 voices = []
             self._voices_loaded_signal.emit(voices)
@@ -2401,8 +2402,8 @@ class SetupVoiceView(QWidget):
             name = v.get("name", "Voice")
             g = v.get("gender", "unknown").capitalize()
             lang = v.get("language", "English")
-            prov = v.get("provider", "sapi5")
-            label = f"{name} — {g} ({lang}, {prov})"
+            cat = v.get("category") or ("Natural" if v.get("provider") == "neural" else "Basic Windows voice")
+            label = f"{name} — {g} ({lang}, {cat})"
             self._voice_combo.addItem(label, v)
         self._voice_combo.setCurrentIndex(0)
 

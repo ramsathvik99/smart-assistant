@@ -407,6 +407,10 @@ class SettingsPage(QWidget):
                 "save_btn": save_btn,
                 "del_btn": del_btn,
                 "req_key": req_key,
+                "desc_lbl": desc_lbl,
+                "desc": desc,
+                "cat": cat,
+                "def_model": def_model,
             }
 
         lay.addWidget(card_keys)
@@ -435,8 +439,31 @@ class SettingsPage(QWidget):
             field.setEchoMode(QLineEdit.EchoMode.Password)
             btn.setText("👁")
 
+    def _update_desc_label(self, pid: str, is_configured: bool, model_name: Optional[str] = None):
+        row = self._api_key_rows.get(pid, {})
+        desc_lbl = row.get("desc_lbl")
+        if not desc_lbl:
+            return
+        desc = row.get("desc", "")
+        req_key = row.get("req_key", True)
+        cat = row.get("cat", "")
+        active_model = model_name or row.get("def_model", "")
+
+        if not req_key:
+            req_tag = "<span style='color:#10B981;'>💻 Local Server (No Key Needed)</span>"
+        elif is_configured:
+            req_tag = "<span style='color:#10B981;'>✔ Key Configured</span>"
+        else:
+            req_tag = "<span style='color:#F59E0B;'>🔑 API Key Required</span>"
+
+        model_tag = f" • <span style='color:{C.TEXT_MUTED};'>Model: <b>{active_model}</b></span>" if cat in ("LLM", "Local") and active_model else ""
+        desc_lbl.setText(f"{desc}  —  {req_tag}{model_tag}")
+
     def _on_test_api_key(self, provider: str, field: QLineEdit):
+        from core.credential_manager import is_masked_credential
         val = field.text().strip()
+        candidate_key = None if (not val or is_masked_credential(val)) else val
+
         row = self._api_key_rows.get(provider, {})
         chip = row.get("chip")
         fb = row.get("feedback")
@@ -450,23 +477,31 @@ class SettingsPage(QWidget):
 
         def work():
             from ..service_adapters import test_api_credential
-            return test_api_credential(provider, candidate_key=val or None)
+            return test_api_credential(provider, candidate_key=candidate_key)
 
         def done(res):
             if not fb: return
             msg = res.get("message", "")
             status = res.get("status", "")
+            resolved_model = res.get("model")
             if res.get("success"):
                 if chip:
                     chip.setText("Connected")
                     chip.setProperty("state", "online")
                     chip.style().unpolish(chip); chip.style().polish(chip)
+                self._update_desc_label(provider, is_configured=True, model_name=resolved_model)
                 fb.setText(f"✔ {msg or 'Connected'}")
                 fb.setStyleSheet(f"color: {C.STATUS_SUCCESS}; font-size: 11px; font-weight: 600;")
             else:
                 low_msg = (msg or "").lower()
                 if "invalid" in low_msg or "unauthorized" in low_msg or "auth_error" in status or "401" in low_msg:
                     display_status = "Invalid key"
+                elif "insufficient_balance" in status or "credit balance" in low_msg or "billing" in low_msg or "too low" in low_msg:
+                    display_status = "Insufficient credits"
+                elif "model_unavailable" in status or "not available" in low_msg or "model not found" in low_msg:
+                    display_status = "Model unavailable"
+                elif "rate_limit" in status or "429" in low_msg:
+                    display_status = "Rate limited"
                 elif "unavailable" in low_msg or "not running" in low_msg or "outage" in low_msg:
                     display_status = "Provider unavailable"
                 elif "timeout" in low_msg or "connection" in low_msg or "network" in low_msg or "connect" in low_msg:
@@ -489,12 +524,19 @@ class SettingsPage(QWidget):
         self._workers.append(w); w.start()
 
     def _on_save_api_key(self, provider: str, field: QLineEdit):
+        from core.credential_manager import is_masked_credential
         val = field.text().strip()
         row = self._api_key_rows.get(provider, {})
         fb = row.get("feedback")
         if not val and provider != "ollama":
             if fb:
                 fb.setText("Please enter a key before saving.")
+                fb.setStyleSheet(f"color: {C.STATUS_ERROR}; font-size: 11px;")
+            return
+
+        if is_masked_credential(val):
+            if fb:
+                fb.setText("Field contains a masked placeholder. Enter a new key to update.")
                 fb.setStyleSheet(f"color: {C.STATUS_ERROR}; font-size: 11px;")
             return
 
@@ -570,6 +612,10 @@ class SettingsPage(QWidget):
             hint_lbl = row.get("hint")
             inp = row.get("input")
 
+            # Update the description tag to show "✔ Key Configured" instead of "🔑 API Key Required"
+            is_valid_configured = configured or (raw_status == "valid")
+            self._update_desc_label(pid, is_configured=is_valid_configured)
+
             if pid == "ollama":
                 if chip:
                     chip.setText("Connected" if configured else "Local (No Key Needed)")
@@ -640,7 +686,8 @@ class SettingsPage(QWidget):
 
         self.id_persona = QComboBox()
         for label in ["Friendly Assistant", "Professional Executive Aide",
-                      "Technical Expert", "Concise Analyst", "Creative Muse"]:
+                      "Witty Companion", "Concise Analyst", "Technical Expert",
+                      "Minimalist", "Energetic Companion", "Creative Muse"]:
             self.id_persona.addItem(label)
         self.id_persona.setStyleSheet(self._combo_qss())
 
@@ -1012,8 +1059,9 @@ class SettingsPage(QWidget):
         for i, v in enumerate(filtered):
             name = v.get("name", "Voice")
             gender = v.get("gender", "unknown").title()
+            cat = v.get("category") or ("Natural" if v.get("provider") == "neural" else "Basic Windows voice")
             vid = v.get("id", "")
-            self.v_voice.addItem(f"{name} ({gender})", vid)
+            self.v_voice.addItem(f"{name} ({gender}, {cat})", vid)
             if vid and current_selected and vid == current_selected:
                 target_idx = i
                 found_selected = True
@@ -1595,8 +1643,8 @@ class SettingsPage(QWidget):
     def _load_voices_later(self):
         def v_work():
             try:
-                from legacy.tts import enumerate_voices
-                return enumerate_voices()
+                from extensions.system.voice_catalog import get_voice_catalog
+                return get_voice_catalog()
             except Exception:
                 return []
         w = DashboardWorker(v_work)
@@ -1881,6 +1929,7 @@ class SettingsPage(QWidget):
                 save_user_preference("assistant_name", clean_name)
             save_user_preference("greeting", self.id_greeting.text().strip())
             save_user_preference("persona", self.id_persona.currentText())
+            save_user_preference("personality_preset", self.id_persona.currentText())
             save_user_preference("response_style", self.id_style.currentText())
             save_user_preference("formality_pct", self.id_formality.value())
             save_user_preference("verbosity", self.id_verbosity.currentText())
@@ -1965,6 +2014,14 @@ class SettingsPage(QWidget):
             if vid:
                 save_user_preference("voice_id", vid)
                 save_user_preference("assistant_voice_id", vid)
+                selected_provider = "neural"
+                for v in (self._all_voices or []):
+                    if v.get("id") == vid:
+                        selected_provider = v.get("provider", "neural")
+                        break
+                save_user_preference("voice_provider", selected_provider)
+                save_user_preference("assistant_voice_provider", selected_provider)
+                save_user_preference("explicit_provider_choice", selected_provider)
             save_user_preference("voice_rate", rate)
             save_user_preference("assistant_voice_rate", rate)
             save_user_preference("voice_pitch", pitch)

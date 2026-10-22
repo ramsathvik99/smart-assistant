@@ -236,6 +236,15 @@ class ContentAcquisitionEngine:
         # Step 1: Detect requested topic and content type
         content_type, topic, programming_lang = self._analyze_acquisition_intent(low_req)
 
+        # Optimization: Deduplicate rapid identical acquisition requests in the current session
+        if dialogue_state and hasattr(dialogue_state, "session_context"):
+            active_ids = set(dialogue_state.session_context.get("active_artifacts", []))
+            for aid in active_ids:
+                cand = self.graph.get_artifact(aid)
+                if cand and cand.status == "active" and cand.content and cand.content.strip():
+                    if cand.original_user_request.lower().strip() == clean_req.lower().strip() and (time.time() - cand.created_at) < 5.0:
+                        return cand
+
         # Step 2: Acquire/synthesize content
         content, subtopic, source_info = self._produce_content(
             content_type=content_type,
@@ -247,28 +256,35 @@ class ContentAcquisitionEngine:
         )
 
         # Step 3: Create & persist ContentArtifact
+        is_success = bool(content and content.strip() and not source_info.get("error"))
         artifact = ContentArtifact(
             user_id=user_id,
             topic=topic,
             subtopic=subtopic,
-            content=content,
+            content=content if is_success else "",
             content_type=content_type,
             programming_language=programming_lang,
             original_user_request=clean_req,
             source_info=source_info,
-            status="active"
+            status="active" if is_success else "failed"
         )
         stored = self.graph.store_artifact(artifact)
 
         # Step 4: Update dialogue state session context
         if dialogue_state and hasattr(dialogue_state, "session_context"):
-            active_list = dialogue_state.session_context.get("active_artifacts", [])
-            if stored.artifact_id not in active_list:
-                active_list.append(stored.artifact_id)
-            dialogue_state.session_context["active_artifacts"] = active_list
-            dialogue_state.session_context["last_content_artifact_id"] = stored.artifact_id
-            dialogue_state.session_context["last_artifact_topic"] = stored.topic
-            dialogue_state.session_context["last_artifact_type"] = stored.content_type
+            if is_success:
+                active_list = dialogue_state.session_context.get("active_artifacts", [])
+                if stored.artifact_id not in active_list:
+                    active_list.append(stored.artifact_id)
+                dialogue_state.session_context["active_artifacts"] = active_list
+                dialogue_state.session_context["last_content_artifact_id"] = stored.artifact_id
+                dialogue_state.session_context["last_artifact_topic"] = stored.topic
+                dialogue_state.session_context["last_artifact_type"] = stored.content_type
+            else:
+                dialogue_state.session_context["pending_unresolved_topic"] = stored.topic
+                dialogue_state.session_context["last_failed_topic"] = stored.topic
+                dialogue_state.session_context["last_failed_request"] = clean_req
+            dialogue_state.session_context["last_content_topic"] = stored.topic
 
         return stored
 
@@ -424,15 +440,38 @@ class ContentAcquisitionEngine:
             from extensions.rag_system import RAGSystem
             rag = RAGSystem()
             rag_output = rag.process(user_request, user_id=user_id)
-            if isinstance(rag_output, dict) and rag_output.get("response"):
-                return rag_output["response"], f"Research on {topic}", {"source": "rag_research"}
+            if isinstance(rag_output, dict):
+                resp_text = rag_output.get("response", "")
+                is_failed = (
+                    not resp_text or
+                    rag_output.get("handled") is False or
+                    rag_output.get("intent") == "error" or
+                    any(phrase in resp_text.lower() for phrase in (
+                        "unable to reach my language model",
+                        "temporarily unable to reach",
+                        "trouble formulating a response",
+                        "service is currently unavailable",
+                        "all language model providers failed",
+                        "providers are currently unavailable",
+                        "no answer found"
+                    ))
+                )
+                if not is_failed and len(resp_text) > 20:
+                    return resp_text, f"Research on {topic}", {"source": "rag_research"}
             elif isinstance(rag_output, str) and len(rag_output) > 20:
-                return rag_output, f"Research on {topic}", {"source": "rag_research"}
+                if not any(phrase in rag_output.lower() for phrase in (
+                    "unable to reach my language model",
+                    "temporarily unable to reach",
+                    "trouble formulating a response",
+                    "service is currently unavailable",
+                    "all language model providers failed"
+                )):
+                    return rag_output, f"Research on {topic}", {"source": "rag_research"}
         except Exception:
             pass
 
-        generic_info = f"Comprehensive research and conceptual overview of {topic}. Includes core architecture, formal definitions, functional components, and standard operational characteristics."
-        return generic_info, f"Overview of {topic}", {"source": "synthesis"}
+        # Explicit failure propagation without fabrication
+        return "", f"Research on {topic}", {"source": "unresolved", "error": "retrieval_failed"}
 
     def _generate_summary(self, artifact: ContentArtifact) -> str:
         """Generate high-quality summary from parent artifact."""

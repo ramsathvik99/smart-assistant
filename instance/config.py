@@ -143,12 +143,12 @@ class Settings:
 
         self.OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
 
-        self.OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "true").lower() in ("true", "1", "yes")
+        self.OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "false").lower() in ("true", "1", "yes")
 
         self.OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "60.0"))
 
         # Authoritative LLM Primary Provider and Request Timeout budget
-        self.LLM_PRIMARY_PROVIDER = os.getenv("LLM_PRIMARY_PROVIDER", os.getenv("PRIMARY_PROVIDER", "ollama")).lower().strip()
+        self.LLM_PRIMARY_PROVIDER = os.getenv("LLM_PRIMARY_PROVIDER", os.getenv("PRIMARY_PROVIDER", "groq")).lower().strip()
         self.LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", os.getenv("LLM_TIMEOUT", "65.0")))
         self.GROQ_TIMEOUT = float(os.getenv("GROQ_TIMEOUT", "6.0"))
         self.OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "8.0"))
@@ -158,7 +158,7 @@ class Settings:
 
         self.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 
-        self.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
 
         self.GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
@@ -287,6 +287,19 @@ class Settings:
         self.LAST_ASSISTANT_MSG = ""
         self.ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Trevon")
         self.CURRENT_ASSISTANT_NAME = None
+
+        # --- VOICE & SPEECH CONFIGURATION ---
+        self.STT_ENGINE = os.getenv("STT_ENGINE", "whisper")
+        self.STT_MODEL = os.getenv("STT_MODEL", "small")
+        self.VAD_ENGINE = os.getenv("VAD_ENGINE", "neural")
+
+        # --- LLM LATENCY & TIME BUDGET CONFIGURATION ---
+        self.LLM_INTERACTIVE_BUDGET = float(os.getenv("LLM_INTERACTIVE_BUDGET", "5.0"))
+        self.LLM_PER_PROVIDER_TIMEOUT = float(os.getenv("LLM_PER_PROVIDER_TIMEOUT", "2.5"))
+        self.LLM_ENABLE_RACING = os.getenv("LLM_ENABLE_RACING", "true").lower() in ("true", "1", "yes")
+        self.LLM_HEDGED_DELAY = float(os.getenv("LLM_HEDGED_DELAY", "1.2"))
+        self.LLM_FALLBACK_SPOKEN_REPLY = os.getenv("LLM_FALLBACK_SPOKEN_REPLY", "I'm having trouble reaching my language model, but I can still do local commands")
+        self.ENABLE_PROGRESS_CUE = os.getenv("ENABLE_PROGRESS_CUE", "true").lower() in ("true", "1", "yes")
 
 
 

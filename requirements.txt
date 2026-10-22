@@ -24,3 +24,6 @@ pyaudio
 yt-dlp
 PyQt6
 qtawesome
+faster-whisper
+onnxruntime
+soundfile

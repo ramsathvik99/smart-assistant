@@ -1966,7 +1966,7 @@ def detect_and_store_fact(user_id=None, text=None):
     )
     if match:
         raw_entity = match.group(1).strip()
-        val = match.group(2).strip().rstrip(".!?")
+        val = text_clean[match.start(2):].strip().rstrip(".!?")
 
         # Entity must be a concise noun phrase (1-3 words) and not contain conversational noise
         entity_words = raw_entity.split()
@@ -1983,6 +1983,30 @@ def detect_and_store_fact(user_id=None, text=None):
             get_chatgpt_memory().set_user_fact(user_id, key, val, confidence=0.98, source="explicit_user_store")
         except Exception:
             update_user_memory(user_id, key, val)
+
+        if key in ("full_name", "name", "my_name"):
+            for k_alias in ("full_name", "name", "preferred_name"):
+                try:
+                    from core.chatgpt_memory import get_chatgpt_memory
+                    get_chatgpt_memory().set_user_fact(user_id, k_alias, val, confidence=0.99, source="explicit_user_store")
+                except Exception:
+                    update_user_memory(user_id, k_alias, val)
+
+        if key in ("10th_school", "tenth_school", "10th", "tenth"):
+            for k_alias in ("10th", "tenth", "tenth_school", "school"):
+                try:
+                    from core.chatgpt_memory import get_chatgpt_memory
+                    get_chatgpt_memory().set_user_fact(user_id, k_alias, val, confidence=0.98, source="explicit_user_store")
+                except Exception:
+                    update_user_memory(user_id, k_alias, val)
+
+        if key in ("intermediate_college", "inter_college", "intermediate", "junior_college"):
+            for k_alias in ("intermediate", "intermediate_college", "junior_college"):
+                try:
+                    from core.chatgpt_memory import get_chatgpt_memory
+                    get_chatgpt_memory().set_user_fact(user_id, k_alias, val, confidence=0.98, source="explicit_user_store")
+                except Exception:
+                    update_user_memory(user_id, k_alias, val)
 
         # Dual-store for UK/US spelling if favorite/favourite
         if "favorite" in key:
@@ -2002,6 +2026,40 @@ def detect_and_store_fact(user_id=None, text=None):
 
         resp = f"Understood. I'll remember that your {raw_entity} is {val}."
         return True, resp
+
+    # Pattern 1b: Explicit 10th schooling statement
+    # e.g. "I studied my 10th at Ongole Sai Baba Central School"
+    match_10th = re.search(
+        r"\b(?:i\s+(?:studied|did|completed|attended|went\s+to)\s+(?:my\s+)?(?:10th(?:\s+grade)?|tenth(?:\s+grade)?|schooling)|my\s+(?:10th|tenth)\s+(?:school\s+)?(?:was|is|=))\s+(?:at|in|from)?\s*(.+)$",
+        text_lower
+    )
+    if match_10th:
+        val = text_clean[match_10th.start(1):].strip().rstrip(".!?")
+        if val:
+            for k in ("10th", "tenth", "tenth_school", "school"):
+                try:
+                    from core.chatgpt_memory import get_chatgpt_memory
+                    get_chatgpt_memory().set_user_fact(user_id, k, val, confidence=0.98, source="explicit_user_store")
+                except Exception:
+                    update_user_memory(user_id, k, val)
+            return True, f"Understood. I'll remember that you studied your 10th grade at {val}."
+
+    # Pattern 1c: Explicit intermediate college statement
+    # e.g. "I completed intermediate at Narayana Junior College in Nellore"
+    match_inter = re.search(
+        r"\b(?:i\s+(?:studied|did|completed|attended|went\s+to)\s+(?:my\s+)?(?:intermediate|inter|\+2|plus\s+two|junior\s+college)|my\s+(?:intermediate|inter)\s+(?:college\s+)?(?:was|is|=))\s+(?:at|in|from)?\s*(.+)$",
+        text_lower
+    )
+    if match_inter:
+        val = text_clean[match_inter.start(1):].strip().rstrip(".!?")
+        if val:
+            for k in ("intermediate", "intermediate_college", "junior_college"):
+                try:
+                    from core.chatgpt_memory import get_chatgpt_memory
+                    get_chatgpt_memory().set_user_fact(user_id, k, val, confidence=0.98, source="explicit_user_store")
+                except Exception:
+                    update_user_memory(user_id, k, val)
+            return True, f"Understood. I'll remember that you completed your intermediate at {val}."
 
     # Pattern 2: "remember that X is Y" / "remember this test phrase: Y" / "remember X is Y"
     match = re.search(r"^(?:please\s+)?(?:remember|note)\s+(?:that\s+)?(.+)$", text_lower)

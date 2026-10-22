@@ -888,6 +888,11 @@ def dashboard_stylesheet(accent_hex: str = C.ACCENT_CYAN) -> str:
         border: 1px solid {acc_border_a};
     }}
     .NavButton[active="true"]:hover {{ background: {acc_dim2}; }}
+    .NavButton[collapsed="true"] {{
+        text-align: center;
+        padding: 10px 0px 10px 0px;
+        margin: 2px 8px;
+    }}
 
     /* ---------- Buttons — standard ---------- */
     QPushButton {{

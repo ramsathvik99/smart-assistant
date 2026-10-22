@@ -43,6 +43,8 @@ class RequestLatencyTracker:
             "tts_playback_start_timestamp": None,
             "tts_playback_end_timestamp": None,
         }
+        self.llm_call_count: int = 0
+        self.providers_tried: list = []
         self.cancellation_reason: Optional[str] = None
         self.timeout_reason: Optional[str] = None
         self.fallback_reason: Optional[str] = None
@@ -52,6 +54,13 @@ class RequestLatencyTracker:
         """Record monotonic timestamp for a pipeline step."""
         now = ts if ts is not None else time.monotonic()
         self.timestamps[metric_name] = now
+
+    def record_llm_call(self, provider: str) -> None:
+        """Record that an LLM provider call was made."""
+        self.llm_call_count += 1
+        p = str(provider).strip().lower()
+        if p and p not in self.providers_tried:
+            self.providers_tried.append(p)
 
     def set_reason(self, cancellation: Optional[str] = None, timeout: Optional[str] = None, fallback: Optional[str] = None) -> None:
         if cancellation:
@@ -84,12 +93,25 @@ class RequestLatencyTracker:
         if text_ready_ref is not None and t_ans is not None:
             text_avail_lat = max(0.0, (t_ans - text_ready_ref) * 1000.0)
 
-        tts_synth_lat = self._diff_ms("tts_request_timestamp", "tts_first_audio_timestamp")
-        tts_first_audio_lat = self._diff_ms("utterance_end_timestamp", "tts_first_audio_timestamp") or tts_synth_lat
+        # TTFA: Text ready / TTS request to first audio
+        tts_req_ref = self.timestamps.get("text_answer_available_timestamp") or self.timestamps.get("tts_request_timestamp")
+        t_first_audio = self.timestamps.get("tts_first_audio_timestamp")
+        tts_synth_lat = None
+        if tts_req_ref is not None and t_first_audio is not None:
+            tts_synth_lat = max(0.0, (t_first_audio - tts_req_ref) * 1000.0)
+        elif self.timestamps.get("tts_request_timestamp") is not None and t_first_audio is not None:
+            tts_synth_lat = self._diff_ms("tts_request_timestamp", "tts_first_audio_timestamp")
+
+        # Total time to first audible output: from end of speech (or transcription complete) to first sound
+        eos_ref = self.timestamps.get("utterance_end_timestamp") or self.timestamps.get("transcription_complete_timestamp") or self.timestamps.get("routing_start_timestamp")
+        tts_first_audio_lat = None
+        if eos_ref is not None and t_first_audio is not None:
+            tts_first_audio_lat = max(0.0, (t_first_audio - eos_ref) * 1000.0)
+        elif tts_synth_lat is not None:
+            tts_first_audio_lat = tts_synth_lat
+
         playback_dur = self._diff_ms("tts_playback_start_timestamp", "tts_playback_end_timestamp")
         
-        # End-to-end: start of request (utterance_end, transcription_complete, routing_start, or capture_start)
-        # to end of interaction (tts_playback_end, tts_first_audio, text_answer_available, or routing_complete)
         e2e_start = (
             self.timestamps.get("utterance_end_timestamp")
             or self.timestamps.get("transcription_complete_timestamp")
@@ -132,6 +154,28 @@ class RequestLatencyTracker:
             f"PERFORMANCE TELEMETRY [{self.request_id}]",
             f"==================================================",
         ]
+        
+        # Summary highlights required by user specification:
+        asr_ms = metrics.get("ASR recognition latency")
+        asr_str = f"{asr_ms:6.1f} ms" if asr_ms is not None else "   N/A"
+        lines.append(f"{'end-of-speech to text (Whisper)':<34}: {asr_str}")
+
+        routing_ms = metrics.get("intent classification & routing")
+        routing_str = f"{routing_ms:6.1f} ms" if routing_ms is not None else "   N/A"
+        lines.append(f"{'routing & LLM processing time':<34}: {routing_str}")
+
+        prov_str = f"{self.llm_call_count} calls {self.providers_tried if self.providers_tried else '[]'}"
+        lines.append(f"{'LLM calls & providers tried':<34}: {prov_str}")
+
+        ttfa_ms = metrics.get("TTS time to first audio (TTFA)")
+        ttfa_str = f"{ttfa_ms:6.1f} ms" if ttfa_ms is not None else "   N/A"
+        lines.append(f"{'text-ready to first audio (TTFA)':<34}: {ttfa_str}")
+
+        sound_ms = metrics.get("time to first audible output")
+        sound_str = f"{sound_ms:6.1f} ms" if sound_ms is not None else "   N/A"
+        lines.append(f"{'end-of-speech to first sound':<34}: {sound_str}")
+
+        lines.append(f"--------------------------------------------------")
         for name, val in metrics.items():
             val_str = f"{val:6.1f} ms" if val is not None else "   N/A"
             lines.append(f"{name:<34}: {val_str}")

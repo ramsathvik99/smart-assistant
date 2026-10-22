@@ -1025,7 +1025,7 @@ def set_volume(level: int) -> Dict[str, Any]:
     cur_res = get_volume()
     if cur_res.get("success") and cur_res.get("level") is not None:
         curr_lvl = cur_res["level"]
-        if abs(curr_lvl - target) <= 2:
+        if curr_lvl == target:
             return {
                 "success": True,
                 "already_satisfied": True,
@@ -1076,6 +1076,14 @@ def volume_up(steps: int = 10) -> Dict[str, Any]:
     cur_res = get_volume()
     if cur_res.get("success") and cur_res.get("level") is not None:
         start_lvl = cur_res["level"]
+        if start_lvl >= 100:
+            return {
+                "success": True,
+                "already_satisfied": True,
+                "level": 100,
+                "start_level": 100,
+                "message": "Volume is already at maximum (100%)."
+            }
         target = min(100, start_lvl + steps)
         res = set_volume(target)
         if res.get("success"):
@@ -1113,6 +1121,14 @@ def volume_down(steps: int = 10) -> Dict[str, Any]:
     cur_res = get_volume()
     if cur_res.get("success") and cur_res.get("level") is not None:
         start_lvl = cur_res["level"]
+        if start_lvl <= 0:
+            return {
+                "success": True,
+                "already_satisfied": True,
+                "level": 0,
+                "start_level": 0,
+                "message": "Volume is already muted (0%)."
+            }
         target = max(0, start_lvl - steps)
         res = set_volume(target)
         if res.get("success"):

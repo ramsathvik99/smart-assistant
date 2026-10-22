@@ -1,13 +1,14 @@
 {
   "ui_preferences": {
     "8": {
-      "ambient_3d_state_reactive": "True",
+      "assistant_voice_rate": "135",
+      "voice_rate": "135",
+      "voice_pitch": "100",
       "voice_volume": "1.0",
       "assistant_voice_volume": "1.0",
       "hotword_threshold": "0.35",
       "wake_word_enabled": "True",
-      "voice_activation_enabled": "True",
-      "primary_provider": "openai"
+      "voice_activation_enabled": "True"
     }
   }
 }

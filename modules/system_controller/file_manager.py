@@ -974,3 +974,330 @@ def profile_file_content(file_path: str) -> Dict[str, Any]:
         logger.error(f"[FILE] Profile file failed: {e}")
         return {"success": False, "status": "error", "message": f"Could not profile file: {e}"}
 
+
+# =============================================================================
+# REA INTEGRATION: READ-ONLY SQLITE DATABASE INSPECTION
+# Source: rea-main/src/sqlite/SqliteDatabaseInspection.ts
+# =============================================================================
+
+SQLITE_INPUT_BYTES_LIMIT = 256 * 1024 * 1024   # 256 MiB bound
+SQLITE_OUTPUT_BYTES_LIMIT = 16 * 1024 * 1024   # 16 MiB bound
+SQLITE_ROW_LIMIT_DEFAULT = 20
+SQLITE_ROW_LIMIT_MAX = 50
+
+
+def inspect_sqlite_database(
+    db_path: str,
+    table: Optional[str] = None,
+    columns: Optional[List[str]] = None,
+    schema_scope: str = "selected_table",
+    row_limit: int = SQLITE_ROW_LIMIT_DEFAULT
+) -> Dict[str, Any]:
+    """
+    Safely inspects an offline SQLite database snapshot using strictly read-only access.
+    
+    Ported directly from REA (src/sqlite/SqliteDatabaseInspection.ts & SqliteDatabaseLimits.ts).
+    Preserves all REA invariants:
+    - Zero mutation: connection opened in read-only mode via URI mode=ro.
+    - File SHA-256 integrity verified before and after inspection.
+    - Strict bounds: maximum input file size 256MB, row limit capped at 50.
+    - Security restriction: Views and virtual/shadow tables are never executed for row extraction.
+    - Full schema cataloging: tables (with without_rowid, strict flags), views, indexes, triggers.
+    - Clean typed projection of sample rows with BLOBs hex-encoded.
+    """
+    import sqlite3
+
+    if not db_path or not isinstance(db_path, str):
+        return {
+            "success": False,
+            "status": "error",
+            "error_type": "selection",
+            "message": "Invalid or missing SQLite database path."
+        }
+
+    clean_path = db_path.strip(' "\'')
+    abs_path = os.path.abspath(clean_path)
+
+    if not os.path.exists(abs_path):
+        return {
+            "success": False,
+            "status": "error",
+            "error_type": "selection",
+            "message": f"Database file not found: {abs_path}"
+        }
+
+    if not os.path.isfile(abs_path):
+        return {
+            "success": False,
+            "status": "error",
+            "error_type": "unsupported",
+            "message": f"Expected a regular file: {abs_path}"
+        }
+
+    file_size = os.path.getsize(abs_path)
+    if file_size > SQLITE_INPUT_BYTES_LIMIT:
+        return {
+            "success": False,
+            "status": "error",
+            "error_type": "memory",
+            "message": f"Database file exceeds maximum input size of 256 MiB ({file_size} bytes)."
+        }
+
+    # Verify initial SHA-256 hash
+    hasher_before = hashlib.sha256()
+    with open(abs_path, "rb") as f:
+        for chunk in iter(lambda: f.read(256 * 1024), b""):
+            hasher_before.update(chunk)
+    sha256_before = hasher_before.hexdigest()
+
+    limitations = [
+        "Database opened with mode=ro; zero mutation or write operations were permitted.",
+        "Row extraction is restricted strictly to confirmed ordinary tables to prevent side effects from views or virtual tables."
+    ]
+
+    conn = None
+    try:
+        # Use SQLite URI with mode=ro for guaranteed read-only snapshot inspection
+        uri = f"file:{abs_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+        cursor = conn.cursor()
+
+        # Database encoding
+        cursor.execute("PRAGMA encoding")
+        enc_row = cursor.fetchone()
+        database_encoding = enc_row[0] if enc_row else "UTF-8"
+
+        # Discover tables via PRAGMA main.table_list if supported, else fallback to sqlite_master
+        table_meta = {}
+        try:
+            cursor.execute("PRAGMA main.table_list")
+            for row in cursor.fetchall():
+                # schema, name, type, ncol, wr, strict
+                if len(row) >= 6 and row[0] == "main":
+                    table_meta[row[1]] = {
+                        "name": row[1],
+                        "kind": row[2],  # "table", "view", "virtual", "shadow"
+                        "column_count": row[3],
+                        "without_rowid": bool(row[4]),
+                        "strict": bool(row[5])
+                    }
+        except Exception:
+            pass
+
+        # Introspect schema objects from main.sqlite_master
+        cursor.execute("SELECT type, name, tbl_name, rootpage, sql FROM main.sqlite_master")
+        master_rows = cursor.fetchall()
+
+        schema_tables = []
+        schema_indexes = []
+        schema_views = []
+        schema_triggers = []
+
+        for obj_type, name, tbl_name, rootpage, sql in master_rows:
+            if obj_type == "table":
+                meta = table_meta.get(name, {
+                    "name": name,
+                    "kind": "table",
+                    "column_count": None,
+                    "without_rowid": False,
+                    "strict": False
+                })
+                table_entry = {
+                    "name": name,
+                    "kind": meta["kind"],
+                    "root_page": rootpage,
+                    "without_rowid": meta["without_rowid"],
+                    "strict": meta["strict"],
+                    "column_count": meta["column_count"],
+                    "sql": sql,
+                    "columns": []
+                }
+                # Introspect columns for this table
+                try:
+                    cursor.execute(f'PRAGMA table_info("{name}")')
+                    cols = []
+                    for cid, col_name, col_type, notnull, dflt, pk in cursor.fetchall():
+                        cols.append({
+                            "cid": cid,
+                            "name": col_name,
+                            "declared_type": col_type or "",
+                            "not_null": bool(notnull),
+                            "default_sql": dflt,
+                            "primary_key_position": pk,
+                            "hidden": 0
+                        })
+                    table_entry["columns"] = cols
+                except Exception:
+                    pass
+                schema_tables.append(table_entry)
+
+            elif obj_type == "index":
+                schema_indexes.append({
+                    "name": name,
+                    "table": tbl_name,
+                    "root_page": rootpage,
+                    "sql": sql
+                })
+            elif obj_type == "view":
+                schema_views.append({
+                    "name": name,
+                    "sql": sql
+                })
+            elif obj_type == "trigger":
+                schema_triggers.append({
+                    "name": name,
+                    "table": tbl_name,
+                    "sql": sql
+                })
+
+        # Selected table validation and row extraction
+        rows_payload = None
+        selected_table_info = None
+
+        if table:
+            selected_table_info = next((t for t in schema_tables if t["name"] == table), None)
+            if not selected_table_info:
+                # Check if it exists as a view
+                view_match = next((v for v in schema_views if v["name"] == table), None)
+                if view_match:
+                    return {
+                        "success": False,
+                        "status": "error",
+                        "error_type": "selection",
+                        "message": f"Rows from view table {table} are outside the ordinary-table inspection profile."
+                    }
+                return {
+                    "success": False,
+                    "status": "error",
+                    "error_type": "selection",
+                    "message": f"Selected ordinary table does not exist with that exact name: {table}"
+                }
+
+            if selected_table_info["kind"] != "table":
+                return {
+                    "success": False,
+                    "status": "error",
+                    "error_type": "selection",
+                    "message": f"Rows from {selected_table_info['kind']} table {table} are outside the ordinary-table inspection profile."
+                }
+
+            # Column validation
+            available_cols = [c["name"] for c in selected_table_info["columns"]]
+            if columns:
+                for col in columns:
+                    if col not in available_cols:
+                        return {
+                            "success": False,
+                            "status": "error",
+                            "error_type": "column-selection",
+                            "message": f"Selected column does not exist with that exact name in table {table}: {col}"
+                        }
+                target_cols = columns
+            else:
+                target_cols = available_cols
+
+            # Safe projection with bound limit
+            effective_limit = min(max(1, row_limit), SQLITE_ROW_LIMIT_MAX)
+            quoted_cols = ", ".join(f'"{c}"' for c in target_cols) if target_cols else "*"
+            cursor.execute(f'SELECT {quoted_cols} FROM "{table}" LIMIT ?', (effective_limit,))
+            raw_rows = cursor.fetchall()
+
+            # Format cell values safely (hex encode bytes/blobs, stringify large bigints)
+            formatted_values = []
+            for r in raw_rows:
+                formatted_row = []
+                for val in r:
+                    if isinstance(val, (bytes, bytearray)):
+                        formatted_row.append({"type": "blob", "hex": val.hex()})
+                    else:
+                        formatted_row.append(val)
+                formatted_values.append(formatted_row)
+
+            # Check truncation
+            cursor.execute(f'SELECT 1 FROM "{table}" LIMIT 1 OFFSET ?', (effective_limit,))
+            truncated = cursor.fetchone() is not None
+
+            rows_payload = {
+                "table": table,
+                "columns": target_cols,
+                "values": formatted_values,
+                "row_limit": effective_limit,
+                "returned_rows": len(formatted_values),
+                "truncated": truncated,
+                "order": "unspecified"
+            }
+
+        conn.close()
+        conn = None
+
+    except sqlite3.DatabaseError as db_err:
+        return {
+            "success": False,
+            "status": "error",
+            "error_type": "format",
+            "message": f"SQLite database inspection error: {db_err}"
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "status": "error",
+            "error_type": "unavailable",
+            "message": f"Failed to inspect SQLite database: {exc}"
+        }
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # Verify post-inspection SHA-256 hash to prove 100% read-only integrity
+    hasher_after = hashlib.sha256()
+    with open(abs_path, "rb") as f:
+        for chunk in iter(lambda: f.read(256 * 1024), b""):
+            hasher_after.update(chunk)
+    sha256_after = hasher_after.hexdigest()
+
+    if sha256_before != sha256_after:
+        return {
+            "success": False,
+            "status": "error",
+            "error_type": "integrity-violation",
+            "message": "Integrity violation: SQLite database file was modified during inspection."
+        }
+
+    # Generate assistant speech summary
+    tbl_names = [t["name"] for t in schema_tables if t["kind"] == "table"]
+    speech_parts = [
+        f"SQLite database '{os.path.basename(abs_path)}' contains {len(tbl_names)} table(s)"
+        f" and {len(schema_views)} view(s)."
+    ]
+    if table and rows_payload:
+        speech_parts.append(
+            f" Sampled {rows_payload['returned_rows']} row(s) from table '{table}'"
+            f" (columns: {', '.join(rows_payload['columns'])})."
+        )
+    speech_parts.append(" Confirmed 100% read-only access (file digest verified unchanged).")
+    speech_msg = "".join(speech_parts)
+
+    return {
+        "success": True,
+        "artifact": {
+            "path": abs_path,
+            "sha256": sha256_after,
+            "bytes": file_size
+        },
+        "engine": "sqlite",
+        "database_encoding": database_encoding,
+        "schema": {
+            "scope": schema_scope,
+            "tables": schema_tables,
+            "views": schema_views,
+            "indexes": schema_indexes,
+            "triggers": schema_triggers
+        },
+        "rows": rows_payload,
+        "limitations": limitations,
+        "message": speech_msg
+    }
+

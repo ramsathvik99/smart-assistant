@@ -473,22 +473,31 @@ class RiskClassifier:
 def _check_existing_in_env(env: Dict[str, Any], cmd_low: str, intent: str) -> bool:
     """Check if a similar item already exists in environment to detect duplicate risk."""
     try:
+        _STOP_WORDS = {
+            "a", "an", "the", "to", "for", "in", "at", "on", "of", "and", "or", "me", "my",
+            "set", "remind", "reminder", "reminders", "alert", "task", "tasks", "please",
+            "can", "could", "you", "i", "we", "is", "it", "this", "that", "with", "from"
+        }
         if intent == "REMINDERS":
             existing = env.get("reminders") or env.get("active_reminders") or []
             if existing:
-                cmd_words = set(cmd_low.split())
+                cmd_content_words = {w for w in cmd_low.split() if w not in _STOP_WORDS and len(w) > 2}
                 for r in existing:
                     title = (r.get("title") or r.get("text") or "").lower()
-                    if title and len(cmd_words & set(title.split())) >= 2:
-                        return True
+                    if title:
+                        title_words = {w for w in title.split() if w not in _STOP_WORDS and len(w) > 2}
+                        if len(cmd_content_words & title_words) >= 2 or (len(title_words) == 1 and title_words.issubset(cmd_content_words)):
+                            return True
         elif intent == "TASK_MANAGEMENT":
             existing = env.get("tasks") or env.get("active_tasks") or []
             if existing:
-                cmd_words = set(cmd_low.split())
+                cmd_content_words = {w for w in cmd_low.split() if w not in _STOP_WORDS and len(w) > 2}
                 for t in existing:
                     title = (t.get("title") or t.get("name") or "").lower()
-                    if title and len(cmd_words & set(title.split())) >= 2:
-                        return True
+                    if title:
+                        title_words = {w for w in title.split() if w not in _STOP_WORDS and len(w) > 2}
+                        if len(cmd_content_words & title_words) >= 2 or (len(title_words) == 1 and title_words.issubset(cmd_content_words)):
+                            return True
         elif intent == "EMAIL":
             existing = env.get("sent_emails") or env.get("recent_sends") or env.get("in_flight_sends") or []
             if existing:

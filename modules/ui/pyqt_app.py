@@ -318,6 +318,13 @@ class AssistantApp(QObject):
         Non-fatal: if no profile exists (user hasn't configured voice yet), TTS uses engine defaults.
         """
         try:
+            if user_id:
+                try:
+                    from core.voice_migration import migrate_user_voice_to_neural
+                    migrate_user_voice_to_neural(user_id)
+                except Exception as _e_mig:
+                    logger.debug("[VOICE] Voice migration error: %s", _e_mig)
+
             from legacy.memory_manager import get_voice_profile_db, has_voice_profile_db
             profile = get_voice_profile_db(user_id)
             has_profile = has_voice_profile_db(user_id)
@@ -593,7 +600,7 @@ class AssistantApp(QObject):
 
         self._propagate_state("thinking")
         if self._cmd_thread:
-            self._cmd_thread.execute(text)
+            self._cmd_thread.execute(text, user_id=self._user_id)
 
     @pyqtSlot(str)
     def _on_cmd_started(self, cmd: str):
