@@ -43,9 +43,15 @@ desktop.ini
 .env.local
 .env.*.local
 *.key
+modules/assistant_email/secret.key
 data/screenshots/
 data/uploads/
 data/learned_rules/
+data/devices/
+data/smart_home/
+modules/assistant_email/data/user_emails.json
+modules/assistant_email/data/contacts.json
+modules/assistant_email/data/drafts.json
 
 # Logs
 *.log
@@ -101,3 +107,24 @@ instance/*.json
 # Old version reference and archives
 *.zip
 old_version_reference/
+
+# Windows
+*.exe
+*.msi
+*.dll
+*.so
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.directory
+
+# Benchmark results
+tools/benchmark_results.json
+
+# Model catalogs (user-specific)
+data/llm_model_catalog_user_*.json
