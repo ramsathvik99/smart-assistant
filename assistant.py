@@ -312,6 +312,21 @@ def main():
     except Exception:
         pass
 
+    # Start proactive personal assistant service in background
+    try:
+        from core.proactive_service import start_proactive_service
+        def _start_proactive():
+            try:
+                # Get global reminder scheduler instance
+                from extensions.reminder_engine.reminder_scheduler import get_reminder_scheduler
+                reminder_scheduler = get_reminder_scheduler()
+                start_proactive_service(reminder_scheduler=reminder_scheduler)
+            except Exception as e:
+                print(f"[PROACTIVE] Startup notice: {e}")
+        threading.Thread(target=_start_proactive, daemon=True, name="proactive-startup").start()
+    except Exception:
+        pass
+
     print("[ASSISTANT] Launching PyQt6 UI...")
     from modules.ui.pyqt_app import AssistantApp
     app = AssistantApp()
