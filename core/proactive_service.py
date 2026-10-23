@@ -133,19 +133,28 @@ class ProactiveService:
             # Get user's timezone
             timezone_str = self._get_user_timezone(user_id)
 
+            # Timezone-aware "now" for this user
+            try:
+                from core.temporal_context import get_user_local_now
+                now_local = get_user_local_now(timezone_str)
+            except Exception:
+                from datetime import datetime
+                now_local = datetime.now()
+
             # Load user facts
             from core.chatgpt_memory import ChatGPTMemoryManager
             memory_mgr = ChatGPTMemoryManager()
             facts = memory_mgr.get_user_facts(user_id)
             structured_memories = memory_mgr.get_structured_user_memories(user_id)
 
-            # Detect milestones
+            # Detect milestones — pass timezone-aware now so dates are correct
             from core.milestone_engine import MilestoneDetector, MilestoneScheduler
             milestones = MilestoneDetector.detect_milestones_from_facts(
                 user_id=user_id,
                 facts=facts,
                 structured_memories=structured_memories,
-                timezone_str=timezone_str
+                timezone_str=timezone_str,
+                now_override=now_local,
             )
 
             if not milestones:
@@ -164,9 +173,13 @@ class ProactiveService:
                     continue
 
                 # Schedule the milestone
-                # For birthdays, notify on the day (advance_days=0)
-                # For other events, notify 1 day in advance
-                advance_days = 0 if milestone.milestone_type.value == "birthday" else 1
+                # For birthdays and post-event follow-ups, notify on the day
+                # (advance_days=0). INTERVIEW_FOLLOWUP.date is already the day
+                # after the interview, so it must be delivered that day, not a
+                # day earlier (which would ask before the interview happened).
+                # For other events, notify 1 day in advance.
+                _same_day_types = ("birthday", "interview_followup")
+                advance_days = 0 if milestone.milestone_type.value in _same_day_types else 1
 
                 if milestone_scheduler.schedule_milestone(
                     milestone=milestone,

@@ -103,10 +103,15 @@ class ChatGPTMemoryManager:
         status: str = "confirmed",
         source_ref: str = "",
         expiration_date: Optional[datetime] = None,
+        supersedes_key: Optional[str] = None,
     ) -> bool:
         """
         Upsert a structured declarative user fact across memory_facts, user_memory, and user_preferences.
         Supports intelligent deduplication, progression updating, and temporal expiration.
+
+        When ``supersedes_key`` is provided and differs from ``key``, the old key's
+        active facts are marked superseded (history preserved as superseded rows) and
+        its stale mirror entry is removed so it no longer surfaces in get_user_facts.
         """
         if not user_id or not key or value is None:
             return False
@@ -188,6 +193,39 @@ class ChatGPTMemoryManager:
                             INSERT INTO memory_facts (user_id, fact_key, fact_value, confidence, source, last_accessed)
                             VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP);
                         """, (user_id, clean_key, clean_val, confidence, source))
+
+            # 1b. Cross-key supersession (e.g. graduation supersedes student_status,
+            # a job offer supersedes the old career goal). Mark the old key's active
+            # facts as superseded so get_user_facts / get_structured_user_memories
+            # filter them out, and drop the stale mirror key so the JSONB mirror
+            # cannot resurrect the outdated value.
+            if supersedes_key:
+                clean_old = str(supersedes_key).strip().lower().replace(" ", "_")[:100]
+                if clean_old and clean_old != clean_key:
+                    try:
+                        with self.pool.get_cursor() as cur:
+                            cur.execute("""
+                                SELECT id FROM memory_facts
+                                WHERE user_id = %s AND fact_key = %s
+                                ORDER BY id DESC LIMIT 1;
+                            """, (user_id, clean_key))
+                            _new_row = cur.fetchone()
+                            _new_id = _new_row[0] if _new_row else None
+                            cur.execute("""
+                                UPDATE memory_facts
+                                SET status = 'superseded', superseded_by = %s
+                                WHERE user_id = %s AND fact_key = %s
+                                  AND (status IS NULL OR status != 'superseded');
+                            """, (_new_id, user_id, clean_old))
+                    except Exception:
+                        pass
+
+                    # Remove the stale flat key from the user_memory JSONB mirror.
+                    try:
+                        from legacy.memory_manager import delete_memory_key
+                        delete_memory_key(user_id, clean_old)
+                    except Exception:
+                        pass
 
             # 2. Sync to user_memory JSONB
             try:
@@ -542,6 +580,7 @@ class ChatGPTMemoryManager:
                     status=cand.status,
                     source_ref=cand.source_ref,
                     expiration_date=cand.expiration_date,
+                    supersedes_key=cand.supersedes_key,
                 )
                 if success:
                     extracted.append((cand.key, cand.value))

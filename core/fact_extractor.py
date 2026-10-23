@@ -667,6 +667,13 @@ def extract_candidate_facts(text: str) -> List[ExtractedFact]:
             exp_date = now + timedelta(days=7)
 
         ev_val = f"{ev_type} {ev_when}"
+        # Embed a concrete ISO date for relative timings ("today"/"tomorrow") so
+        # the milestone detector can date the event after the fact. Absolute
+        # timings ("on April 15") are left as-is and parsed by month name.
+        if "tomorrow" in ev_when:
+            ev_val = f"{ev_type} {ev_when} ({(now + timedelta(days=1)).strftime('%Y-%m-%d')})"
+        elif "today" in ev_when:
+            ev_val = f"{ev_type} {ev_when} ({now.strftime('%Y-%m-%d')})"
         add_fact(ExtractedFact(
             key="commitment",
             value=ev_val,
@@ -729,6 +736,230 @@ def extract_candidate_facts(text: str) -> List[ExtractedFact]:
                 category="preferences",
                 confidence=0.98,
                 status="confirmed",
+                source_ref=raw_text
+            ))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # L. Birthday / Date-of-birth
+    # e.g. "My birthday is April 14", "My DOB is 14 April 2005", "I was born on 1996-07-22"
+    # ─────────────────────────────────────────────────────────────────────────
+    m_dob = re.search(
+        r'\b(?:my\s+(?:birthday|birth\s*day|date\s+of\s+birth|dob|birth\s+date)\s+is|'
+        r'i\s+was\s+born\s+(?:on|in))\s+'
+        r'([A-Za-z0-9,\s\-/]+?)(?:\.|,|$)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_dob:
+        dob_raw = _clean_str(m_dob.group(1))
+        if dob_raw:
+            add_fact(ExtractedFact(
+                key="birthday",
+                value=dob_raw,
+                category="identity",
+                confidence=0.99,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+            add_fact(ExtractedFact(
+                key="date_of_birth",
+                value=dob_raw,
+                category="identity",
+                confidence=0.99,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # M. Graduation confirmed (lifecycle transition)
+    # e.g. "I graduated last month", "I have graduated", "I graduated from SRM AP"
+    # ─────────────────────────────────────────────────────────────────────────
+    m_graduated = re.search(
+        r'\bi\s+(?:have\s+)?(?:graduated|completed\s+my\s+degree|finished\s+my\s+(?:degree|graduation))'
+        r'(?:\s+(?:from|at|in)\s+([a-zA-Z0-9\s–\-]+?))?(?:\.|,|\s+and\b|$)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_graduated:
+        inst_val = _clean_str(m_graduated.group(1)) if m_graduated.group(1) else "confirmed"
+        add_fact(ExtractedFact(
+            key="graduation_status",
+            value="graduated",
+            category="education",
+            confidence=0.97,
+            status="confirmed",
+            source_ref=raw_text,
+            supersedes_key="student_status"
+        ))
+        if inst_val and inst_val != "confirmed":
+            add_fact(ExtractedFact(
+                key="graduated_from",
+                value=inst_val,
+                category="education",
+                confidence=0.97,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # N. Employment confirmed (lifecycle transition)
+    # e.g. "I got a job at Google", "I got an offer from Microsoft", "I joined Amazon"
+    # ─────────────────────────────────────────────────────────────────────────
+    m_job_got = re.search(
+        r'\bi\s+(?:got\s+(?:a\s+)?(?:job|offer|position)\s+(?:at|from|with)|'
+        r'joined|am\s+now\s+working\s+at|started\s+working\s+at|am\s+employed\s+(?:at|by))\s+'
+        r'([a-zA-Z0-9\s–\-]+?)(?:\.|,|\s+and\b|\s+as\b|$)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_job_got:
+        company_val = _clean_str(m_job_got.group(1))
+        if company_val and len(company_val.split()) <= 5:
+            add_fact(ExtractedFact(
+                key="employer",
+                value=company_val,
+                category="employment",
+                confidence=0.97,
+                status="confirmed",
+                source_ref=raw_text,
+                supersedes_key="goal"
+            ))
+            add_fact(ExtractedFact(
+                key="employment_status",
+                value="employed",
+                category="employment",
+                confidence=0.97,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
+    # "I am still looking for a job / I am still in a job search"
+    m_job_search = re.search(
+        r'\bi\s+am\s+still\s+(?:looking\s+for\s+a\s+job|job\s+searching|in\s+a\s+job\s+search|applying)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_job_search:
+        add_fact(ExtractedFact(
+            key="employment_status",
+            value="job_searching",
+            category="employment",
+            confidence=0.95,
+            status="confirmed",
+            source_ref=raw_text
+        ))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # O. Travel / Trip dates
+    # e.g. "I'm traveling to Paris on December 10", "My flight is on Dec 15"
+    # ─────────────────────────────────────────────────────────────────────────
+    m_travel = re.search(
+        r'\b(?:i\'m\s+(?:traveling|flying|going)\s+to\s+(?:[a-zA-Z\s]+?)\s+on|'
+        r'my\s+(?:flight|trip|travel|departure)\s+is\s+(?:on\s+)?)\s*'
+        r'([A-Za-z0-9,\s]+?)(?:\.|,|$)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_travel:
+        travel_date_raw = _clean_str(m_travel.group(1))
+        if travel_date_raw:
+            add_fact(ExtractedFact(
+                key="travel_date",
+                value=travel_date_raw,
+                category="commitments",
+                confidence=0.90,
+                status="confirmed",
+                expiration_date=datetime.now() + timedelta(days=60),
+                source_ref=raw_text
+            ))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # P. Subscription / Payment renewal
+    # e.g. "My Netflix subscription renews on January 5"
+    # ─────────────────────────────────────────────────────────────────────────
+    m_subscription = re.search(
+        r'\bmy\s+([a-zA-Z0-9\s]+?)\s+(?:subscription|membership|renewal|bill)\s+'
+        r'(?:renews?|is\s+due|expires?)\s+(?:on\s+)?([A-Za-z0-9,\s]+?)(?:\.|,|$)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_subscription:
+        sub_name = _clean_str(m_subscription.group(1))
+        sub_date = _clean_str(m_subscription.group(2))
+        if sub_name and sub_date:
+            key_name = f"subscription_{sub_name.lower().replace(' ', '_')}_renewal"
+            add_fact(ExtractedFact(
+                key=key_name,
+                value=sub_date,
+                category="commitments",
+                confidence=0.90,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Q. Certification / document expiry
+    # e.g. "My AWS certification expires in March 2025"
+    # ─────────────────────────────────────────────────────────────────────────
+    m_cert = re.search(
+        r'\bmy\s+([a-zA-Z0-9\s]+?)\s+(?:certification|certificate|license|passport|visa)\s+'
+        r'(?:expires?|is\s+valid\s+until|valid\s+till)\s+(?:in\s+|on\s+)?([A-Za-z0-9,\s]+?)(?:\.|,|$)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_cert:
+        cert_name = _clean_str(m_cert.group(1))
+        cert_date = _clean_str(m_cert.group(2))
+        if cert_name and cert_date:
+            key_name = f"certification_{cert_name.lower().replace(' ', '_')}_expiry"
+            add_fact(ExtractedFact(
+                key=key_name,
+                value=cert_date,
+                category="commitments",
+                confidence=0.90,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # R. "I no longer want X reminders" — explicit opt-out preference
+    # ─────────────────────────────────────────────────────────────────────────
+    m_no_remind = re.search(
+        r'\bi\s+(?:no\s+longer\s+want|don\'t\s+want|do\s+not\s+want)\s+'
+        r'([a-zA-Z0-9\s]+?)\s+reminders?\b',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_no_remind:
+        remind_topic = _clean_str(m_no_remind.group(1)).lower().replace(" ", "_")
+        if remind_topic:
+            add_fact(ExtractedFact(
+                key=f"opt_out_{remind_topic}_reminders",
+                value="true",
+                category="preferences",
+                confidence=0.98,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # S. "I plan to X" — explicit future plan (status=planned)
+    # e.g. "I plan to take an exam next year", "I plan to join Google in July"
+    # ─────────────────────────────────────────────────────────────────────────
+    m_plan = re.search(
+        r'\bi\s+plan\s+to\s+([a-zA-Z0-9\s]+?)(?:\s+(?:next|in|on|by|before|after)\s+[a-zA-Z0-9,\s]+)?(?:\.|,|$)',
+        raw_text,
+        re.IGNORECASE
+    )
+    if m_plan and not m_tentative:  # avoid duplicate with tentative pattern above
+        plan_desc = _clean_str(m_plan.group(1))
+        if 1 <= len(plan_desc.split()) <= 8:
+            add_fact(ExtractedFact(
+                key="planned_event",
+                value=plan_desc,
+                category="goals",
+                confidence=0.88,
+                status="tentative",  # Plans are not confirmed until executed
                 source_ref=raw_text
             ))
 

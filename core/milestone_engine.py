@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time as dt_time
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -44,6 +44,11 @@ class MilestoneType(str, Enum):
     GOAL_CHECKPOINT = "goal_checkpoint"
     COMMITMENT = "commitment"
     CUSTOM_DATE = "custom_date"
+    SUBSCRIPTION_RENEWAL = "subscription_renewal"   # Subscription/payment reminders
+    TRAVEL_DATE = "travel_date"                      # Trips and travel preparation
+    CERTIFICATION_EXPIRY = "certification_expiry"   # Expiring certifications/documents
+    RECURRING_HABIT = "recurring_habit"              # Recurring commitments and habits
+    INTERVIEW_FOLLOWUP = "interview_followup"        # Post-interview outcome check-in
 
 
 class MilestoneStatus(str, Enum):
@@ -119,20 +124,60 @@ class MilestoneDetector:
         "career_goal", "goal", "career",
     }
 
+    # Subscription / payment keys
+    _SUBSCRIPTION_KEYS = {
+        "subscription", "renewal", "payment_due", "bill", "membership",
+    }
+
+    # Travel-related keys
+    _TRAVEL_KEYS = {
+        "travel", "trip", "flight", "vacation", "holiday", "departure",
+    }
+
+    # Certification/document expiry keys
+    _CERTIFICATION_KEYS = {
+        "certification", "certificate", "license", "passport", "visa",
+        "certification_expiry", "document_expiry",
+    }
+
+    @staticmethod
+    def _get_mem_field(mem: Dict[str, Any], *keys: str) -> str:
+        """
+        Retrieve a field from a structured memory record by trying multiple
+        key names. chatgpt_memory.get_structured_user_memories() returns
+        records with key='key' and key='value', while raw SQL or fact_extractor
+        returns fact_key / fact_value. Support both forms.
+        """
+        for k in keys:
+            v = mem.get(k)
+            if v is not None:
+                return str(v)
+        return ""
+
     @classmethod
     def detect_milestones_from_facts(
         cls,
         user_id: int,
         facts: Dict[str, str],
         structured_memories: List[Dict[str, Any]],
-        timezone_str: str = "UTC"
+        timezone_str: str = "UTC",
+        now_override: Optional[datetime] = None,
     ) -> List[Milestone]:
         """
         Scan user facts and structured memories for milestone candidates.
         Returns list of detected milestones with calculated next occurrences.
+
+        Args:
+            user_id: The account to scan (strict isolation enforced by caller)
+            facts: Dict of {fact_key: fact_value} from get_user_facts()
+            structured_memories: List of records from get_structured_user_memories()
+            timezone_str: User's IANA timezone for accurate date calculations
+            now_override: Optional timezone-aware datetime to use as "now".
+                          When provided by ProactiveService, this is the user's
+                          actual local time. Falls back to datetime.now() if None.
         """
         milestones: List[Milestone] = []
-        now = datetime.now()
+        now = now_override if now_override is not None else datetime.now()
 
         # 1. Personal Dates (birthdays, anniversaries)
         for key, value in facts.items():
@@ -160,11 +205,14 @@ class MilestoneDetector:
         # 2. Education Milestones (graduation, exams)
         for mem in structured_memories:
             cat = mem.get("category", "").lower()
-            val = mem.get("fact_value", "")
-            key = mem.get("fact_key", "")
+            # Support both 'fact_key'/'fact_value' (raw SQL) and 'key'/'value' (chatgpt_memory)
+            val = cls._get_mem_field(mem, "fact_value", "value")
+            key = cls._get_mem_field(mem, "fact_key", "key")
 
             if cat == "education" or any(ed_key in key.lower() for ed_key in cls._EDUCATION_KEYS):
-                # Graduation
+                # Graduation — only create milestone if status is not 'confirmed' completion
+                # (i.e., a planned graduation date, not a retroactively confirmed fact)
+                mem_status = mem.get("status", "confirmed")
                 if "graduation" in key.lower() or "grad" in key.lower():
                     parsed = cls._parse_date(val)
                     if parsed:
@@ -179,16 +227,20 @@ class MilestoneDetector:
                                 recurring=False,
                                 source_fact_key=key,
                                 source_fact_value=val,
-                                metadata={"original_date": parsed.isoformat() if hasattr(parsed, 'isoformat') else str(parsed)}
+                                metadata={
+                                    "original_date": parsed.isoformat() if hasattr(parsed, 'isoformat') else str(parsed),
+                                    "fact_status": mem_status,
+                                }
                             ))
 
                 # Exams, deadlines
-                if any(kw in val.lower() for kw in ("exam", "test", "deadline", "interview")):
+                val_low = val.lower()
+                if any(kw in val_low for kw in ("exam", "test", "deadline", "interview")):
                     parsed = cls._parse_date(val)
                     if parsed:
                         next_date = cls._calculate_next_occurrence(parsed, now, recurring=False)
                         if next_date and next_date >= now.date():
-                            milestone_type = MilestoneType.EXAM if "exam" in val.lower() or "test" in val.lower() else MilestoneType.INTERVIEW
+                            milestone_type = MilestoneType.EXAM if "exam" in val_low or "test" in val_low else MilestoneType.INTERVIEW
                             title = val[:50]  # Use first 50 chars as title
                             milestones.append(Milestone(
                                 milestone_id=cls._generate_milestone_id(user_id, key, milestone_type),
@@ -205,12 +257,13 @@ class MilestoneDetector:
         # 3. Career Milestones (job start, application deadlines)
         for mem in structured_memories:
             cat = mem.get("category", "").lower()
-            val = mem.get("fact_value", "")
-            key = mem.get("fact_key", "")
+            val = cls._get_mem_field(mem, "fact_value", "value")
+            key = cls._get_mem_field(mem, "fact_key", "key")
 
             if cat == "employment" or any(cr_key in key.lower() for cr_key in cls._CAREER_KEYS):
+                val_low = val.lower()
                 # Job start
-                if any(kw in val.lower() for kw in ("start", "join", "onboard")):
+                if any(kw in val_low for kw in ("start", "join", "onboard")):
                     parsed = cls._parse_date(val)
                     if parsed:
                         next_date = cls._calculate_next_occurrence(parsed, now, recurring=False)
@@ -228,7 +281,7 @@ class MilestoneDetector:
                             ))
 
                 # Application deadlines
-                if "deadline" in val.lower() or "apply" in val.lower():
+                if "deadline" in val_low or "apply" in val_low:
                     parsed = cls._parse_date(val)
                     if parsed:
                         next_date = cls._calculate_next_occurrence(parsed, now, recurring=False)
@@ -249,8 +302,8 @@ class MilestoneDetector:
         for mem in structured_memories:
             cat = mem.get("category", "").lower()
             if cat == "commitments":
-                val = mem.get("fact_value", "")
-                key = mem.get("fact_key", "")
+                val = cls._get_mem_field(mem, "fact_value", "value")
+                key = cls._get_mem_field(mem, "fact_key", "key")
                 parsed = cls._parse_date(val)
                 if parsed:
                     next_date = cls._calculate_next_occurrence(parsed, now, recurring=False)
@@ -260,6 +313,104 @@ class MilestoneDetector:
                             user_id=user_id,
                             milestone_type=MilestoneType.COMMITMENT,
                             title=val[:50],
+                            date=next_date,
+                            recurring=False,
+                            source_fact_key=key,
+                            source_fact_value=val,
+                            metadata={"original_date": parsed.isoformat() if hasattr(parsed, 'isoformat') else str(parsed)}
+                        ))
+
+        # 4b. Interview follow-up (post-event, outcome unknown)
+        # After an interview date has passed (within a short follow-up window),
+        # ask how it went rather than assuming success or failure. Consent is
+        # enforced at scheduling time via the INTERVIEW_FOLLOWUP -> proactive_career
+        # mapping in MilestoneScheduler.
+        _followup_window_days = 2
+        for mem in structured_memories:
+            val = cls._get_mem_field(mem, "fact_value", "value")
+            key = cls._get_mem_field(mem, "fact_key", "key")
+            if "interview" not in val.lower() and "interview" not in key.lower():
+                continue
+            parsed = cls._parse_date(val)
+            if not parsed:
+                continue
+            # Follow-up window: interview has happened, but only recently
+            days_since = (now.date() - parsed).days
+            if 0 < days_since <= _followup_window_days:
+                followup_date = parsed + timedelta(days=1)
+                milestones.append(Milestone(
+                    milestone_id=cls._generate_milestone_id(user_id, f"{key}_interview_followup", MilestoneType.INTERVIEW_FOLLOWUP),
+                    user_id=user_id,
+                    milestone_type=MilestoneType.INTERVIEW_FOLLOWUP,
+                    title="Interview Follow-up",
+                    date=followup_date,
+                    recurring=False,
+                    source_fact_key=key,
+                    source_fact_value=val,
+                    metadata={"interview_date": parsed.isoformat()}
+                ))
+
+        # 5. Subscription / Payment renewals
+        for mem in structured_memories:
+            cat = mem.get("category", "").lower()
+            val = cls._get_mem_field(mem, "fact_value", "value")
+            key = cls._get_mem_field(mem, "fact_key", "key")
+
+            if any(sub_key in key.lower() for sub_key in cls._SUBSCRIPTION_KEYS):
+                parsed = cls._parse_date(val)
+                if parsed:
+                    next_date = cls._calculate_next_occurrence(parsed, now, recurring=True)
+                    if next_date:
+                        milestones.append(Milestone(
+                            milestone_id=cls._generate_milestone_id(user_id, key, MilestoneType.SUBSCRIPTION_RENEWAL),
+                            user_id=user_id,
+                            milestone_type=MilestoneType.SUBSCRIPTION_RENEWAL,
+                            title=f"Renewal: {key.replace('_', ' ').title()}",
+                            date=next_date,
+                            recurring=True,
+                            recurrence_rule="yearly",
+                            source_fact_key=key,
+                            source_fact_value=val,
+                            metadata={"original_date": parsed.isoformat() if hasattr(parsed, 'isoformat') else str(parsed)}
+                        ))
+
+        # 6. Travel dates
+        for mem in structured_memories:
+            val = cls._get_mem_field(mem, "fact_value", "value")
+            key = cls._get_mem_field(mem, "fact_key", "key")
+
+            if any(tr_key in key.lower() for tr_key in cls._TRAVEL_KEYS):
+                parsed = cls._parse_date(val)
+                if parsed:
+                    next_date = cls._calculate_next_occurrence(parsed, now, recurring=False)
+                    if next_date and next_date >= now.date():
+                        milestones.append(Milestone(
+                            milestone_id=cls._generate_milestone_id(user_id, key, MilestoneType.TRAVEL_DATE),
+                            user_id=user_id,
+                            milestone_type=MilestoneType.TRAVEL_DATE,
+                            title=f"Travel: {key.replace('_', ' ').title()}",
+                            date=next_date,
+                            recurring=False,
+                            source_fact_key=key,
+                            source_fact_value=val,
+                            metadata={"original_date": parsed.isoformat() if hasattr(parsed, 'isoformat') else str(parsed)}
+                        ))
+
+        # 7. Certification / document expiry
+        for mem in structured_memories:
+            val = cls._get_mem_field(mem, "fact_value", "value")
+            key = cls._get_mem_field(mem, "fact_key", "key")
+
+            if any(cert_key in key.lower() for cert_key in cls._CERTIFICATION_KEYS):
+                parsed = cls._parse_date(val)
+                if parsed:
+                    next_date = cls._calculate_next_occurrence(parsed, now, recurring=False)
+                    if next_date and next_date >= now.date():
+                        milestones.append(Milestone(
+                            milestone_id=cls._generate_milestone_id(user_id, key, MilestoneType.CERTIFICATION_EXPIRY),
+                            user_id=user_id,
+                            milestone_type=MilestoneType.CERTIFICATION_EXPIRY,
+                            title=f"Expiry: {key.replace('_', ' ').title()}",
                             date=next_date,
                             recurring=False,
                             source_fact_key=key,
@@ -283,6 +434,15 @@ class MilestoneDetector:
             return datetime.strptime(text, "%Y-%m-%d").date()
         except ValueError:
             pass
+
+        # Embedded ISO date within surrounding text: "interview tomorrow (2026-10-24)"
+        import re as _re
+        _iso = _re.search(r'\b(\d{4}-\d{2}-\d{2})\b', text)
+        if _iso:
+            try:
+                return datetime.strptime(_iso.group(1), "%Y-%m-%d").date()
+            except ValueError:
+                pass
 
         # Month name + day [+ year]: "April 14, 2005"
         months = {
@@ -320,18 +480,29 @@ class MilestoneDetector:
         Calculate the next occurrence of a date.
         For recurring dates (birthdays), calculate next birthday.
         For one-time dates, return the date if it's in the future.
+
+        Handles Feb 29 (leap day) birthdays correctly:
+        - In a non-leap year, the birthday is celebrated on Mar 1.
+        - The returned date is always a valid calendar date.
         """
+        import calendar
         if not original_date:
             return None
 
+        def _safe_birthday(year: int, month: int, day: int) -> date:
+            """Return a valid date for the given year, handling Feb 29 in non-leap years."""
+            if month == 2 and day == 29 and not calendar.isleap(year):
+                return date(year, 3, 1)  # Celebrate on Mar 1 in non-leap years
+            return date(year, month, day)
+
         if recurring:
             # For yearly recurring (birthdays, anniversaries)
-            this_year_occurrence = date(now.year, original_date.month, original_date.day)
+            this_year_occurrence = _safe_birthday(now.year, original_date.month, original_date.day)
             if this_year_occurrence >= now.date():
                 return this_year_occurrence
             else:
                 # Already passed this year, next year
-                return date(now.year + 1, original_date.month, original_date.day)
+                return _safe_birthday(now.year + 1, original_date.month, original_date.day)
         else:
             # One-time event
             if original_date >= now.date():
@@ -416,8 +587,19 @@ class MilestoneScheduler:
         # Create reminder ID
         reminder_id = f"milestone_{milestone.milestone_id}"
 
-        # Calculate target datetime
-        target_datetime = datetime.combine(notify_date, datetime.min.time())
+        # Calculate target datetime at the user's configured notification time
+        # (default 09:00 local) so delivery matches the quiet-hours check instead
+        # of silently firing at midnight.
+        hour, minute = self._get_notification_time_of_day(milestone.user_id)
+        target_datetime = datetime.combine(notify_date, dt_time(hour=hour, minute=minute))
+
+        # Same-day prompt delivery: if the configured notification moment has
+        # already passed today but the milestone is still current, deliver
+        # promptly rather than letting the reminder engine roll it a full day
+        # late (the day-late birthday bug).
+        now_local = datetime.now()
+        if target_datetime <= now_local and notify_date >= now_local.date():
+            target_datetime = now_local + timedelta(seconds=30)
 
         # Schedule using existing reminder scheduler
         try:
@@ -447,6 +629,24 @@ class MilestoneScheduler:
                 return True
         return False
 
+    def _get_notification_time_of_day(self, user_id: int):
+        """Return the user's configured proactive notification time as (hour, minute).
+
+        Falls back to 09:00 local when unset or unparseable, matching the default
+        used by the quiet-hours check.
+        """
+        try:
+            from core.configuration_service import get_configuration_service
+            cfg = get_configuration_service()
+            notif_str = cfg.get_preference(user_id, "proactive_notification_time")
+            if notif_str:
+                parts = str(notif_str).strip().split(":")
+                if len(parts) >= 2:
+                    return int(parts[0]), int(parts[1])
+        except Exception:
+            pass
+        return 9, 0  # Default 09:00 local
+
     def _is_proactive_enabled(self, user_id: int) -> bool:
         """Check if user has proactive interactions enabled."""
         try:
@@ -471,12 +671,17 @@ class MilestoneScheduler:
                 MilestoneType.GRADUATION: "proactive_education",
                 MilestoneType.EXAM: "proactive_education",
                 MilestoneType.INTERVIEW: "proactive_career",
+                MilestoneType.INTERVIEW_FOLLOWUP: "proactive_career",
                 MilestoneType.APPLICATION_DEADLINE: "proactive_career",
                 MilestoneType.JOB_START: "proactive_career",
                 MilestoneType.PROJECT_DEADLINE: "proactive_projects",
                 MilestoneType.GOAL_CHECKPOINT: "proactive_goals",
                 MilestoneType.COMMITMENT: "proactive_commitments",
                 MilestoneType.CUSTOM_DATE: "proactive_custom_dates",
+                MilestoneType.SUBSCRIPTION_RENEWAL: "proactive_subscriptions",
+                MilestoneType.TRAVEL_DATE: "proactive_travel",
+                MilestoneType.CERTIFICATION_EXPIRY: "proactive_certifications",
+                MilestoneType.RECURRING_HABIT: "proactive_habits",
             }
 
             pref_key = category_map.get(milestone_type, "proactive_general")
@@ -492,7 +697,15 @@ class MilestoneScheduler:
         target_date: date,
         timezone_str: str = "UTC"
     ) -> bool:
-        """Check if target time is within user's allowed quiet hours."""
+        """
+        Check whether the proposed notification time falls outside the user's
+        configured quiet hours.
+
+        Notification time is assumed to be the user's configured
+        'proactive_notification_time' (default 09:00 local time).
+        Quiet hours are enforced even across midnight boundaries
+        (e.g., start=22:00, end=08:00).
+        """
         try:
             from core.configuration_service import get_configuration_service
             cfg = get_configuration_service()
@@ -501,56 +714,150 @@ class MilestoneScheduler:
             if not quiet_hours_enabled:
                 return True  # No quiet hours restriction
 
-            quiet_start = cfg.get_preference(user_id, "quiet_hours_start")  # e.g., "22:00"
-            quiet_end = cfg.get_preference(user_id, "quiet_hours_end")  # e.g., "08:00"
+            quiet_start_str = cfg.get_preference(user_id, "quiet_hours_start")  # e.g. "22:00"
+            quiet_end_str = cfg.get_preference(user_id, "quiet_hours_end")    # e.g. "08:00"
 
-            if not quiet_start or not quiet_end:
+            if not quiet_start_str or not quiet_end_str:
                 return True  # No quiet hours configured
 
-            # For now, assume midday notifications (12:00 PM) are always allowed
-            # A full implementation would need time-of-day awareness
-            return True
+            # Determine proposed notification time (default 09:00)
+            notif_time_str = cfg.get_preference(user_id, "proactive_notification_time") or "09:00"
+
+            def _parse_hhmm(s: str):
+                """Parse HH:MM string into (hour, minute) tuple."""
+                parts = str(s).strip().split(":")
+                if len(parts) >= 2:
+                    try:
+                        return int(parts[0]), int(parts[1])
+                    except ValueError:
+                        pass
+                return None
+
+            qs = _parse_hhmm(quiet_start_str)
+            qe = _parse_hhmm(quiet_end_str)
+            nt = _parse_hhmm(notif_time_str)
+
+            if not (qs and qe and nt):
+                return True  # Unparseable config — allow by default
+
+            def _minutes(h, m):
+                return h * 60 + m
+
+            notif_mins = _minutes(*nt)
+            start_mins = _minutes(*qs)
+            end_mins = _minutes(*qe)
+
+            if start_mins <= end_mins:
+                # Simple range: quiet from start to end (same day)
+                in_quiet = start_mins <= notif_mins < end_mins
+            else:
+                # Overnight range: quiet from start to midnight + midnight to end
+                in_quiet = notif_mins >= start_mins or notif_mins < end_mins
+
+            return not in_quiet  # Allowed if NOT in quiet period
+
         except Exception as e:
             logger.debug(f"[MILESTONE] Error checking quiet hours: {e}")
             return True  # Default to allowed on error
 
     def _generate_proactive_message(self, milestone: Milestone) -> str:
-        """Generate a personality-aware proactive message for the milestone."""
+        """
+        Generate a personality-aware proactive message for the milestone.
+
+        For milestones whose outcome is uncertain (INTERVIEW_FOLLOWUP, EXAM
+        that has passed, etc.) the message is a question, never a fabricated
+        statement of result.
+        """
         # Get user's personality profile
         try:
             from extensions.personality_engine.personality_core import PersonalityCore
             personality = PersonalityCore()
             profile = personality.get_personality(user_id=milestone.user_id)
-            tone = profile.tone
             preset = profile.preset
         except Exception:
-            tone = "warm and approachable"
             preset = "friendly"
 
-        # Base message based on milestone type
+        # ── Birthday ────────────────────────────────────────────────────────
         if milestone.milestone_type == MilestoneType.BIRTHDAY:
             if preset == "professional":
-                msg = f"Happy Birthday! Wishing you a wonderful day."
+                msg = "Happy Birthday! Wishing you a productive and wonderful day."
             elif preset == "witty":
-                msg = f"Happy Birthday! Another year older, another year wiser (hopefully)."
+                msg = "Happy Birthday! Another year older, another year wiser — hopefully!"
             elif preset == "minimal":
-                msg = f"Happy Birthday."
-            else:  # friendly
-                msg = f"Happy Birthday! Hope you have an amazing day!"
+                msg = "Happy Birthday."
+            elif preset == "energetic":
+                msg = "Happy Birthday! 🎉 Hope your day is absolutely amazing!"
+            else:  # friendly / default
+                msg = "Happy Birthday! 🎂 Hope you have an amazing day!"
+
+        # ── Anniversary ─────────────────────────────────────────────────────
         elif milestone.milestone_type == MilestoneType.ANNIVERSARY:
             msg = f"Happy Anniversary! Celebrating {milestone.title}."
+
+        # ── Graduation ──────────────────────────────────────────────────────
         elif milestone.milestone_type == MilestoneType.GRADUATION:
-            msg = f"Congratulations on your graduation! 🎓"
+            msg = "Your graduation date is approaching! Wishing you all the best. 🎓"
+
+        # ── Interview (pre-event) ────────────────────────────────────────────
         elif milestone.milestone_type == MilestoneType.INTERVIEW:
-            msg = f"Good luck with your interview today! You've got this."
+            if preset == "professional":
+                msg = "Reminder: Your interview is today. Best of luck."
+            elif preset == "witty":
+                msg = "Interview day! Show them what you're made of — you've got this."
+            elif preset == "minimal":
+                msg = "Interview today. Good luck."
+            else:
+                msg = "Good luck with your interview today! You've got this. 💪"
+
+        # ── Interview follow-up (post-event, outcome unknown) ────────────────
+        elif milestone.milestone_type == MilestoneType.INTERVIEW_FOLLOWUP:
+            msg = "How did your interview go? I'd love to hear!"
+
+        # ── Application deadline ─────────────────────────────────────────────
         elif milestone.milestone_type == MilestoneType.APPLICATION_DEADLINE:
-            msg = f"Reminder: Application deadline is today for {milestone.title}."
+            msg = f"Reminder: Application deadline today — {milestone.title}. Don't miss it!"
+
+        # ── Job start ────────────────────────────────────────────────────────
         elif milestone.milestone_type == MilestoneType.JOB_START:
-            msg = f"Starting your new job today! Best of luck."
+            if preset == "professional":
+                msg = "Today is your first day at the new role. Wishing you a strong start."
+            elif preset == "witty":
+                msg = "First day at the new job — go make a great impression!"
+            else:
+                msg = "Starting your new job today! Best of luck. 🚀"
+
+        # ── Exam ────────────────────────────────────────────────────────────
         elif milestone.milestone_type == MilestoneType.EXAM:
-            msg = f"Good luck on your exam today! You're prepared."
+            msg = "Good luck on your exam today! You're prepared. 📚"
+
+        # ── Project deadline ─────────────────────────────────────────────────
+        elif milestone.milestone_type == MilestoneType.PROJECT_DEADLINE:
+            msg = f"Project deadline reminder: {milestone.title} is due today."
+
+        # ── Goal checkpoint ──────────────────────────────────────────────────
+        elif milestone.milestone_type == MilestoneType.GOAL_CHECKPOINT:
+            msg = f"Time to check in on your goal: {milestone.title}. How's it going?"
+
+        # ── Subscription renewal ─────────────────────────────────────────────
+        elif milestone.milestone_type == MilestoneType.SUBSCRIPTION_RENEWAL:
+            msg = f"Reminder: {milestone.title} renewal is coming up. Want to take any action?"
+
+        # ── Travel date ──────────────────────────────────────────────────────
+        elif milestone.milestone_type == MilestoneType.TRAVEL_DATE:
+            msg = f"Travel reminder: {milestone.title} is today. Have a safe journey! ✈️"
+
+        # ── Certification expiry ─────────────────────────────────────────────
+        elif milestone.milestone_type == MilestoneType.CERTIFICATION_EXPIRY:
+            msg = f"Heads up: {milestone.title} is expiring soon. Time to renew?"
+
+        # ── Recurring habit ───────────────────────────────────────────────────
+        elif milestone.milestone_type == MilestoneType.RECURRING_HABIT:
+            msg = f"Time for your recurring commitment: {milestone.title}."
+
+        # ── Commitment / default ─────────────────────────────────────────────
         elif milestone.milestone_type == MilestoneType.COMMITMENT:
             msg = f"Reminder: {milestone.title} is today."
+
         else:
             msg = f"Reminder: {milestone.title} is coming up."
 
