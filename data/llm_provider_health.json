@@ -1,5 +1,30 @@
 {
-  "providers": {},
+  "providers": {
+    "gemini": {
+      "expiry": 1793545178.0534377,
+      "reason": "Gemini quota exhausted",
+      "user_action": "Check Gemini quota",
+      "timestamp": 1793543379.0045583
+    },
+    "openai": {
+      "expiry": 1793545179.0573947,
+      "reason": "Quota/credits exhausted",
+      "user_action": "OpenAI quota exhausted",
+      "timestamp": 1793543380.064113
+    },
+    "deepseek": {
+      "expiry": 1793545180.074065,
+      "reason": "HTTP 402 insufficient balance",
+      "user_action": "DeepSeek balance is empty",
+      "timestamp": 1793543381.0685613
+    },
+    "anthropic": {
+      "expiry": 1793545180.1017761,
+      "reason": "No module named 'anthropic'",
+      "user_action": "pip install anthropic",
+      "timestamp": 1793543381.1090598
+    }
+  },
   "keys": {},
   "models": {
     "groq:openai/gpt-oss-120b": 1793539238.3903506,
