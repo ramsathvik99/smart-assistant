@@ -4,7 +4,7 @@ Features:
   • Multi-axis 3D tilted orbital rings with genuine depth partitioning (Z-buffer occlusion)
   • Dynamic pointer-responsive parallax camera (yaw/pitch tracking cursor movements)
   • 3D particle constellation field with proximity connection lines
-  • Multi-layered holographic Friday core with dynamic specular tracking
+  • Multi-layered holographic spatial core with dynamic specular tracking
   • Comprehensive real-time state responsiveness across all 7 assistant states:
     IDLE, LISTENING, THINKING, SPEAKING, EXECUTING, ERROR, OFFLINE
   • Motion accessibility and background pause optimizations
@@ -25,26 +25,13 @@ from PyQt6.QtWidgets import QWidget
 from ..ds import C, hex_to_rgb
 
 
-# Canonical state RGB color signatures
-_STATE_RGB: dict = {
-    "idle": (0, 212, 255),          # Vibrant Cyan
-    "listening": (0, 170, 255),     # Electric Azure
-    "thinking": (168, 85, 247),     # Cyber Violet
-    "speaking": (0, 229, 107),      # Neon Emerald
-    "executing": (255, 140, 0),     # Amber Gold
-    "working": (255, 140, 0),       # Amber Gold
-    "processing": (255, 140, 0),    # Amber Gold
-    "error": (255, 71, 87),         # Crimson Alert
-    "failed": (255, 71, 87),        # Crimson Alert
-    "offline": (74, 112, 128),      # Muted Slate
-    "paused": (74, 112, 128),       # Muted Slate
-    "muted": (74, 112, 128),        # Muted Slate
-    "disabled": (74, 112, 128),     # Muted Slate
-}
-
-
 def _state_rgb(state: str) -> tuple[int, int, int]:
-    return _STATE_RGB.get((state or "idle").lower(), _STATE_RGB["idle"])
+    s = (state or "idle").lower()
+    if s in ("error", "failed"):
+        return (255, 71, 87)
+    elif s in ("offline", "paused", "muted", "disabled"):
+        return (110, 125, 135)
+    return hex_to_rgb(C.ACC)
 
 
 class _Particle3D:
@@ -92,10 +79,8 @@ class AssistantOrbWidget(QWidget):
                 size=rng.uniform(1.8, 3.2),
             ))
 
-        # Main animation clock (~50 FPS)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(20)
+        # Driven exclusively by the master animation clock (sync_tick)
+        self._timer = None
 
     # ------------------------------------------------------------- Lifecycle & API
     def set_state(self, state: str):
@@ -131,13 +116,9 @@ class AssistantOrbWidget(QWidget):
 
     def hideEvent(self, ev):
         super().hideEvent(ev)
-        if self._timer.isActive():
-            self._timer.stop()
 
     def showEvent(self, ev):
         super().showEvent(ev)
-        if not self._timer.isActive():
-            self._timer.start(20)
 
     def _tick(self):
         if not self.isVisible():
@@ -153,6 +134,18 @@ class AssistantOrbWidget(QWidget):
         for p in self._particles:
             p.theta = (p.theta + 0.02 * p.speed * speed_mult) % (math.pi * 2)
 
+        self.update()
+
+    def sync_tick(self, master_time: float):
+        """Driven directly by the master animation clock."""
+        if not self.isVisible():
+            return
+        speed_mult = 0.4 if self._reduced_motion else 1.0
+        self._t = master_time * speed_mult
+        self._yaw += (self._target_yaw - self._yaw) * 0.08
+        self._pitch += (self._target_pitch - self._pitch) * 0.08
+        for p in self._particles:
+            p.theta = (p.theta + 0.02 * p.speed * speed_mult) % (math.pi * 2)
         self.update()
 
     # ------------------------------------------------------------- 3D Mathematics
@@ -283,7 +276,7 @@ class AssistantOrbWidget(QWidget):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(QPointF(cx, cy), rr_x, rr_y)
 
-        # ── 4. Central Holographic Friday Core Sphere ──────────────────────
+        # ── 4. Central Holographic Spatial Core Sphere ──────────────────────
         self._draw_holographic_core(p, cx, cy, base_r, r, g, b, state, t, audio)
 
         # ── 5. Render Foreground Orbital Elements (Z >= 0, In Front of Core)

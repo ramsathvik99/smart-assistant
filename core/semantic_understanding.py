@@ -684,7 +684,14 @@ class PostgresHistoricalMemoryRetriever:
             return "I don't have a record of where that was placed."
 
         # 7. Action Verification Query ("Did you open Notepad?", "Have you opened Notepad?")
-        if q_type == "action_verification" or rep.sub_intent == "ACTION_VERIFICATION" or any(p in user_input_low for p in ("did you open", "have you opened")):
+        is_negative_why = any(p in user_input_low for p in ("why didn't you", "why did you not", "why haven't you", "why have you not", "why won't you", "why wouldn't you", "why don't you"))
+        is_why_explanation = (
+            q_type == "explanation"
+            or rep.sub_intent == "EXPLANATION_QUERY"
+            or is_negative_why
+            or any(p in user_input_low for p in ("why did you", "why did we", "why was", "why would you", "what made you"))
+        )
+        if not is_why_explanation and (q_type == "action_verification" or rep.sub_intent == "ACTION_VERIFICATION" or any(p in user_input_low for p in ("did you open", "have you opened"))):
             target = rep.target_entity or "the application"
             # Check recent actions
             acts = self.retrieve_recent_actions(user_id, limit=5)
@@ -702,14 +709,43 @@ class PostgresHistoricalMemoryRetriever:
                 pass
             return f"No, I haven't opened {target.capitalize()}."
 
-        # 8. Action Explanation Query ("Why did you open Notepad?", "Why did you do that?")
-        if q_type == "explanation" or rep.sub_intent == "EXPLANATION_QUERY" or any(p in user_input_low for p in ("why did you open", "why did you do that")):
+        # 8. Negative Action Query ("Why didn't you open Chrome?", "Why haven't you opened Notepad?")
+        if is_negative_why:
             target = rep.target_entity or "that"
+            if target.lower() in ("that", "it", "the action", "the application", ""):
+                target = getattr(dialogue_state, "active_application", None) or "the application"
+            acts = self.retrieve_recent_actions(user_id, limit=5)
+            for a in acts:
+                cmd = str(a.get("command_signature") or a.get("command") or "").lower()
+                status = str(a.get("status") or "").lower()
+                if target.lower() in cmd:
+                    if "fail" in status or "error" in status:
+                        return f"I didn't open {target.capitalize()} because the operation failed: {a.get('error') or 'an unexpected error occurred'}."
+            was_requested = False
             if dialogue_state and hasattr(dialogue_state, "turns") and dialogue_state.turns:
-                for t in reversed(dialogue_state.turns[:-1]):
+                for t in dialogue_state.turns:
                     u_in = getattr(t, "user_input", "") or ""
-                    if target.lower() in u_in.lower() or any(w in u_in.lower() for w in ("notepad", "text editor", "put that into")):
-                        return f"I opened {target.capitalize()} earlier because you requested: '{u_in}'."
+                    if target.lower() in u_in.lower() and any(w in u_in.lower() for w in ("open", "launch", "start")):
+                        was_requested = True
+                        break
+            if was_requested:
+                return f"I didn't open {target.capitalize()} because the system was unable to execute the launch command successfully."
+            return f"I didn't open {target.capitalize()} because no command was issued to open it."
+
+        # 8b. Action Explanation Query ("Why did you open Notepad?", "Why did you do that?", "Why did you open it?")
+        if is_why_explanation or q_type == "explanation" or rep.sub_intent == "EXPLANATION_QUERY" or any(p in user_input_low for p in ("why did you open", "why did you do that", "why did you")):
+            target = rep.target_entity or "that"
+            if target.lower() in ("that", "it", "the action", "the application", ""):
+                target = getattr(dialogue_state, "active_application", None) or "that"
+            if dialogue_state and hasattr(dialogue_state, "turns") and dialogue_state.turns:
+                prior_turns = dialogue_state.turns[:-1] if len(dialogue_state.turns) > 1 else dialogue_state.turns
+                for t in reversed(prior_turns):
+                    u_in = getattr(t, "user_input", "") or ""
+                    if not u_in:
+                        continue
+                    if target.lower() in u_in.lower() or any(w in u_in.lower() for w in ("open", "launch", "start", "notepad", "chrome", "edge", "calculator")):
+                        verb_str = f"opened {target.capitalize()}" if any(w in u_in.lower() for w in ("open", "launch", "start")) else f"performed {target}"
+                        return f"I {verb_str} earlier because you requested: '{u_in}'."
             return f"I opened {target.capitalize()} earlier in response to your previous instruction."
 
         # Default fallback to general recent interaction summary
@@ -728,6 +764,58 @@ class SemanticUnderstandingEngine:
 
     def __init__(self):
         self.memory_retriever = PostgresHistoricalMemoryRetriever()
+
+    @staticmethod
+    def is_location_intelligence_query(text: str) -> bool:
+        """Determines if a query targets location intelligence, navigation, device location, or places."""
+        if not text:
+            return False
+        tl = text.lower().strip()
+        location_patterns = [
+            r'\b(?:where\s+am\s+i|where\s+am\s+i\s+located)\b',
+            r'\b(?:what(?:\x27s|\s+is)\s+(?:my\s+)?(?:current\s+)?location|check\s+(?:my\s+)?(?:current\s+)?location|get\s+(?:my\s+)?(?:current\s+)?location|find\s+(?:my\s+)?(?:current\s+)?location|my\s+current\s+location|current\s+location|my\s+location)\b',
+            r'\b(?:refresh|update|detect)\s+(?:my\s+)?(?:current\s+)?location\b',
+            r'\b(?:where\s+do\s+i\s+live|where(?:\x27s|\s+is)\s+my\s+home|what(?:\x27s|\s+is)\s+my\s+home\s+address|my\s+home\s+address|my\s+home\s+location)\b',
+            r'\b(?:where(?:\x27s|\s+is)\s+my\s+(?:phone|connected\s+phone|mobile|android|redmi)|locate\s+(?:my\s+)?(?:phone|mobile)|find\s+my\s+phone|track\s+my\s+phone|phone\s+location)\b',
+            r'\b(?:where(?:\x27s|\s+is)\s+my\s+(?:computer|pc|laptop)|locate\s+(?:my\s+)?(?:computer|pc|laptop)|find\s+my\s+(?:computer|pc|laptop)|computer\s+location|pc\s+location)\b',
+            r'\b(?:show|open|view|display)\s+(?:(?:my\s+)?(?:current\s+|device\s+)?location\s+)?(?:on\s+(?:the\s+)?map|in\s+(?:google\s+)?maps?|on\s+map|(?:the\s+)?maps?)\b',
+            r'\b(?:show\s+)?details\s+(?:of|for)\s+(?:that|the)?\s*(?:hospital|pharmacy|restaurant|place)\b',
+            r'\b(?:navigate|directions?|route|drive|walk|cycle)\s+(?:to|towards)\s+.+\b',
+            r'\b(?:navigate|directions?|route|drive|walk|cycle)\s+from\s+.+?\s+(?:to|towards)\s+.+\b',
+            r'\b(?:plan\s+(?:a\s+)?route|route)\s+(?:through|via|across)\s+.+\b',
+            r'\b(?:how\s+far\s+is|distance\s+to|calculate\s+(?:the\s+)?distance\s+to)\s+.+\b',
+            r'\b(?:distance\s+between|how\s+far\s+is\s+it\s+from)\s+.+?\s+(?:and|to)\s+.+\b',
+            r'\b(?:what\s+is\s+(?:the\s+)?eta|eta\s+from|travel\s+time\s+from)\b',
+            r'\b(?:compare\s+(?:the\s+)?fastest\s+and\s+shortest\s+routes|fastest\s+route|shortest\s+route|which\s+route\s+is\s+fastest|shortest\s+route\s+instead)\b',
+            r'\b(?:avoid\s+tolls?|avoid\s+toll\s+roads?|add\s+a\s+(?:fuel\s+|gas\s+)?stop|how\s+much\s+farther|what\s+is\s+my\s+eta\s+now|update\s+my\s+eta|distance\s+remaining)\b',
+            r'\b(?:find|search|show|look\s+for|where\s+is\s+a|where\s+are|locate|get)\s+(?:a\s+|an\s+|the\s+|all\s+|nearby\s+)?(?:nearest\s+|nearby\s+)?(?:hospitals?|hospit[eo]ls?|pharmacies?|farmac(?:y|ies)|parmac(?:y|ies)|medical\s+stores?|fuel\s+stations?|gas\s+stations?|petrol\s+(?:pumps?|stations?)|restaurants?|restarents?|restarants?|resturants?|restaraunts?|resteraunts?|restraunts?|food|atms?|banks?|hotels?|parking|cafes?|places?)\b',
+            r'\b(?:find|search|show|look\s+for|where\s+are|what\s+are|locate|get|list)\s+.*\b(?:nearby|near\s+me|around\s+me|around\s+here)\b',
+            r'\b(?:nearby|near\s+me|around\s+me|around\s+here)\s+(?:hospitals?|hospit[eo]ls?|pharmacies?|farmac(?:y|ies)|medical\s+stores?|restaurants?|restarents?|restarants?|resturants?|restraunts?|food|cafes?|places?|stores?|shops?|hotels?|atms?|banks?)\b',
+            r'\b(?:what(?:\s+are|\x27s|\s+is)\s+there|what\s+places\s+are\s+there|show\s+them|list\s+them)\b',
+            r'\b(?:which\s+(?:one\s+)?is\s+(?:closest|nearest)|what\s+is\s+(?:the\s+)?(?:closest|nearest))\b',
+            r'\b(?:tell\s+me\s+about|info\s+(?:on|about)|details\s+(?:on|about|for)|show\s+details\s+of)\s+(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|closest|nearest|last)\s*(?:one|place|restaurant|hospital|pharmacy)?\b',
+            r'\b(?:show|tell|give|what(?:\x27s|\s+is))\s+(?:me\s+)?(?:the\s+|its\s+)?address\b',
+            r'\b(?:the\s+address|its\s+address)\b',
+            r'\b(?:nearby\s+(?:hospitals?|pharmacies|pharmacy|restaurants?|atms?|gas\s+stations?|fuel\s+stations?|petrol\s+pumps?|hotels?|banks?))\b',
+            r'\b(?:show\s+only|filter\s+(?:by|to)|only\s+show)\s+(?:hospitals?|pharmacies|pharmacy|restaurants?|petrol\s+stations?|gas\s+stations?|fuel\s+stations?|atms?|hotels?)\b',
+            r'\b(?:add|include|show)\s+(?:hospitals?|pharmacies|pharmacy|restaurants?|petrol\s+stations?|gas\s+stations?|fuel\s+stations?|atms?|hotels?)(?:\s+(?:too|as\s+well|also))?\b',
+            r'\b(?:remove|hide|exclude)\s+(?:hospitals?|pharmacies|pharmacy|restaurants?|petrol\s+stations?|gas\s+stations?|fuel\s+stations?|atms?|hotels?)\b',
+            r'\b(?:show\s+all(?:\s+of\s+them|\s+places|\s+markers|\s+results)?|reset\s+filters?|clear\s+filters?)\b',
+            r'\b(?:go\s+to|navigate\s+to|route\s+to|take\s+me\s+to|select)\s+(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|nearest|closest)(?:\s+(?:one|place|hospital|pharmacy|restaurant|stop))?\b',
+            r'\b(?:navigate\s+there|take\s+me\s+there|route\s+there|directions?\s+there)\b',
+            r'\b(?:zoom\s+in|zoom\s+out|zoom\s+map|reset\s+zoom)\b',
+            r'\b(?:clear\s+(?:the\s+)?route|stop\s+navigation|cancel\s+navigation|end\s+route)\b',
+            r'\b(?:keep\s+(?:the\s+)?map\s+open|leave\s+(?:the\s+)?map\s+open|pin\s+(?:the\s+)?map)\b',
+            r'\b(?:close\s+(?:the\s+)?map|hide\s+(?:the\s+)?map|minimize\s+(?:the\s+)?map)\b',
+            r'\bsave\s+(?:this\s+place|this\s+location|current\s+location|here)\s+as\s+[a-zA-Z0-9_\-\s]+\b',
+            r'\b(?:where\s+is\s+(?:my\s+)?saved\s+[a-zA-Z0-9_\-\s]+|saved\s+places?|list\s+saved\s+places?)\b',
+            r'\b(?:why\s+is\s+(?:my\s+)?location\s+unavailable|why\s+can\x27t\s+you\s+get\s+my\s+(?:live\s+)?location|why\s+cant\s+you\s+get\s+my\s+(?:live\s+)?location)\b',
+            r'\b(?:how\s+accurate\s+is\s+my\s+location|location\s+accuracy|when\s+was\s+my\s+location\s+last\s+updated|location\s+source|location\s+provider|location\s+status|location\s+diagnostics)\b',
+            r'\b(?:which\s+device\s+is\s+providing\s+(?:my\s+)?(?:current\s+)?location|which\s+device\s+provides\s+(?:my\s+)?location|what\s+device\s+is\s+providing\s+(?:my\s+)?location|how\s+do\s+you\s+know\s+my\s+location)\b',
+            r'\b(?:exact\s+coordinates|show\s+my\s+coordinates|what\s+are\s+my\s+coordinates|my\s+coordinates)\b',
+        ]
+        return any(re.search(p, tl, re.IGNORECASE) for p in location_patterns)
+
 
     @staticmethod
     def is_local_environment_query(text: str) -> bool:
@@ -1174,7 +1262,69 @@ class SemanticUnderstandingEngine:
         return None
 
     @staticmethod
-    def resolve_canonical_application(raw_name: str) -> Optional[str]:
+    def _is_website_or_domain(target: str) -> bool:
+        if not target:
+            return False
+        t = target.lower().strip()
+        t = re.sub(r'^(?:the\s+)?(?:website|site|webpage|web\s+page)\s+(?:of\s+|for\s+)?', '', t).strip()
+        t = re.sub(r'\s+(?:the\s+)?(?:website|site|webpage|web\s+page)$', '', t).strip()
+        # Explicit URLs
+        if t.startswith(("http://", "https://", "www.")) or "://" in t:
+            return True
+        # Domains with TLD
+        if re.search(r'\b[a-zA-Z0-9-]+\.(?:com|org|net|edu|gov|io|ai|co|app|dev|in|me|info|tv)\b', t):
+            return True
+        # Exclude applications that mention chrome / code / terminal
+        if t in ("chrome", "google chrome", "visual studio code", "vscode", "code", "notepad", "calculator", "terminal"):
+            return False
+        common_sites = {
+            "wikipedia", "youtube", "google", "gmail", "github", "reddit",
+            "twitter", "x", "linkedin", "facebook", "instagram", "amazon",
+            "netflix", "stackoverflow", "bing", "yahoo", "duckduckgo",
+            "quora", "medium", "twitch", "imdb"
+        }
+        return t in common_sites
+
+    @staticmethod
+    def _resolve_website_target(target: str) -> Tuple[str, str]:
+        t = target.strip()
+        t_clean = re.sub(r'^(?:the\s+)?(?:website|site|webpage|web\s+page)\s+(?:of\s+|for\s+)?', '', t, flags=re.I).strip()
+        t_clean = re.sub(r'\s+(?:the\s+)?(?:website|site|webpage|web\s+page)$', '', t_clean, flags=re.I).strip()
+        low = t_clean.lower()
+        common_site_map = {
+            "wikipedia": ("https://www.wikipedia.org", "Wikipedia"),
+            "youtube": ("https://www.youtube.com", "YouTube"),
+            "google": ("https://www.google.com", "Google"),
+            "gmail": ("https://mail.google.com", "Gmail"),
+            "github": ("https://www.github.com", "GitHub"),
+            "reddit": ("https://www.reddit.com", "Reddit"),
+            "twitter": ("https://www.twitter.com", "Twitter"),
+            "x": ("https://x.com", "X"),
+            "linkedin": ("https://www.linkedin.com", "LinkedIn"),
+            "facebook": ("https://www.facebook.com", "Facebook"),
+            "instagram": ("https://www.instagram.com", "Instagram"),
+            "amazon": ("https://www.amazon.com", "Amazon"),
+            "netflix": ("https://www.netflix.com", "Netflix"),
+        }
+        if low in common_site_map:
+            return common_site_map[low]
+
+        if low.startswith(("http://", "https://")):
+            url = t_clean
+        elif low.startswith("www."):
+            url = f"https://{t_clean}"
+        elif re.search(r'\.[a-zA-Z]{2,}', low):
+            url = f"https://{t_clean}"
+        else:
+            url = f"https://www.{low}.com"
+
+        host = re.sub(r'^https?://(?:www\.)?', '', url).split('/')[0].split(':')[0]
+        parts = host.split('.')
+        site_name = parts[-2].capitalize() if len(parts) >= 2 else parts[0].capitalize()
+        return url, site_name
+
+    @classmethod
+    def resolve_canonical_application(cls, raw_name: str) -> Optional[str]:
         if not raw_name:
             return None
         t = raw_name.lower().strip()
@@ -1191,7 +1341,10 @@ class SemanticUnderstandingEngine:
         if t in stopword_acronyms:
             return None
 
-        # URLs, links, domain names, and javascript schemes are websites, not desktop applications
+        # URLs, links, domain names, and known websites are web destinations, not desktop applications
+        if cls._is_website_or_domain(t):
+            return None
+
         if t.startswith(("http://", "https://", "www.", "javascript:", "javascript(")) or "://" in t or ("." in t and "/" in t) or any(t.endswith(ext) for ext in (".com", ".org", ".net", ".edu", ".io", ".gov", ".asp", ".html", ".php")):
             return None
 
@@ -1389,11 +1542,145 @@ class SemanticUnderstandingEngine:
                 return env_cmd
 
         # -------------------------------------------------------------
+        # 1.15 Canonical Location Intelligence & Navigation (Section 8)
+        # -------------------------------------------------------------
+        if self.is_location_intelligence_query(norm) or self.is_location_intelligence_query(text_stripped):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"Execute location intelligence command: {text_stripped}",
+                intent="DEVICE_CONTROL",
+                action="device_location",
+                target_type=EntityType.DEVICE_OR_SYSTEM,
+                parameters={"action": "device_location", "raw_input": text_stripped, "query": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
+        # -------------------------------------------------------------
+        # 1.2 Active Browser / Page Title & Content Queries
+        # -------------------------------------------------------------
+        is_opening_website_first = bool(re.match(r'^(?:open|launch|visit|go\s+to|browse)\s+(?:https?://|[a-zA-Z0-9_\-\.]+\.(?:com|org|net|gov|edu|io)|youtube|google|wikipedia|gmail|github|reddit|twitter|x|linkedin|facebook|instagram|amazon|netflix)\b', norm))
+        if not is_opening_website_first:
+            if re.search(r'\b(?:(?:retrevie|retrieve|get|tell\s+me|show\s+me|what(?:\'s|\s+is))\s+(?:the\s+)?(?:page\s+)?title(?:\s+of\s+(?:this|the)\s+page)?|(?:page|website)\s+title)\b', norm) or norm in ("page title", "what's the title", "what is the title", "title of the page", "retrieve page title", "retrevie the title of the page"):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal="Retrieve active web page title",
+                    intent="WINDOW_CONTEXT",
+                    action="page_title",
+                    target="active_page",
+                    parameters={"action": "page_title", "target": "active_page", "raw_input": text_stripped},
+                    confidence=1.0,
+                )
+
+            if re.search(r'\b(?:what\s+is\s+(?:this|the)\s+(?:page|website)\s+about|what\s+is\s+this\s+about|explain\s+(?:this|the)\s+(?:page|website))\b', norm):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal="Explain active web page content",
+                    intent="WINDOW_CONTEXT",
+                    action="page_summary",
+                    target="active_page",
+                    parameters={"action": "page_summary", "target": "active_page", "raw_input": text_stripped},
+                    confidence=1.0,
+                )
+
+        # -------------------------------------------------------------
+        # 1.3 Deterministic Website / URL Navigation & Compound Browser Commands
+        # -------------------------------------------------------------
+        m_web_nav = re.match(r'^(?:open|launch|start|run|go\s+to|visit|browse(?:\s+to)?|navigate(?:\s+to)?)\s+(.+)$', norm)
+        if m_web_nav:
+            raw_target = m_web_nav.group(1).strip()
+            cleaned_target = re.sub(r'\s+(?:for\s+me|please|right\s+now|now)$', '', raw_target).strip()
+
+            comp_steps = []
+            m_and = re.match(r'^(.*?)\s+(?:and|then)\s+(.+)$', cleaned_target, re.I)
+            if m_and:
+                head_part = m_and.group(1).strip()
+                rest_part = m_and.group(2).strip()
+                if self._is_website_or_domain(head_part):
+                    cleaned_target = head_part
+                    from core.unified_command_router import unified_router
+                    comp_steps = unified_router._parse_browser_steps(rest_part)
+
+            if self._is_website_or_domain(cleaned_target):
+                site_url, site_name = self._resolve_website_target(cleaned_target)
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal=f"open website {site_name}",
+                    intent="OPEN_APPLICATION",
+                    action="open_website",
+                    target=site_url,
+                    object=site_name,
+                    desired_state="opened",
+                    parameters={
+                        "action": "open",
+                        "is_website": True,
+                        "url": site_url,
+                        "target": site_url,
+                        "site_name": site_name,
+                        "application": site_name,
+                        "browser_steps": comp_steps,
+                        "raw_input": text_stripped,
+                    },
+                    confidence=1.0,
+                )
+
+        # -------------------------------------------------------------
         # 2. Negation, Hypothetical, Explanation, and Verification Queries
         # -------------------------------------------------------------
+        # Fast path: Negation with affirmative alternative ("Don't open Chrome, open Calculator", "Instead of opening Chrome, open Calculator")
+        neg_alt_match = re.match(
+            r"^(?:do\s+not|don['’]?t|never)\s+(?:open|launch|run|start|create|make|delete|remove|send|search|play|set)\b.+?(?:[,;]|\s+(?:instead|but)\b)\s*(?:instead\s*,?\s*|please\s+|just\s+)?(?P<affirmative>[a-zA-Z].+)$",
+            norm,
+            re.IGNORECASE
+        )
+        if not neg_alt_match:
+            neg_alt_match = re.match(
+                r"^instead\s+of\s+.+?(?:[,;]|\s+(?:please|just)\b)\s*(?:please\s+|just\s+)?(?P<affirmative>[a-zA-Z].+)$",
+                norm,
+                re.IGNORECASE
+            )
+        if neg_alt_match:
+            affirmative_cmd = neg_alt_match.group("affirmative").strip()
+            if affirmative_cmd:
+                sub_res = self.interpret(affirmative_cmd, dialogue_state=dialogue_state, user_id=user_id)
+                sub_res.user_text = text_stripped
+                sub_res.normalized_text = norm
+                return sub_res
+
+        # Fast path: Reported speech / quoted error / system messages as data (prevent accidental execution of quoted verbs)
+        reported_data_match = re.search(
+            r"^(?:(?:the|my|this|our|a)\s+)?(?:error(?:\s+message)?|log(?:s)?|console(?:\s+output)?|terminal(?:\s+output)?|stack\s*trace|system\s+message|prompt|dialog(?:ue)?|exception|boss|user|he|she|they|it)\s+(?:says?|said|stated?|tells?|told|reports?|reported?|shows?|showed?|outputs?|reads?|read|contains?)\s*[:\"'\s]+(?P<quoted>.+)",
+            norm,
+            re.IGNORECASE
+        )
+        if not reported_data_match:
+            reported_data_match = re.search(
+                r"^[\"'](?P<quoted>.+?)[\"']\s+(?:is\s+(?:the\s+)?(?:error|message|output|log)|appeared|was\s+shown)",
+                norm,
+                re.IGNORECASE
+            )
+        if reported_data_match:
+            quoted_text = reported_data_match.group("quoted").strip().strip('"\'')
+            is_error_context = any(w in norm for w in ("error", "exception", "traceback", "failed", "failure", "bug", "crash", "issue"))
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="Discuss reported information without executing quoted action",
+                intent="GENERAL_CONVERSATION",
+                action="discuss_reported_data",
+                target="",
+                parameters={"action": "discuss_reported_data", "reported_text": quoted_text, "is_error": is_error_context, "raw_input": text_stripped},
+                confidence=0.99,
+            )
+
         m_neg = re.search(r'\b(?:don\'?t|do\s+not|never|not)\s+(?:open|launch|start|run|create|delete|close|bring\s+up)\s+([a-zA-Z0-9_\-\s]+)', norm)
         m_dont_want = re.search(r'\bi\s+(?:don\'?t|do\s+not)\s+want\s+([a-zA-Z0-9_\-\s]+?)\s+(?:open|opened|running|started)', norm)
-        if m_neg or m_dont_want or norm in ("don't open notepad", "do not open notepad", "don't do that", "do not do that", "stop, don't do that", "don't open it"):
+        has_affirmative_alt = bool(re.search(r'[,;]\s*(?:instead\s*,?\s*|please\s+|just\s+)?(?:open|launch|start|run|create|make|help|calculate|show)\b', norm))
+        if not has_affirmative_alt and (m_neg or m_dont_want or norm in ("don't open notepad", "do not open notepad", "don't do that", "do not do that", "stop, don't do that", "don't open it")):
             target_app = (m_neg.group(1) if m_neg else (m_dont_want.group(1) if m_dont_want else "")).strip().rstrip('.?!')
             target_app = re.sub(r'^(?:the|a|an)\s+', '', target_app)
             if "notepad" in norm:
@@ -1429,12 +1716,22 @@ class SemanticUnderstandingEngine:
                 confidence=0.98,
             )
 
-        if any(re.search(p, norm) for p in [
-            r'\bwhy\s+did\s+you\s+(?:open|launch|start|close|delete|create|do)\s*([a-zA-Z0-9_\-\s]*)',
-            r'\bwhy\s+is\s+([a-zA-Z0-9_\-\s]+?)\s+(?:open|running|active)\b',
-            r'\bwhat\s+made\s+you\s+(?:open|do|start)\b',
-        ]) or norm in ("why did you open notepad", "why did you do that", "why did you open that"):
-            target_app = "notepad" if "notepad" in norm else ("chrome" if "chrome" in norm else "the action")
+        m_why_act = re.search(r'\bwhy\s+(?:did\s+not|didn\'?t|haven\'?t|have\s+not|won\'?t|wouldn\'?t|don\'?t|do\s+not|did)\s+you\s+(?:open|launch|start|close|delete|create|do)\s*([a-zA-Z0-9_\-\s]*)', norm)
+        is_action_why = bool(
+            m_why_act or any(re.search(p, norm) for p in [
+                r'\bwhy\s+is\s+([a-zA-Z0-9_\-\s]+?)\s+(?:open|running|active)\b',
+                r'\bwhat\s+made\s+you\s+(?:open|do|start)\b',
+            ]) or norm in ("why did you open notepad", "why did you do that", "why did you open that", "why did you open it", "why did you do it")
+        )
+        if not is_action_why and norm == "why":
+            last_act_intent = (getattr(dialogue_state, "last_action", {}) or {}).get("intent")
+            if last_act_intent in ("OPEN_APPLICATION", "CLOSE_APPLICATION", "FILE_OPERATIONS", "POWER_ACTION"):
+                is_action_why = True
+
+        if is_action_why:
+            active_app = getattr(dialogue_state, "active_application", None) if dialogue_state else None
+            extracted_target = m_why_act.group(1).strip() if (m_why_act and m_why_act.group(1).strip()) else None
+            target_app = extracted_target or ("notepad" if "notepad" in norm else ("chrome" if "chrome" in norm else (active_app or "the action")))
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
@@ -1559,18 +1856,24 @@ class SemanticUnderstandingEngine:
             )
 
         if any(re.search(p, norm) for p in [
-            r'\b(?:what(?:\x27s|\s+is)\s+(?:my\s+)?gpu|check\s+(?:my\s+)?gpu|gpu\s+usage|gpu\s+telemetry|what\s+gpu\s+do\s+i\s+have|graphics\s+card\s+info)\b',
+            r'\b(?:what(?:\x27s|\s+is)\s+my\s+gpu|what(?:\x27s|\s+is)\s+(?:my\s+)?gpu\s+usage|check\s+(?:my\s+)?gpu|gpu\s+usage|gpu\s+telemetry|what\s+gpu\s+do\s+i\s+have|graphics\s+card\s+info)\b',
         ]) or norm in ("gpu usage", "check gpu", "gpu telemetry", "graphics card"):
-            return SemanticCommand(
-                user_text=text_stripped,
-                normalized_text=norm,
-                goal="check GPU telemetry",
-                intent="DEVICE_CONTROL",
-                action="gpu_telemetry",
-                target="gpu",
-                parameters={"action": "gpu_telemetry"},
-                confidence=1.0,
-            )
+            try:
+                from core.unified_command_router import is_general_hardware_knowledge
+                is_gk = is_general_hardware_knowledge(norm)
+            except Exception:
+                is_gk = False
+            if not is_gk:
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal="check GPU telemetry",
+                    intent="DEVICE_CONTROL",
+                    action="gpu_telemetry",
+                    target="gpu",
+                    parameters={"action": "gpu_telemetry"},
+                    confidence=1.0,
+                )
 
         if any(re.search(p, norm) for p in [
             r'\b(?:which|what)\s+(?:app|application|process|program)\s+(?:is\s+)?(?:using|taking|consuming)\s+(?:the\s+)?most\s+cpu\b',
@@ -1693,9 +1996,17 @@ class SemanticUnderstandingEngine:
                 pass
 
         if not has_browser_links and not any(k in norm for k in ("email", "mail", "link", "file", "tab", "window", "folder", "song", "track", "video")):
-            m_ord = re.search(r'\b(?:what\s+about\s+(?:the\s+)?|tell\s+me\s+about\s+(?:the\s+)?|what\s+is\s+(?:the\s+)?|pick\s+(?:the\s+)?|choose\s+(?:the\s+)?|open\s+(?:the\s+)?|play\s+(?:the\s+)?|show\s+(?:the\s+)?|select\s+(?:the\s+)?)(first|second|third|fourth|fifth|last|next|1st|2nd|3rd|4th|5th)\s*(?:one|item|recommendation|movie|song|option|result)?\b', norm)
-            if not m_ord:
-                m_ord = re.search(r'^(?:the\s+)?(first|second|third|fourth|fifth|last|next|1st|2nd|3rd|4th|5th)\s*(?:one|item|recommendation|movie|song|option|result)?$', norm)
+            # Guard: queries about conversational history must NOT be matched as recommendation ordinals
+            _is_history_query = any(k in norm for k in (
+                "asked", "question", "questions", "said", "told", "request",
+                "today", "yesterday", "earlier", "before", "last time", "recently",
+                "i asked", "i said", "you said", "you told",
+            ))
+            if not _is_history_query:
+                m_ord = re.search(r'\b(?:what\s+about\s+(?:the\s+)?|tell\s+me\s+about\s+(?:the\s+)?|what\s+is\s+(?:the\s+)?|pick\s+(?:the\s+)?|choose\s+(?:the\s+)?|open\s+(?:the\s+)?|play\s+(?:the\s+)?|show\s+(?:the\s+)?|select\s+(?:the\s+)?)(first|second|third|fourth|fifth|last|next|1st|2nd|3rd|4th|5th)\s*(?:one|item|recommendation|movie|song|option|result)?\b', norm)
+                if not m_ord:
+                    m_ord = re.search(r'^(?:the\s+)?(first|second|third|fourth|fifth|last|next|1st|2nd|3rd|4th|5th)\s*(?:one|item|recommendation|movie|song|option|result)?$', norm)
+
         if m_ord:
             ord_word = m_ord.group(1)
             ord_map = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3, "fifth": 4, "5th": 4, "next": 1, "last": -1}
@@ -1882,6 +2193,29 @@ class SemanticUnderstandingEngine:
                 )
 
         # -------------------------------------------------------------
+        # 3a. Deterministic Explicit Close Application / Website / Window
+        # -------------------------------------------------------------
+        m_explicit_close = re.match(r'^(?:close|quit|exit|terminate|kill|shut\s+down)\s+(?:the\s+)?(.+?)[\.!\?]?$', norm)
+        if m_explicit_close:
+            raw_c = m_explicit_close.group(1).strip()
+            if not any(k in raw_c for k in ("it", "this", "that", "all", "everything")):
+                clean_c = re.sub(r'\s+(?:app|application|program|window|tab|for\s+me|please|now)$', '', raw_c).strip()
+                if clean_c:
+                    target_to_close = self.resolve_canonical_application(clean_c) or clean_c
+                    return SemanticCommand(
+                        user_text=text_stripped,
+                        normalized_text=norm,
+                        goal=f"close application {target_to_close}",
+                        intent="CLOSE_APPLICATION",
+                        action="CLOSE_APPLICATION",
+                        target=target_to_close,
+                        object=target_to_close,
+                        desired_state="closed",
+                        parameters={"application": target_to_close, "target": target_to_close, "action": "close"},
+                        confidence=1.0,
+                    )
+
+        # -------------------------------------------------------------
         # 3b. Context Resumption / Continuation (Section 7, 20)
         # -------------------------------------------------------------
         if any(k in norm for k in (
@@ -1964,7 +2298,7 @@ class SemanticUnderstandingEngine:
                 confidence=1.0,
             )
 
-        if any(re.search(p, norm) for p in [
+        if not any(w in norm for w in ("phone", "mobile", "android", "redmi")) and any(re.search(p, norm) for p in [
             r'\b(?:make\s+(?:it|things)\s+quieter|quieter|lower\s+(?:the\s+)?sound|decrease\s+volume|turn\s+down\s+volume|turn\s+volume\s+down|volume\s+down|reduce\s+volume|lower\s+volume|less\s+volume|softer\s+volume)\b',
         ]):
             m_amt = re.search(r'\b(?:by\s+)?(\d+)\s*%?\b', norm)
@@ -1989,7 +2323,7 @@ class SemanticUnderstandingEngine:
                 confidence=1.0,
             )
 
-        if any(re.search(p, norm) for p in [
+        if not any(w in norm for w in ("phone", "mobile", "android", "redmi")) and any(re.search(p, norm) for p in [
             r'\b(?:make\s+(?:it|things)\s+louder|louder|raise\s+(?:the\s+)?sound|increase\s+volume|turn\s+up\s+volume|turn\s+volume\s+up|volume\s+up|higher\s+volume|more\s+volume)\b',
         ]):
             m_amt = re.search(r'\b(?:by\s+)?(\d+)\s*%?\b', norm)
@@ -2263,8 +2597,12 @@ class SemanticUnderstandingEngine:
                 confidence=1.0,
             )
 
-        if any(re.search(p, norm) for p in [
-            r'\b(?:what\s+is\s+my\s+gpu|check\s+(?:my\s+)?gpu|how\s+much\s+gpu|gpu\s+usage|gpu\s+telemetry|gpu\s+memory|graphics\s+card)\b',
+        is_concept_query = bool(
+            re.match(r'^(?:explain|how\s+does|how\s+do|what\s+is\s+the\s+concept|tell\s+me\s+how|difference\s+between)\b', norm)
+            or "concept" in norm
+        )
+        if not is_concept_query and any(re.search(p, norm) for p in [
+            r'\b(?:what\s+is\s+my\s+gpu(?:\s+memory)?|check\s+(?:my\s+)?gpu(?:\s+memory)?|how\s+much\s+gpu\s+memory|gpu\s+usage|gpu\s+telemetry|my\s+gpu\s+memory|my\s+graphics\s+card)\b',
         ]):
             return SemanticCommand(
                 user_text=text_stripped,
@@ -2431,7 +2769,7 @@ class SemanticUnderstandingEngine:
             m_want = re.search(r'^(?:i\s+want|i\s+need)\s+([a-zA-Z0-9_\-\s]+?)(?:\s+(?:running|open|up|now))?$', norm)
             if m_want:
                 app_launch_cand = m_want.group(1).strip()
-        if not app_launch_cand and not re.search(r'^(?:how\s+(?:to|do|can|should|would|is|are|did|does)|why\s+(?:did|is|are|do|would)|what\s+(?:is|are|was|were|does|did|happens)|where\s+(?:is|can|do))\b', norm):
+        if not app_launch_cand and not re.search(r'^(?:how\s+(?:to|do|can|should|would|is|are|did|does)|why\s+(?:didn\'?t|did\s+not|haven\'?t|have\s+not|won\'?t|wouldn\'?t|don\'?t|do\s+not|did|is|are|do|would)|what\s+(?:is|are|was|were|does|did|happens)|where\s+(?:is|can|do))\b', norm):
             m_direct = re.search(r'\b(?:open|launch|start|run)\s+(.+)', norm)
             if m_direct:
                 app_launch_cand = m_direct.group(1).strip()
@@ -2745,6 +3083,47 @@ class SemanticUnderstandingEngine:
                 action_required=True,
             )
 
+        # -------------------------------------------------------------
+        # 0c0. Mobile Device Control (Fast-Path Deterministic Guard)
+        # -------------------------------------------------------------
+        mobile_screenshot_match = bool(
+            re.search(r'\b(?:screenshot\s+(?:on|of)|take\s+(?:a\s+)?screenshot\s+(?:on|of))\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)\b', norm)
+            or re.search(r'\b(?:phone|mobile)\s+screenshot\b', norm)
+            or any(k in norm for k in ["screenshot on phone", "screenshot on mobile", "screenshot of my phone", "take a screenshot on my phone", "take a screenshot of my phone", "capture phone screen", "show my phone screen", "show phone screen"])
+        )
+        mobile_nav_match = bool(
+            re.search(r'\b(?:go\s+(?:to\s+)?(?:the\s+)?home(?:\s+screen)?|press\s+home(?:\s+screen)?|home\s+screen)\s+(?:on\s+)?(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)\b', norm)
+            or any(k in norm for k in ["press home on phone", "go home on phone", "go home on my phone", "home on my phone", "home on phone", "go to the home screen on my phone", "go to the home screen on phone", "back on phone", "recents on phone"])
+        )
+        mobile_battery_match = bool(
+            re.search(r'\b(?:(?:phone|mobile|device|redmi[a-z0-9_\-\s]*)(?:\x27s)?\s+battery|battery\s+(?:of|on|for)\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|redmi[a-z0-9_\-\s]*)|check\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|redmi[a-z0-9_\-\s]*)(?:\x27s)?\s+battery)\b', norm)
+            or any(k in norm for k in ["phone battery", "my phone battery", "phone's battery", "my phone's battery", "mobile battery", "battery on phone", "battery on my phone"])
+        )
+        mobile_app_match = bool(
+            re.search(r'\b(?:open|launch|start)\s+.+?\s+on\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)\b', norm)
+        )
+        mobile_vol_match = bool(
+            re.search(r'\b(?:turn\s+(?:up|down)\s+(?:the\s+)?volume|volume\s+(?:up|down)|lower\s+volume|raise\s+volume|decrease\s+volume|increase\s+volume)\s+on\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)\b', norm)
+        )
+        mobile_conn_match = bool(
+            re.search(r'\b(?:pair|(?:re)?connect)\s+(?:to\s+)?(?:(?:my|a|a\s+new)\s+)?(?:phone|device|mobile|android|redmi[a-z0-9_\-\s]*)\b', norm)
+            or re.search(r'\b(?:disconnect|unpair|remove)\s+(?:(?:my|a|a\s+new)\s+)?(?:phone|device|mobile|android|redmi[a-z0-9_\-\s]*)\b', norm)
+            or re.search(r'\b(?:is\s+(?:my\s+)?(?:phone|device|mobile)\s+(?:connected|online)|which\s+phone\s+is\s+connected|what\s+phone\s+is\s+connected)\b', norm)
+        )
+
+        if mobile_screenshot_match or mobile_nav_match or mobile_battery_match or mobile_app_match or mobile_vol_match or mobile_conn_match:
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"Execute mobile device command: {text_stripped}",
+                intent="DEVICE_CONTROL",
+                action="remote_device",
+                target_type=EntityType.DEVICE_OR_SYSTEM,
+                parameters={"action": "remote_device", "raw_command": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
         # Delegate remaining requests to legacy analysis branches
         return self._analyze_legacy(text_stripped, dialogue_state, user_id)
 
@@ -2786,6 +3165,20 @@ class SemanticUnderstandingEngine:
                 action_required=False,
                 confidence=0.3,
                 explanation_text="Did you mean: 'What games are compatible with this system?'",
+            )
+
+        # --------------------------------------------------------------------
+        # 0. Location Intelligence Commands
+        # --------------------------------------------------------------------
+        if self.is_location_intelligence_query(clean_low) or self.is_location_intelligence_query(raw_text):
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning=f"Execute location intelligence command: {raw_text}",
+                intent="DEVICE_CONTROL",
+                action="device_location",
+                action_required=True,
+                parameters={"action": "device_location", "raw_input": raw_text, "query": raw_text},
+                confidence=0.99,
             )
 
         # --------------------------------------------------------------------
@@ -2943,7 +3336,8 @@ class SemanticUnderstandingEngine:
         # --------------------------------------------------------------------
         m_neg = re.search(r'\b(?:don\'?t|do\s+not|never|not)\s+(?:open|launch|start|run|create|delete|close|bring\s+up)\s+([a-zA-Z0-9_\-\s]+)', clean_low)
         m_dont_want = re.search(r'\bi\s+(?:don\'?t|do\s+not)\s+want\s+([a-zA-Z0-9_\-\s]+?)\s+(?:open|opened|running|started)', clean_low)
-        if m_neg or m_dont_want or clean_low in ("don't open notepad", "do not open notepad", "don't do that", "do not do that", "stop, don't do that", "don't open it"):
+        has_affirmative_alt = bool(re.search(r'[,;]\s*(?:instead\s*,?\s*|please\s+|just\s+)?(?:open|launch|start|run|create|make|help|calculate|show)\b', clean_low))
+        if not has_affirmative_alt and (m_neg or m_dont_want or clean_low in ("don't open notepad", "do not open notepad", "don't do that", "do not do that", "stop, don't do that", "don't open it")):
             target_app = (m_neg.group(1) if m_neg else (m_dont_want.group(1) if m_dont_want else "")).strip().rstrip('.?!')
             target_app = re.sub(r'^(?:the|a|an)\s+', '', target_app)
             if "notepad" in clean_low:
@@ -2983,12 +3377,12 @@ class SemanticUnderstandingEngine:
         # --------------------------------------------------------------------
         # 0b3. Action Explanation Query (Section 6, 20)
         # --------------------------------------------------------------------
-        if any(re.search(p, clean_low) for p in [
-            r'\bwhy\s+did\s+you\s+(?:open|launch|start|close|delete|create|do)\s*([a-zA-Z0-9_\-\s]*)',
+        m_rep_why = re.search(r'\bwhy\s+(?:did\s+not|didn\'?t|haven\'?t|have\s+not|won\'?t|wouldn\'?t|don\'?t|do\s+not|did)\s+you\s+(?:open|launch|start|close|delete|create|do)\s*([a-zA-Z0-9_\-\s]*)', clean_low)
+        if m_rep_why or any(re.search(p, clean_low) for p in [
             r'\bwhy\s+is\s+([a-zA-Z0-9_\-\s]+?)\s+(?:open|running|active)\b',
             r'\bwhat\s+made\s+you\s+(?:open|do|start)\b',
         ]) or clean_low in ("why did you open notepad", "why did you do that", "why did you open that"):
-            target_app = "notepad" if "notepad" in clean_low else ("chrome" if "chrome" in clean_low else "the action")
+            target_app = (m_rep_why.group(1).strip() if (m_rep_why and m_rep_why.group(1).strip()) else None) or ("notepad" if "notepad" in clean_low else ("chrome" if "chrome" in clean_low else "the action"))
             return SemanticIntentRepresentation(
                 user_input=raw_text,
                 interpreted_meaning=f"User is requesting an explanation for why {target_app} was opened/performed, not requesting a new action.",
@@ -3140,6 +3534,29 @@ class SemanticUnderstandingEngine:
             is_pro_doc = True
             is_revision = True
             target_art_type = "presentation" if "presentation" in text_low else "report"
+
+        is_announcing_content = bool(re.search(
+            r'\b(?:i\s+will|i\'ll|i\s+am\s+going\s+to|let\s+me)\s+(?:give|send|provide|share)\s+(?:you\s+)?(?:some\s+|the\s+)?(?:info|information|details|notes|text|data)\b',
+            text_low
+        )) or bool(re.search(
+            r'\b(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:ppt|presentation|document|doc|report|spreadsheet)\s+(?:based\s+on\s+(?:that|it|this|the\s+info(?:rmation)?)|from\s+(?:that|it|this))\b',
+            text_low
+        ))
+
+        if is_announcing_content:
+            doc_type_val = "pptx" if any(k in text_low for k in ("presentation", "ppt", "pptx", "slide")) else ("docx" if any(k in text_low for k in ("word", "doc", "docx")) else "pptx")
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning="User is announcing intention to provide content for a document/presentation.",
+                intent="DOCUMENT_GENERATION",
+                action="announce_content",
+                entities=[{"type": "artifact_type", "value": "presentation" if doc_type_val == "pptx" else "document"}],
+                references=[],
+                context_required=False,
+                action_required=False,
+                confidence=0.98,
+                parameters={"waiting_for_content": True, "doc_type": doc_type_val}
+            )
 
         if is_pro_doc:
             return SemanticIntentRepresentation(
@@ -3312,6 +3729,46 @@ class SemanticUnderstandingEngine:
                 action="status_chat",
                 action_required=False,
                 confidence=0.98
+            )
+
+        # --------------------------------------------------------------------
+        # 0c0. Mobile Device Control (Fast-Path Deterministic Guard)
+        # --------------------------------------------------------------------
+        mobile_screenshot = bool(
+            re.search(r'\b(?:screenshot\s+(?:on|of)|take\s+(?:a\s+)?screenshot\s+(?:on|of))\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)\b', text_low)
+            or re.search(r'\b(?:phone|mobile)\s+screenshot\b', text_low)
+            or any(k in text_low for k in ["screenshot on phone", "screenshot on mobile", "screenshot of my phone", "take a screenshot on my phone", "take a screenshot of my phone", "capture phone screen", "show my phone screen", "show phone screen"])
+        )
+        mobile_nav = bool(
+            re.search(r'\b(?:go\s+(?:to\s+)?(?:the\s+)?home(?:\s+screen)?|press\s+home(?:\s+screen)?|home\s+screen)\s+(?:on\s+)?(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)\b', text_low)
+            or any(k in text_low for k in ["press home on phone", "go home on phone", "go home on my phone", "home on my phone", "home on phone", "go to the home screen on my phone", "go to the home screen on phone", "back on phone", "recents on phone"])
+        )
+        mobile_battery = bool(
+            re.search(r'\b(?:(?:phone|mobile|device|redmi[a-z0-9_\-\s]*)(?:\x27s)?\s+battery|battery\s+(?:of|on|for)\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|redmi[a-z0-9_\-\s]*)|check\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|redmi[a-z0-9_\-\s]*)(?:\x27s)?\s+battery)\b', text_low)
+            or any(k in text_low for k in ["phone battery", "my phone battery", "phone's battery", "my phone's battery", "mobile battery", "battery on phone", "battery on my phone"])
+        )
+        mobile_app = bool(
+            re.search(r'\b(?:open|launch|start)\s+.+?\s+on\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)\b', text_low)
+        )
+        mobile_vol = bool(
+            re.search(r'\b(?:turn\s+(?:up|down)\s+(?:the\s+)?volume|volume\s+(?:up|down)|lower\s+volume|raise\s+volume|decrease\s+volume|increase\s+volume)\s+on\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)\b', text_low)
+        )
+        mobile_conn = bool(
+            re.search(r'\b(?:pair|(?:re)?connect)\s+(?:to\s+)?(?:(?:my|a|a\s+new)\s+)?(?:phone|device|mobile|android|redmi[a-z0-9_\-\s]*)\b', text_low)
+            or re.search(r'\b(?:disconnect|unpair|remove)\s+(?:(?:my|a|a\s+new)\s+)?(?:phone|device|mobile|android|redmi[a-z0-9_\-\s]*)\b', text_low)
+            or re.search(r'\b(?:is\s+(?:my\s+)?(?:phone|device|mobile)\s+(?:connected|online)|which\s+phone\s+is\s+connected|what\s+phone\s+is\s+connected)\b', text_low)
+        )
+
+        if mobile_screenshot or mobile_nav or mobile_battery or mobile_app or mobile_vol or mobile_conn:
+            return SemanticIntentRepresentation(
+                user_input=raw_text,
+                interpreted_meaning=f"Mobile device control request: {raw_text}",
+                intent="DEVICE_CONTROL",
+                request_type="INSTRUCTION",
+                action="remote_device",
+                action_required=True,
+                confidence=0.99,
+                parameters={"action": "remote_device", "raw_command": raw_text},
             )
 
         # --------------------------------------------------------------------
@@ -3856,11 +4313,11 @@ class SemanticUnderstandingEngine:
         # 4.9. Deterministic Conversational & Identity Resolution (Zero LLM Latency)
         # --------------------------------------------------------------------
         conv_identity_phrases = (
-            "who are you", "what is your name", "what's your name", "whats your name",
-            "who're you", "tell me about yourself", "introduce yourself", "who made you",
-            "who created you", "who built you", "what are you", "who am i speaking with",
-            "who am i talking to", "what is your identity", "whats your identity", "who is this",
-            "tell me who you are", "what should i call you", "hello", "hi", "hey",
+            "who are you", "who are u", "who r u", "who r you", "what is your name", "what is ur name",
+            "what's your name", "whats your name", "whats ur name", "who're you", "tell me about yourself",
+            "introduce yourself", "who made you", "who created you", "who built you", "what are you",
+            "who am i speaking with", "who am i talking to", "what is your identity", "whats your identity",
+            "who is this", "tell me who you are", "what should i call you", "hello", "hi", "hey",
             "good morning", "good afternoon", "good evening", "how are you",
             "how are you doing", "how's it going", "how are things", "what's up",
             "whats up", "thanks", "thank you", "thank you so much", "many thanks"
@@ -3876,11 +4333,13 @@ class SemanticUnderstandingEngine:
                     is_conversational_general_query,
                     is_capability_query,
                     is_stable_knowledge_question,
+                    is_conversational_followup_or_complaint,
                 )
                 if (
                     is_conversational_general_query(raw_text)
                     or is_capability_query(raw_text)
                     or is_stable_knowledge_question(raw_text)
+                    or is_conversational_followup_or_complaint(raw_text)
                 ):
                     is_conv = True
             except Exception:
@@ -3889,7 +4348,7 @@ class SemanticUnderstandingEngine:
         if is_conv:
             return SemanticIntentRepresentation(
                 user_input=raw_text,
-                interpreted_meaning="Conversational greeting, small talk, identity inquiry, or knowledge query.",
+                interpreted_meaning="Conversational greeting, small talk, identity inquiry, knowledge query, or follow-up.",
                 intent="GENERAL_CONVERSATION",
                 request_type="CONVERSATION",
                 action_required=False,
@@ -3913,11 +4372,51 @@ class SemanticUnderstandingEngine:
                         ctx_summary["last_target"] = dialogue_state.session_context["last_insertion_target"]
                     if dialogue_state.session_context.get("last_artifact_topic"):
                         ctx_summary["last_topic"] = dialogue_state.session_context["last_artifact_topic"]
-                if hasattr(dialogue_state, "turns") and dialogue_state.turns:
-                    last_turn = dialogue_state.turns[-1]
-                    ctx_summary["previous_request"] = getattr(last_turn, "user_input", "")
+                    if dialogue_state.session_context.get("current_environment"):
+                        ctx_summary["current_environment"] = dialogue_state.session_context["current_environment"]
+                    if dialogue_state.session_context.get("previous_environment"):
+                        ctx_summary["previous_environment"] = dialogue_state.session_context["previous_environment"]
+                    if dialogue_state.session_context.get("active_goal"):
+                        ctx_summary["active_goal"] = dialogue_state.session_context["active_goal"]
 
-            llm_result = llm.semantic_reasoning(raw_text, structured_context=ctx_summary, timeout_budget=4.5, user_id=user_id)
+                # Forward current environment observations if not already populated
+                if "current_environment" not in ctx_summary:
+                    env_obs = getattr(dialogue_state, "environmental_observations", {}) or {}
+                    app = getattr(dialogue_state, "active_application", None) or env_obs.get("active_application")
+                    win = env_obs.get("active_window")
+                    if app or win:
+                        ctx_summary["current_environment"] = {"application": app, "window_title": win}
+
+                # Forward recent actions
+                if hasattr(dialogue_state, "recent_actions") and dialogue_state.recent_actions:
+                    ctx_summary["recent_actions"] = dialogue_state.recent_actions[-3:]
+
+                # Forward genuine previous dialogue turns (dialogue_state.turns[-1] is the current turn!)
+                if hasattr(dialogue_state, "turns") and dialogue_state.turns:
+                    prior_turns = dialogue_state.turns[:-1] if len(dialogue_state.turns) > 1 else []
+                    if prior_turns:
+                        last_turn = prior_turns[-1]
+                        ctx_summary["previous_request"] = getattr(last_turn, "user_input", "")
+                        recent_diag = []
+                        for t in prior_turns[-3:]:
+                            u_in = getattr(t, "user_input", "")
+                            a_res = getattr(t, "assistant_response", "") or getattr(t, "system_response", "")
+                            if u_in:
+                                recent_diag.append({"user": u_in, "assistant": a_res})
+                        if recent_diag:
+                            ctx_summary["recent_dialogue"] = recent_diag
+
+            # Classification must allow adequate time for network roundtrip and model completion
+            reasoning_budget = 4.0
+            try:
+                from core.turn_deadline import get_current_turn_deadline
+                tdl = get_current_turn_deadline()
+                if tdl:
+                    rem_t = tdl.time_remaining()
+                    reasoning_budget = min(5.0, max(3.5, rem_t * 0.50))
+            except Exception:
+                pass
+            llm_result = llm.semantic_reasoning(raw_text, structured_context=ctx_summary, timeout_budget=reasoning_budget, user_id=user_id)
             if llm_result and isinstance(llm_result, dict) and llm_result.get("source") == "semantic_llm":
                 req_t = llm_result.get("request_type", "INSTRUCTION")
                 # The semantic contract uses requires_action; accept the legacy
@@ -3943,6 +4442,8 @@ class SemanticUnderstandingEngine:
                 # Strict guarantee: Non-action request types must never trigger action
                 if req_t in ("NEGATION", "HYPOTHETICAL", "QUESTION", "EXPLANATION", "CONVERSATION"):
                     act_req = False
+                    if primary_cap == "ARTIFACT_READING" and not any(w in raw_text.lower() for w in ("read", "listen", "recite", "speak aloud", "read out", "read to me")):
+                        primary_cap = "GENERAL_CONVERSATION"
 
                 if confidence is None:
                     logger.debug("[SEMANTIC_ENGINE] Reasoning object missing confidence; ignoring")

@@ -351,8 +351,8 @@ class RiskClassifier:
 
         # --- FILE_OPERATIONS: elevate for destructive ops ---
         elif intent_up == "FILE_OPERATIONS":
-            is_delete = any(w in cmd_low for w in _CRITICAL_FILE_OPS)
-            is_read   = any(w in cmd_low for w in _READONLY_FILE_OPS) and not is_delete
+            is_delete = any(re.search(r'\b' + re.escape(w) + r'\b', cmd_low) for w in _CRITICAL_FILE_OPS)
+            is_read   = any(re.search(r'\b' + re.escape(w) + r'\b', cmd_low) for w in _READONLY_FILE_OPS) and not is_delete
 
             if is_delete:
                 risk = RiskLevel.CRITICAL

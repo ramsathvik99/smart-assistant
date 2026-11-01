@@ -1,7 +1,8 @@
 {
   "ui_preferences": {
     "8": {
-      "assistant_voice_rate": "135",
+      "ambient_3d_parallax": "True",
+      "ambient_3d_state_reactive": "True",
       "voice_rate": "135",
       "voice_pitch": "100",
       "voice_volume": "1.0",

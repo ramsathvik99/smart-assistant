@@ -32,7 +32,7 @@ def get_identity() -> Dict[str, Any]:
         return {
             "user_id":   ctx.get("user_id"),
             "username":  ctx.get("username") or "User",
-            "assistant_name": ctx.get("assistant_name") or "Trevon",
+            "assistant_name": ctx.get("assistant_name") or "Assistant",
             "authenticated": ctx.get("authenticated", False),
         }
     except Exception:
@@ -40,7 +40,7 @@ def get_identity() -> Dict[str, Any]:
     try:
         from instance.config import settings
         uid = getattr(settings, "CURRENT_USER_ID", None) or settings.get_last_user()
-        aname = settings.get_assistant_name() if hasattr(settings, "get_assistant_name") else "Trevon"
+        aname = settings.get_assistant_name() if hasattr(settings, "get_assistant_name") else "Assistant"
         uname = getattr(settings, "CURRENT_USERNAME", None) or "User"
         return {
             "user_id": uid,
@@ -49,7 +49,7 @@ def get_identity() -> Dict[str, Any]:
             "authenticated": uid is not None,
         }
     except Exception:
-        return {"user_id": None, "username": "User", "assistant_name": "Trevon", "authenticated": False}
+        return {"user_id": None, "username": "User", "assistant_name": "Assistant", "authenticated": False}
 
 
 def set_assistant_name_ui(name: str) -> bool:
@@ -641,14 +641,12 @@ def delete_calendar_event(event_id: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_paired_devices() -> List[Dict[str, Any]]:
-    """Return paired mobile devices for the current user."""
+    """Return paired mobile devices for the current user (falling back to user 1)."""
     ident = get_identity()
-    user_id = ident.get("user_id")
-    if not user_id:
-        return []
+    user_id = ident.get("user_id") or 1
     try:
-        from skills.device_management.device_controller import DeviceController
-        ctrl = DeviceController()
+        from skills.device_management.device_controller import get_device_controller
+        ctrl = get_device_controller()
         res = ctrl.list_devices(int(user_id))
         if res and res.get("success"):
             return res.get("devices", []) or []
@@ -662,7 +660,15 @@ def load_paired_devices() -> List[Dict[str, Any]]:
         )
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f) or []
+                raw = json.load(f)
+                if isinstance(raw, dict):
+                    devs = raw.get("devices", {})
+                    if isinstance(devs, dict):
+                        return list(devs.values())
+                    elif isinstance(devs, list):
+                        return devs
+                elif isinstance(raw, list):
+                    return raw
     except Exception:
         pass
     return []

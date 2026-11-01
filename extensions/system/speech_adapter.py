@@ -248,11 +248,25 @@ class SpeechAdapter:
                 else:
                     return f"Done. I created the {doc_type}."
 
-            # Application Launch
+            # Application / Website Close
+            if intent_up == "CLOSE_APPLICATION" or any(w in inp_low for w in ("close ", "quit ", "exit ", "terminate ", "kill ", "shut down ")):
+                if s and ("closed" in s.lower() or "shut" in s.lower() or "terminated" in s.lower()):
+                    return s if s.endswith((".", "!", "?")) else f"{s}."
+                close_target = act_res.get("application") or act_res.get("target")
+                if not close_target:
+                    m_close_in = re.match(r'^(?:close|quit|exit|terminate|kill|shut\s+down)\s+(?:the\s+)?(.+?)(?:\s+and\s+|\s+app|\s+application|[\.!\?]|$)', effective_input.strip(), re.I)
+                    close_target = m_close_in.group(1).title() if m_close_in else "the application"
+                return f"{close_target.title()} closed."
+
+            # Application / Website Launch
             if intent_up == "OPEN_APPLICATION" or any(w in inp_low for w in ("open ", "launch ", "start ")):
-                m_app = re.match(r'^(?:open|launch|start|bring up)\s+(?:the\s+)?(.+?)(?:\s+app|\s+application)?[\.!\?]?$', effective_input.strip(), re.I)
-                target = m_app.group(1).title() if m_app else "the application"
-                return f"Done. Opening {target}."
+                if s and len(s.split()) <= 8 and (s.lower().startswith(("opening", "launching", "started", "opened", "there you go")) or "is open" in s.lower()):
+                    return s if s.endswith((".", "!", "?")) else f"{s}."
+                app_target = act_res.get("site_name") or act_res.get("application") or act_res.get("target")
+                if not app_target:
+                    m_app = re.match(r'^(?:open|launch|start|bring up)\s+(?:the\s+)?(.+?)(?:\s+and\s+|\s+app|\s+application|[\.!\?]|$)', effective_input.strip(), re.I)
+                    app_target = m_app.group(1).title() if m_app else "the application"
+                return f"{app_target} is open."
 
             # File Operations / Generic Action
             clean_act = re.sub(r'[A-Za-z]:\\[^\s,]+', '', s)
@@ -301,9 +315,40 @@ class SpeechAdapter:
                 return f"I'd suggest {items[0]}."
 
         # ── 2. Knowledge, Research, RAG, and Conversational Responses ────────
+        # Extract structured items if response contains a markdown table
+        table_summary = None
+        if "|" in s:
+            t_lines = [line.strip() for line in s.splitlines() if line.strip()]
+            t_items = []
+            h_title = None
+            for tl in t_lines:
+                if (tl.startswith("**") and tl.endswith("**")) or tl.startswith("#"):
+                    h_title = tl.strip("#* ").strip()
+                elif tl.startswith("|") or ("|" in tl and re.match(r'^\s*\|', tl)):
+                    if re.match(r'^\|?[\s\-:|]+\|?$', tl):
+                        continue
+                    parts = [p.strip() for p in tl.split("|") if p.strip()]
+                    if parts:
+                        first_col = parts[0]
+                        f_low = first_col.lower().strip()
+                        if f_low in ("memory", "memory type", "type", "feature", "name", "item", "component", "characteristic", "category", "phase", "attribute", "hardware", "device"):
+                            continue
+                        c_name = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', first_col)
+                        c_name = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', c_name).strip()
+                        if c_name and c_name not in t_items:
+                            t_items.append(c_name)
+            if t_items:
+                if len(t_items) > 1:
+                    item_desc = ", ".join(t_items[:-1]) + f", and {t_items[-1]}"
+                else:
+                    item_desc = t_items[0]
+                lead = h_title if h_title else "Key categories"
+                table_summary = f"{lead} include {item_desc}."
+
         # Strip fenced code blocks, markdown tables, headers, and URLs
         s = re.sub(r'```[\s\S]*?```', '', s)
-        s = re.sub(r'\|[^\n]+\|', '', s)
+        s = re.sub(r'^\s*\|.*$', '', s, flags=re.MULTILINE)
+        s = re.sub(r'\|[^\n]*', '', s)
         s = re.sub(r'#{1,6}\s+[^\n]+', '', s)
         s = re.sub(r'https?://\S+', '', s)
         # Strip citation brackets like [1], [Source: ...], Sources: ...
@@ -333,8 +378,19 @@ class SpeechAdapter:
                 continue
             filtered_sents.append(sent_str)
 
-        if not filtered_sents:
-            filtered_sents = [s] if s else ["I have found the relevant information."]
+        if table_summary:
+            # Filter sentences pointing down to visual elements (e.g. "Below is a table...")
+            cleaned_sents = []
+            for sent in filtered_sents:
+                if any(w in sent.lower() for w in ("below is", "the table below", "following table", "quick overview of the other", "breakdown below", "here is a breakdown")):
+                    continue
+                cleaned_sents.append(sent)
+            if not cleaned_sents:
+                filtered_sents = [table_summary]
+            else:
+                filtered_sents = cleaned_sents[:2] + [table_summary]
+        elif not filtered_sents:
+            filtered_sents = [s] if s else ["Here's what I have for that."]
 
         # Preserve the complete intended spoken response with all informative sentences
         spoken_sents = []
@@ -706,6 +762,10 @@ class SpeechAdapter:
         s = re.sub(r'\s+([,\.!\?:;])', r'\1', s)
         # Ensure clean single spaces
         s = re.sub(r'\s+', ' ', s).strip()
+
+        # VoiceStudio cadence enhancement: Ensure natural pausing after introductory markers
+        s = re.sub(r'^(also|however|in addition|furthermore|moreover|for instance|for example|meanwhile)\b(?!\s*[,:\-\.])', r'\1,', s, flags=re.IGNORECASE)
+        s = re.sub(r'([\.\?!]\s+)(also|however|in addition|furthermore|moreover|for instance|for example|meanwhile)\b(?!\s*[,:\-\.])', r'\1\2,', s, flags=re.IGNORECASE)
 
         # Split run-on sentences over 30 words at logical conjunctions (and, but, because, so)
         sentences = re.split(r'([\.!\?]+\s+)', s)

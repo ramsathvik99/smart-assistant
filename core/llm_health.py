@@ -152,6 +152,19 @@ def mark_provider_healthy(provider: str, latency_s: Optional[float] = None) -> N
         pass
 
 
+def clear_health_cache() -> None:
+    """Clear in-memory and persistent health data."""
+    global _PROBE_STARTED
+    with _HEALTH_LOCK:
+        _PROVIDER_STATUS.clear()
+        _PROVIDER_LATENCIES.clear()
+        _PROBE_STARTED = False
+    try:
+        save_health_file_data({"providers": {}, "keys": {}, "models": {}, "metadata": {}})
+    except Exception:
+        pass
+
+
 def record_provider_latency(provider: str, latency_s: float) -> None:
     """Record observed latency for an LLM provider call."""
     if latency_s <= 0:
@@ -183,18 +196,30 @@ def get_average_latency(provider: str) -> float:
     return defaults.get(p, 2.0)
 
 
-def is_ollama_reachable(base_url: str = "http://localhost:11434") -> bool:
-    """Check if local Ollama daemon is reachable."""
+def is_ollama_reachable(base_url: str = "http://127.0.0.1:11434") -> bool:
+    """Check if local Ollama daemon is reachable.
+    Tries base_url and 127.0.0.1:11434 / localhost:11434 fallbacks to prevent Windows IPv6 timeouts.
+    """
     global _OLLAMA_REACHABLE
-    try:
-        import requests
-        url = f"{base_url.rstrip('/')}/api/tags"
-        resp = requests.get(url, timeout=1.0)
-        _OLLAMA_REACHABLE = bool(resp.status_code == 200)
-        return _OLLAMA_REACHABLE
-    except Exception:
-        _OLLAMA_REACHABLE = False
-        return False
+    import requests
+    candidate_urls = [base_url]
+    if "localhost" in base_url:
+        candidate_urls.append(base_url.replace("localhost", "127.0.0.1"))
+    elif "127.0.0.1" in base_url:
+        candidate_urls.append(base_url.replace("127.0.0.1", "localhost"))
+
+    for u in candidate_urls:
+        try:
+            url = f"{u.rstrip('/')}/api/tags"
+            resp = requests.get(url, timeout=1.5)
+            if resp.status_code == 200:
+                _OLLAMA_REACHABLE = True
+                return True
+        except Exception:
+            continue
+
+    _OLLAMA_REACHABLE = False
+    return False
 
 
 def probe_single_provider(provider: str, keys: List[str]) -> Tuple[bool, str, str]:
@@ -253,34 +278,16 @@ def probe_single_provider(provider: str, keys: List[str]) -> Tuple[bool, str, st
         except Exception as e:
             return False, f"Connection error: {e}", "Check HuggingFace connection"
 
-    elif p == "deepseek":
-        if not keys:
-            return False, "No API key configured", "Add DeepSeek API key"
-        try:
-            url = "https://api.deepseek.com/models"
-            resp = requests.get(
-                url,
-                headers={"Authorization": f"Bearer {keys[0]}"},
-                timeout=3.0,
-            )
-            if resp.status_code in (401, 403):
-                return False, f"HTTP {resp.status_code} authentication failed", "DeepSeek key invalid"
-            if resp.status_code == 402 or "insufficient" in resp.text.lower():
-                return False, "HTTP 402 insufficient balance", "DeepSeek balance is empty"
-            if resp.status_code == 200:
-                return True, "Healthy", ""
-            return False, f"HTTP {resp.status_code}", "Check DeepSeek account"
-        except Exception as e:
-            return False, f"Connection error: {e}", "Check DeepSeek connection"
 
     elif p == "groq":
         if not keys:
             return False, "No API key configured", "Add Groq API key"
         try:
-            url = "https://api.groq.com/openai/v1/models"
-            resp = requests.get(
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            resp = requests.post(
                 url,
-                headers={"Authorization": f"Bearer {keys[0]}"},
+                headers={"Authorization": f"Bearer {keys[0]}", "Content-Type": "application/json"},
+                json={"model": "qwen/qwen3.8-27b", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
                 timeout=3.0,
             )
             if resp.status_code in (401, 403):
@@ -290,7 +297,7 @@ def probe_single_provider(provider: str, keys: List[str]) -> Tuple[bool, str, st
                 cd = RATE_LIMIT_COOLDOWN_SECONDS
                 if retry_hdr:
                     try:
-                        cd = max(2, min(int(float(retry_hdr)) + 1, 300))
+                        cd = max(2, min(int(float(retry_hdr)) + 1, 60))
                     except Exception:
                         cd = RATE_LIMIT_COOLDOWN_SECONDS
                 return False, f"HTTP 429 rate limited (retry-after={cd}s)", f"Groq rate limited (in cooldown {cd}s)"
@@ -304,30 +311,59 @@ def probe_single_provider(provider: str, keys: List[str]) -> Tuple[bool, str, st
         if not keys:
             return False, "No API key configured", "Add OpenAI API key"
         try:
-            url = "https://api.openai.com/v1/models"
-            resp = requests.get(
+            url = "https://api.openai.com/v1/chat/completions"
+            resp = requests.post(
                 url,
-                headers={"Authorization": f"Bearer {keys[0]}"},
+                headers={"Authorization": f"Bearer {keys[0]}", "Content-Type": "application/json"},
+                json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
                 timeout=3.0,
             )
             if resp.status_code in (401, 403):
                 return False, f"HTTP {resp.status_code} authentication failed", "OpenAI key invalid"
-            if resp.status_code in (402, 429) and "quota" in resp.text.lower():
-                return False, "Quota exhausted", "OpenAI quota exhausted"
+            if resp.status_code == 429 or resp.status_code == 402 or "quota" in resp.text.lower() or "billing" in resp.text.lower() or "credits" in resp.text.lower():
+                return False, "Quota/credits exhausted", "OpenAI quota exhausted"
             if resp.status_code == 200:
                 return True, "Healthy", ""
             return False, f"HTTP {resp.status_code}", "Check OpenAI account"
         except Exception as e:
             return False, f"Connection error: {e}", "Check OpenAI connection"
 
+    elif p == "deepseek":
+        if not keys:
+            return False, "No API key configured", "Add DeepSeek API key"
+        try:
+            url = "https://api.deepseek.com/chat/completions"
+            resp = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {keys[0]}", "Content-Type": "application/json"},
+                json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
+                timeout=3.0,
+            )
+            if resp.status_code in (401, 403):
+                return False, f"HTTP {resp.status_code} authentication failed", "DeepSeek key invalid"
+            if resp.status_code == 402 or "insufficient" in resp.text.lower():
+                return False, "HTTP 402 insufficient balance", "DeepSeek balance is empty"
+            if resp.status_code == 200:
+                return True, "Healthy", ""
+            return False, f"HTTP {resp.status_code}", "Check DeepSeek account"
+        except Exception as e:
+            return False, f"Connection error: {e}", "Check DeepSeek connection"
+
     elif p == "gemini":
         if not keys:
             return False, "No API key configured", "Add Gemini API key"
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={keys[0]}"
-            resp = requests.get(url, timeout=3.0)
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            resp = requests.post(
+                url,
+                headers={"x-goog-api-key": keys[0], "Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": "hi"}]}], "generationConfig": {"maxOutputTokens": 1}},
+                timeout=3.0,
+            )
             if resp.status_code in (400, 401, 403):
                 return False, f"HTTP {resp.status_code} authentication failed", "Gemini key invalid"
+            if resp.status_code == 429 or "quota" in resp.text.lower() or "resource_exhausted" in resp.text.lower():
+                return False, "Gemini quota exhausted", "Check Gemini quota"
             if resp.status_code == 200:
                 return True, "Healthy", ""
             return False, f"HTTP {resp.status_code}", "Check Gemini status"
@@ -449,16 +485,12 @@ def order_provider_chain(chain: List[str], primary: Optional[str] = None) -> Lis
     # Sort healthy providers by measured latency
     healthy.sort(key=lambda x: get_average_latency(x))
 
-    # Keep primary first if it is healthy and not significantly slower
+    # Keep primary first if it is healthy
     if primary and primary in healthy:
-        primary_lat = get_average_latency(primary)
-        fastest_lat = get_average_latency(healthy[0])
-        # If primary latency is within 1.0s of the fastest, prioritize primary
-        if primary_lat <= fastest_lat + 1.0:
-            healthy = [primary] + [p for p in healthy if p != primary]
+        healthy = [primary] + [p for p in healthy if p != primary]
 
-    # Include Ollama as last-resort local provider if reachable
-    if _OLLAMA_REACHABLE and "ollama" not in healthy and "ollama" not in cooldown_providers:
+    # Include Ollama as local provider if reachable
+    if (_OLLAMA_REACHABLE or is_ollama_reachable()) and "ollama" not in healthy and "ollama" not in cooldown_providers:
         healthy.append("ollama")
 
     # Combine: healthy first, only fallback to cooldown providers if NO healthy provider is available

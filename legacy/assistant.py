@@ -323,8 +323,17 @@ def process_input(text, user_id=None):
         return ""
 
     clean_text = text.strip()
-    norm_text = clean_text.lower()
+    norm_text = re.sub(r'[\.\?!,]+$', '', clean_text.lower()).strip()
     now_mono = time.monotonic()
+
+    # Phase 6: Acoustic Echo Rejection - drop microphone capture of assistant's own speech
+    try:
+        from legacy.tts import is_echo_of_assistant_speech
+        if is_echo_of_assistant_speech(clean_text, window_s=6.0):
+            print(f"[ECHO SUPPRESSION] Dropped acoustic echo of assistant speech: '{clean_text}'")
+            return ""
+    except Exception:
+        pass
 
     # Utterance Deduplication & Atomic Epoch Transition (Requirement 4)
     with _utterance_lock:
@@ -364,10 +373,11 @@ def process_input(text, user_id=None):
     # Initialize hard turn deadline for interactive budget enforcement
     try:
         from core.turn_deadline import set_current_turn_deadline, TurnDeadline
-        _budget_sec = float(CONFIG.get("LLM_INTERACTIVE_BUDGET", 5.0))
+        _budget_sec = float(CONFIG.get("LLM_INTERACTIVE_BUDGET", 8.0))
         set_current_turn_deadline(TurnDeadline(budget_seconds=_budget_sec))
-    except Exception:
-        pass
+        print(f"[TURN DEADLINE] Initialized interactive turn budget={_budget_sec:.1f}s")
+    except Exception as _tdl_err:
+        print(f"[TURN DEADLINE] Warning: could not initialize turn deadline: {_tdl_err}")
 
     try:
         print(f"[ASSISTANT DEBUG] Command [{correlation_id}]: {clean_text}")
@@ -387,37 +397,71 @@ def process_input(text, user_id=None):
         if current_uid is None:
             try:
                 from instance.config import settings as _cfg
-                current_uid = getattr(_cfg, 'CURRENT_USER_ID', None)
+                current_uid = getattr(_cfg, 'CURRENT_USER_ID', None) or (_cfg.get_last_user() if hasattr(_cfg, 'get_last_user') else None)
             except Exception:
                 current_uid = None
 
         effective_uid = user_id or current_uid
 
-        # Multilingual Language Detection & Canonical Intent Normalization
-        from core.multilingual_engine import get_multilingual_engine
-        ml_engine = get_multilingual_engine()
-        lang_res = ml_engine.detect_language(clean_text, user_id=effective_uid)
-        detected_lang = lang_res.language
-        ml_engine.set_active_language(effective_uid, detected_lang)
-
-        if lang_res.is_multilingual:
-            routing_text = ml_engine.translate_to_english(clean_text, source_lang=detected_lang)
-            try:
-                print(f"[MULTILINGUAL] Detected {detected_lang} ({lang_res.locale}) -> Canonical routing: {routing_text}")
-            except Exception:
-                safe_rt = str(routing_text).encode("ascii", errors="backslashreplace").decode("ascii")
-                print(f"[MULTILINGUAL] Detected {detected_lang} -> Canonical routing: {safe_rt}")
-        else:
-            routing_text = clean_text
-
+        # ── Immediate Contextual Acknowledgement (< 5ms) ────────────────────────
+        fast_ack = None
         try:
-            from core.brain import brain_route_and_execute
-            result = brain_route_and_execute(routing_text, user_id=effective_uid)
-        except Exception as brain_err:
-            # If Brain fails for any reason, fall back to direct single-intent router
-            print(f"[BRAIN FALLBACK] {brain_err}")
-            from core.unified_command_router import route_and_execute
-            result = route_and_execute(routing_text, user_id=effective_uid)
+            from core.fast_acknowledgement import get_fast_acknowledgement
+            fast_ack = get_fast_acknowledgement(clean_text)
+            if fast_ack:
+                try:
+                    from core.voice_lifecycle import get_voice_lifecycle
+                    get_voice_lifecycle().on_assistant_executing(fast_ack)
+                except Exception:
+                    pass
+                try:
+                    from core.assistant_core import get_assistant_core
+                    get_assistant_core().set_state("executing")
+                except Exception:
+                    pass
+                try:
+                    speak(fast_ack, priority=TTSPriority.COMMAND)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # ── Multilingual Language Detection with ASCII Fast-Path ─────────────────
+        if clean_text.isascii() and not any(ord(c) > 127 for c in clean_text):
+            detected_lang = "en"
+            routing_text = clean_text
+            from core.multilingual_engine import get_multilingual_engine
+            ml_engine = get_multilingual_engine()
+            ml_engine.set_active_language(effective_uid, "en")
+        else:
+            from core.multilingual_engine import get_multilingual_engine
+            ml_engine = get_multilingual_engine()
+            lang_res = ml_engine.detect_language(clean_text, user_id=effective_uid)
+            detected_lang = lang_res.language
+            ml_engine.set_active_language(effective_uid, detected_lang)
+
+            if lang_res.is_multilingual:
+                routing_text = ml_engine.translate_to_english(clean_text, source_lang=detected_lang)
+                try:
+                    print(f"[MULTILINGUAL] Detected {detected_lang} ({lang_res.locale}) -> Canonical routing: {routing_text}")
+                except Exception:
+                    safe_rt = str(routing_text).encode("ascii", errors="backslashreplace").decode("ascii")
+                    print(f"[MULTILINGUAL] Detected {detected_lang} -> Canonical routing: {safe_rt}")
+            else:
+                routing_text = clean_text
+
+        # ── Execution: Deterministic Fast-Path vs Complex Goal Planner ─────────
+        from core.unified_command_router import UnifiedCommandRouter, unified_router
+        if UnifiedCommandRouter._is_mobile_phone_command(routing_text):
+            result = unified_router.execute_single_action(routing_text, user_id=effective_uid)
+        else:
+            try:
+                from core.brain import brain_route_and_execute
+                result = brain_route_and_execute(routing_text, user_id=effective_uid)
+            except Exception as brain_err:
+                # If Brain fails for any reason, fall back to direct single-intent router
+                print(f"[BRAIN FALLBACK] {brain_err}")
+                result = unified_router.execute_single_action(routing_text, user_id=effective_uid)
 
         if tracker:
             tracker.record("routing_complete_timestamp", time.monotonic())
@@ -437,28 +481,38 @@ def process_input(text, user_id=None):
                 return response
             _last_utterance_response = response
 
+        spoken_response = None
+        final_ui_text = None
+
         # CRITICAL: Check if the request was properly handled to prevent incorrect fallbacks
         if response:
-            try:
-                from extensions.system.conversational_response import compose_conversational_response
-                conv_resp = compose_conversational_response(
-                    user_input=clean_text,
-                    raw_response=response,
-                    intent=result.get("intent"),
-                    action_result=result,
-                    context={"user_id": effective_uid, "command": routing_text},
-                    user_id=effective_uid,
-                    is_proactive=False,
-                )
-                final_ui_text = conv_resp.text or response
-                spoken_response = conv_resp.speech_text or conv_resp.text or response
-                meta = conv_resp.to_dict()
+            existing_conv = result.get("conversational_response")
+            if existing_conv and isinstance(existing_conv, dict):
+                final_ui_text = existing_conv.get("text") or response
+                spoken_response = existing_conv.get("speech_text") or result.get("spoken_response") or final_ui_text
+                meta = dict(existing_conv)
                 meta["ui_text"] = final_ui_text
-            except Exception as c_err:
-                print(f"[CONVERSATIONAL COMPOSER ERROR] {c_err}")
-                final_ui_text = response
-                spoken_response = response
-                meta = {"ui_text": response}
+            else:
+                try:
+                    from extensions.system.conversational_response import compose_conversational_response
+                    conv_resp = compose_conversational_response(
+                        user_input=clean_text,
+                        raw_response=response,
+                        intent=result.get("intent"),
+                        action_result=result,
+                        context={"user_id": effective_uid, "command": routing_text},
+                        user_id=effective_uid,
+                        is_proactive=False,
+                    )
+                    final_ui_text = conv_resp.text or response
+                    spoken_response = conv_resp.speech_text or conv_resp.text or response
+                    meta = conv_resp.to_dict()
+                    meta["ui_text"] = final_ui_text
+                except Exception as c_err:
+                    print(f"[CONVERSATIONAL COMPOSER ERROR] {c_err}")
+                    final_ui_text = response
+                    spoken_response = response
+                    meta = {"ui_text": response}
 
             # Determine response language: explicit requested instruction > user preference > detected input language
             user_pref_lang = None
@@ -495,11 +549,11 @@ def process_input(text, user_id=None):
                 meta["ui_text"] = final_ui_text
 
             try:
-                print(f"[SPEECH PIPELINE] Final UI Text: {final_ui_text[:120]!r}")
+                print(f"[SPEECH PIPELINE] Final UI Text: {final_ui_text!r}")
                 print(f"[SPEECH PIPELINE] Speech Text: {spoken_response!r}")
                 print(f"[SPEECH PIPELINE] Words: {len(spoken_response.split())} | Chars: {len(spoken_response)}")
             except Exception:
-                safe_ui = str(final_ui_text[:120]).encode("ascii", errors="backslashreplace").decode("ascii")
+                safe_ui = str(final_ui_text).encode("ascii", errors="backslashreplace").decode("ascii")
                 safe_sp = str(spoken_response).encode("ascii", errors="backslashreplace").decode("ascii")
                 print(f"[SPEECH PIPELINE] Final UI Text: {safe_ui}")
                 print(f"[SPEECH PIPELINE] Speech Text: {safe_sp}")

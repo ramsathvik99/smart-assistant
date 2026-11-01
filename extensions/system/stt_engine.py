@@ -134,15 +134,15 @@ class LocalWhisperSTT:
             return cls._instance
 
     def __init__(self, model_size: Optional[str] = None, auto_load: bool = True):
-        # Allow override from parameter, config, or env var. Default: 'small'
+        # Allow override from parameter, config, or env var. Default: 'base'
         if model_size:
             self._model_size = model_size
         else:
             try:
                 from instance.config import settings
-                self._model_size = getattr(settings, "STT_MODEL", os.getenv("STT_MODEL", "small"))
+                self._model_size = getattr(settings, "STT_MODEL", os.getenv("STT_MODEL", "base"))
             except Exception:
-                self._model_size = os.getenv("STT_MODEL", "small")
+                self._model_size = os.getenv("STT_MODEL", "base")
 
         self._lock = threading.Lock()
         self._model = None
@@ -184,10 +184,12 @@ class LocalWhisperSTT:
                 self._model_size,
                 download_dir
             )
+            cpu_threads = int(os.getenv("WHISPER_CPU_THREADS", "6"))
             model = WhisperModel(
                 self._model_size,
                 device="cpu",
                 compute_type="int8",
+                cpu_threads=cpu_threads,
                 download_root=download_dir
             )
             with self._lock:
@@ -324,14 +326,22 @@ class LocalWhisperSTT:
             initial_prompt = self._get_initial_prompt()
             hotwords = self._get_hotwords()
 
-            # Single pass transcription with language auto-detection and hotwords biasing
+            # Single pass transcription with language biasing and hotwords
             kwargs = {
                 "beam_size": 1,
-                "vad_filter": True,
+                "vad_filter": False,
+                "condition_on_previous_text": False,
+                "without_timestamps": True,
                 "initial_prompt": initial_prompt,
             }
             if hotwords:
                 kwargs["hotwords"] = hotwords
+
+            # Language hint locking: avoid scanning 99 languages when active language is known
+            if language_hint and language_hint in SUPPORTED_LANGUAGES:
+                kwargs["language"] = language_hint
+            elif not language_hint:
+                kwargs["language"] = "en"
 
             segments_gen, info = self._model.transcribe(
                 audio_float,

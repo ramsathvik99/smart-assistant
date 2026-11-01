@@ -351,8 +351,8 @@ def _stop_plugins():
     """Stop plugins."""
     log_debug("Stopping plugins")
     try:
-        from extensions.plugin_manager import PluginManager
-        pm = PluginManager()
+        from extensions.plugin_manager import get_plugin_manager
+        pm = get_plugin_manager()
         # Plugins are unloaded automatically when the app exits
         log_debug("Plugins stopped")
     except Exception as e:

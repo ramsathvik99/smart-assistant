@@ -165,6 +165,8 @@ class ReminderHandler:
             return ReminderAction.UPDATE
         
         # Check for list actions
+        if re.search(r'^\s*(?:my\s+|the\s+)?reminders\s*$', text):
+            return ReminderAction.LIST
         if re.search(r'\bwhat\s+reminders\s+(?:do\s+i\s+have|are\s+scheduled)', text):
             return ReminderAction.LIST
         if re.search(r'\bwhat\s+are\s+(?:all\s+)?(?:my\s+|the\s+)?reminders', text):

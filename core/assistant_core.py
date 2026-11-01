@@ -125,6 +125,11 @@ class AssistantCore:
                 "authenticated": self._user_id is not None
             }
 
+    def get_current_user_id(self) -> Optional[int]:
+        """Return the currently authenticated user ID from active state or fallback."""
+        ctx = self.get_user_context()
+        return ctx.get("user_id")
+
     def set_assistant_name(self, name: str):
         """Update assistant name and persist to user preferences if authenticated."""
         if not name:

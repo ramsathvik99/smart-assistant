@@ -1,6 +1,7 @@
 import os
+import re
 import json
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -60,47 +61,37 @@ class Settings:
         self.GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         
         # Support multiple keys per provider for failover (deduplicated)
-        self.OPENAI_API_KEYS = list(dict.fromkeys([key.strip() for key in [
-            os.getenv("OPENAI_API_KEY", ""),
-            os.getenv("OPENAI_API_KEY_1", ""),
-            os.getenv("OPENAI_API_KEY_2", ""),
-            os.getenv("OPENAI_API_KEY_3", ""),
-        ] if key and key.strip()]))
-        
-        self.GROQ_API_KEYS = list(dict.fromkeys([key.strip() for key in [
-            os.getenv("GROQ_API_KEY", ""),
-            os.getenv("GROQ_API_KEY_1", ""),
-            os.getenv("GROQ_API_KEY_2", ""),
-            os.getenv("GROQ_API_KEY_3", ""),
-        ] if key and key.strip()]))
-        
-        self.GEMINI_API_KEYS = list(dict.fromkeys([key.strip() for key in [
-            os.getenv("GEMINI_API_KEY", ""),
-            os.getenv("GEMINI_API_KEY_1", ""),
-            os.getenv("GEMINI_API_KEY_2", ""),
-            os.getenv("GEMINI_API_KEY_3", ""),
-        ] if key and key.strip()]))
-        
-        self.DEEPSEEK_API_KEYS = list(dict.fromkeys([key.strip() for key in [
-            os.getenv("DEEPSEEK_API_KEY", ""),
-            os.getenv("DEEPSEEK_API_KEY_1", ""),
-            os.getenv("DEEPSEEK_API_KEY_2", ""),
-            os.getenv("DEEPSEEK_API_KEY_3", ""),
-        ] if key and key.strip()]))
-        
-        self.HF_API_KEYS = list(dict.fromkeys([key.strip() for key in [
-            os.getenv("HF_API_KEY", ""),
-            os.getenv("HF_API_KEY_1", ""),
-            os.getenv("HF_API_KEY_2", ""),
-            os.getenv("HF_API_KEY_3", ""),
-        ] if key and key.strip()]))
+        def _collect_env_keys(*var_names: str) -> List[str]:
+            res: List[str] = []
+            for var in var_names:
+                v = os.getenv(var, "")
+                if not v or not v.strip():
+                    continue
+                v_str = v.strip()
+                if v_str.startswith("[") and v_str.endswith("]"):
+                    try:
+                        parsed = json.loads(v_str)
+                        if isinstance(parsed, list):
+                            for sub in parsed:
+                                s = str(sub).strip()
+                                if s and s not in res:
+                                    res.append(s)
+                            continue
+                    except Exception:
+                        pass
+                for part in re.split(r'[,;\n\r]+', v_str):
+                    p = part.strip()
+                    if p and p not in res:
+                        res.append(p)
+            return res
 
+        self.OPENAI_API_KEYS = _collect_env_keys("OPENAI_API_KEY", "OPENAI_API_KEYS", "OPENAI_API_KEY_1", "OPENAI_API_KEY_2", "OPENAI_API_KEY_3")
+        self.GROQ_API_KEYS = _collect_env_keys("GROQ_API_KEY", "GROQ_API_KEYS", "GROQ_API_KEY_1", "GROQ_API_KEY_2", "GROQ_API_KEY_3")
+        self.GEMINI_API_KEYS = _collect_env_keys("GEMINI_API_KEY", "GEMINI_API_KEYS", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3")
+        self.DEEPSEEK_API_KEYS = _collect_env_keys("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEYS", "DEEPSEEK_API_KEY_1", "DEEPSEEK_API_KEY_2", "DEEPSEEK_API_KEY_3")
+        self.HF_API_KEYS = _collect_env_keys("HF_API_KEY", "HF_API_KEYS", "HF_API_KEY_1", "HF_API_KEY_2", "HF_API_KEY_3")
         self.ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-        self.ANTHROPIC_API_KEYS = list(dict.fromkeys([key.strip() for key in [
-            os.getenv("ANTHROPIC_API_KEY", ""),
-            os.getenv("ANTHROPIC_API_KEY_1", ""),
-            os.getenv("ANTHROPIC_API_KEY_2", ""),
-        ] if key and key.strip()]))
+        self.ANTHROPIC_API_KEYS = _collect_env_keys("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEYS", "ANTHROPIC_API_KEY_1", "ANTHROPIC_API_KEY_2", "ANTHROPIC_API_KEY_3")
         self.ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
         self.ANTHROPIC_TIMEOUT = float(os.getenv("ANTHROPIC_TIMEOUT", "8.0"))
 
@@ -139,11 +130,15 @@ class Settings:
 
         self.GROQ_FALLBACK_MODELS = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "allam-2-7b"]
 
-        self.OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+        self.OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://127.0.0.1:11434")
 
         self.OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
 
-        self.OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "false").lower() in ("true", "1", "yes")
+        ollama_env = os.getenv("OLLAMA_ENABLED")
+        if ollama_env is not None:
+            self._ollama_enabled = ollama_env.lower() in ("true", "1", "yes")
+        else:
+            self._ollama_enabled = None
 
         self.OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "60.0"))
 
@@ -244,6 +239,14 @@ class Settings:
 
         self.DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
+        # --- LOCATION INTELLIGENCE & NAVIGATION CONFIGURATION ---
+        self.LOCATION_PRIMARY_SOURCE = os.getenv("LOCATION_PRIMARY_SOURCE", "phone_gps")
+        self.LOCATION_FALLBACK_SOURCE = os.getenv("LOCATION_FALLBACK_SOURCE", "windows_location")
+        self.LOCATION_LIVE_THRESHOLD_SEC = int(os.getenv("LOCATION_LIVE_THRESHOLD_SEC", "120"))
+        self.LOCATION_STALE_THRESHOLD_SEC = int(os.getenv("LOCATION_STALE_THRESHOLD_SEC", "1800"))
+        self.NOMINATIM_BASE_URL = os.getenv("NOMINATIM_BASE_URL", "https://nominatim.openstreetmap.org")
+        self.OSRM_ROUTING_URL = os.getenv("OSRM_ROUTING_URL", "https://router.project-osrm.org")
+
         self.DB_PORT = int(os.getenv("DB_PORT", "5432"))
 
         self.JWT_SECRET = os.getenv("JWT_SECRET", "")
@@ -279,7 +282,7 @@ class Settings:
 
 
         # --- RUNTIME STATE (Legacy support) ---
-        self.RUNTIME_CONFIG_FILE = "runtime_config.json"
+        self.RUNTIME_CONFIG_FILE = os.path.join(project_root, "runtime_config.json")
         
         # Explicit authenticated session state (None until authenticated)
         self.CURRENT_USER_ID = None
@@ -290,18 +293,32 @@ class Settings:
 
         # --- VOICE & SPEECH CONFIGURATION ---
         self.STT_ENGINE = os.getenv("STT_ENGINE", "whisper")
-        self.STT_MODEL = os.getenv("STT_MODEL", "small")
+        self.STT_MODEL = os.getenv("STT_MODEL", "base")
         self.VAD_ENGINE = os.getenv("VAD_ENGINE", "neural")
 
         # --- LLM LATENCY & TIME BUDGET CONFIGURATION ---
-        self.LLM_INTERACTIVE_BUDGET = float(os.getenv("LLM_INTERACTIVE_BUDGET", "5.0"))
-        self.LLM_PER_PROVIDER_TIMEOUT = float(os.getenv("LLM_PER_PROVIDER_TIMEOUT", "2.5"))
+        self.LLM_INTERACTIVE_BUDGET = float(os.getenv("LLM_INTERACTIVE_BUDGET", "8.0"))
+        self.LLM_PER_PROVIDER_TIMEOUT = float(os.getenv("LLM_PER_PROVIDER_TIMEOUT", "3.5"))
         self.LLM_ENABLE_RACING = os.getenv("LLM_ENABLE_RACING", "true").lower() in ("true", "1", "yes")
-        self.LLM_HEDGED_DELAY = float(os.getenv("LLM_HEDGED_DELAY", "1.2"))
+        self.LLM_HEDGED_DELAY = float(os.getenv("LLM_HEDGED_DELAY", "1.5"))
         self.LLM_FALLBACK_SPOKEN_REPLY = os.getenv("LLM_FALLBACK_SPOKEN_REPLY", "I'm having trouble reaching my language model, but I can still do local commands")
         self.ENABLE_PROGRESS_CUE = os.getenv("ENABLE_PROGRESS_CUE", "true").lower() in ("true", "1", "yes")
 
 
+
+    @property
+    def OLLAMA_ENABLED(self) -> bool:
+        if self._ollama_enabled is None:
+            try:
+                from core.llm_health import is_ollama_reachable
+                self._ollama_enabled = is_ollama_reachable(self.OLLAMA_API_BASE)
+            except Exception:
+                self._ollama_enabled = False
+        return self._ollama_enabled
+
+    @OLLAMA_ENABLED.setter
+    def OLLAMA_ENABLED(self, val: bool):
+        self._ollama_enabled = bool(val)
 
     def load_runtime_config(self):
 

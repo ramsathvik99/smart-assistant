@@ -282,7 +282,7 @@ class VerificationAdapters:
 
         is_match = False
         for t in target_aliases:
-            if t and (t in active_app or active_app in t or t in win_title):
+            if t and ((active_app and (t in active_app or active_app in t)) or (win_title and t in win_title)):
                 is_match = True
                 break
 
@@ -296,7 +296,7 @@ class VerificationAdapters:
         if state_diff and state_diff.details.get("application"):
             app_diff = state_diff.details["application"]
             after_app = (app_diff.get("after") or "").lower()
-            if any(t in after_app or after_app in t for t in target_aliases if t):
+            if any(t and after_app and (t in after_app or after_app in t) for t in target_aliases):
                 is_match = True
 
         cmd_str = (getattr(expected, 'command', '') or (action_result.get("raw_input") if action_result else "") or (action_result.get("command") if action_result else "") or expected.action or "").lower()
@@ -404,6 +404,14 @@ class VerificationAdapters:
 
         # If action_result reported failure, respect it
         resp_text = str(action_result.get("response", "") if action_result else "").lower()
+        if "already closed" in resp_text or "not currently running" in resp_text:
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_SUCCESS,
+                verified=True,
+                confidence=ConfidenceLevel.HIGH,
+                expected_state={"active_application_closed": target},
+                verification_method="state_aware_precheck"
+            )
         if action_result and (
             action_result.get("status") in ("error", "failed", "declined", "unverified", "not_found")
             or action_result.get("success") is False
@@ -929,8 +937,20 @@ class VerificationAdapters:
                         verification_method="gpu_memory_telemetry_check"
                     )
 
+        # Remote Mobile Device Verification
         if action_result and (
-            action_result.get("status") in ("error", "declined", "failed", "unverified")
+            action_result.get("action") == "remote_device"
+            or "verified_foreground" in action_result
+            or "verified_closed" in action_result
+            or "whatsapp_call_initiated" in action_result
+            or "call_state" in action_result
+            or action_result.get("call_type") in ("cellular", "whatsapp")
+            or "battery_info" in action_result
+        ):
+            return VerificationAdapters.verify_remote_mobile_device(expected, post_obs, state_diff, action_result)
+
+        if action_result and (
+            action_result.get("status") in ("error", "declined", "failed")
             or action_result.get("success") is False
         ):
             return OutcomeVerificationResult(
@@ -938,6 +958,15 @@ class VerificationAdapters:
                 verified=False,
                 confidence=ConfidenceLevel.HIGH,
                 failure_reason=action_result.get("message") or action_result.get("error") or "Device control operation failed or was declined.",
+                verification_method="device_query_action_result"
+            )
+
+        if action_result and action_result.get("status") == "unverified":
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.UNCERTAIN,
+                verified=False,
+                confidence=ConfidenceLevel.MEDIUM,
+                failure_reason=action_result.get("message") or "Device control operation executed but could not be deterministically verified.",
                 verification_method="device_query_action_result"
             )
 
@@ -957,6 +986,130 @@ class VerificationAdapters:
             confidence=ConfidenceLevel.LOW,
             failure_reason="Device control target cannot be deterministically verified.",
             verification_method="device_state_inspection"
+        )
+
+    @staticmethod
+    def verify_remote_mobile_device(
+        expected: ExpectedOutcome,
+        post_obs: Dict[str, Any],
+        state_diff: Optional[StateDifference] = None,
+        action_result: Optional[Dict[str, Any]] = None
+    ) -> OutcomeVerificationResult:
+        """
+        Truthful verification for remote mobile device operations (Android / ADB / Platform Bridge).
+        Validates real-world outcomes on the physical connected phone (foreground app, calls, telemetry).
+        Prevents false completion while preserving genuine execution results.
+        """
+        if not action_result:
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.UNCERTAIN,
+                verified=False,
+                confidence=ConfidenceLevel.LOW,
+                failure_reason="No action result returned from mobile device controller.",
+                verification_method="remote_mobile_device_verification"
+            )
+
+        status = action_result.get("status")
+        success = action_result.get("success", False)
+        msg = action_result.get("message") or action_result.get("error") or ""
+
+        # 1. Truthful reporting when action was unverified or inconclusive
+        if status == "unverified" or (action_result.get("verified_foreground") is False and success):
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.UNCERTAIN,
+                verified=False,
+                confidence=ConfidenceLevel.MEDIUM,
+                failure_reason=msg or "App launch was attempted on phone, but foreground verification was unavailable.",
+                expected_state={"app_foreground": expected.target},
+                observed_state={"status": "unverified", "package": action_result.get("package")},
+                verification_method="remote_mobile_device_verification",
+                retry_possible=False
+            )
+
+        # 2. Definite failure / offline / not paired
+        if not success or status in ("device_offline", "offline", "not_paired", "error", "failed", "app_not_found", "missing_parameters"):
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_FAILURE,
+                verified=False,
+                confidence=ConfidenceLevel.HIGH,
+                failure_reason=msg or "Mobile device operation failed.",
+                expected_state=expected.expected_state,
+                observed_state={"status": status, "success": False},
+                verification_method="remote_mobile_device_verification",
+                retry_possible=False
+            )
+
+        # 3. Verified foreground app launch on mobile
+        if action_result.get("verified_foreground") is True:
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_SUCCESS,
+                verified=True,
+                confidence=ConfidenceLevel.HIGH,
+                expected_state={"foreground_app": action_result.get("package") or action_result.get("app_name")},
+                observed_state={"foreground_app": action_result.get("package"), "verified_foreground": True},
+                verification_method="remote_mobile_device_verification"
+            )
+
+        # 4. Verified closed app on mobile
+        if action_result.get("verified_closed") is True:
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_SUCCESS,
+                verified=True,
+                confidence=ConfidenceLevel.HIGH,
+                expected_state={"closed_app": action_result.get("package") or action_result.get("app_name")},
+                observed_state={"package": action_result.get("package"), "verified_closed": True},
+                verification_method="remote_mobile_device_verification"
+            )
+
+        # 5. Verified call operations (cellular / WhatsApp)
+        if action_result.get("call_type") or action_result.get("whatsapp_call_initiated") or "call_state" in action_result:
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_SUCCESS,
+                verified=True,
+                confidence=ConfidenceLevel.HIGH,
+                expected_state={"call_initiated": True, "call_type": action_result.get("call_type")},
+                observed_state={
+                    "call_type": action_result.get("call_type"),
+                    "contact": action_result.get("contact"),
+                    "call_state": action_result.get("call_state")
+                },
+                verification_method="remote_mobile_device_verification"
+            )
+
+        # 6. Verified telemetry / status queries (battery, devices, storage, ram)
+        if (
+            action_result.get("battery") is not None
+            or action_result.get("devices") is not None
+            or "storage_info" in action_result
+            or "memory_info" in action_result
+            or status in ("connected_adb", "disconnected", "unpaired", "success")
+        ):
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_SUCCESS,
+                verified=True,
+                confidence=ConfidenceLevel.HIGH,
+                expected_state={"handled": True},
+                observed_state={"success": True, "status": status},
+                verification_method="remote_mobile_device_verification"
+            )
+
+        # 7. Generic success fallback
+        if success:
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_SUCCESS,
+                verified=True,
+                confidence=ConfidenceLevel.HIGH,
+                expected_state=expected.expected_state,
+                observed_state={"success": True},
+                verification_method="remote_mobile_device_verification"
+            )
+
+        return OutcomeVerificationResult(
+            status=OutcomeStatus.UNCERTAIN,
+            verified=False,
+            confidence=ConfidenceLevel.LOW,
+            failure_reason="Could not deterministically verify mobile device outcome.",
+            verification_method="remote_mobile_device_verification"
         )
 
     @staticmethod
@@ -1076,6 +1229,16 @@ class VerificationAdapters:
         action_result: Optional[Dict[str, Any]] = None,
         user_id: Optional[Any] = None
     ) -> OutcomeVerificationResult:
+        if expected.verification_method == "read_only_query" or expected.action in ("query_reminders", "list_reminders", "identify_conflicts", "prepare_schedule") or (action_result and action_result.get("action") in ("list_reminders", "identify_conflicts", "prepare_schedule")):
+            succeeded = bool(action_result and action_result.get("status") in ("success", "completed"))
+            return OutcomeVerificationResult(
+                status=OutcomeStatus.VERIFIED_SUCCESS if succeeded else OutcomeStatus.VERIFIED_FAILURE,
+                verified=succeeded,
+                confidence=ConfidenceLevel.HIGH,
+                expected_state={"query_success": True},
+                observed_state={"query_success": succeeded},
+                verification_method="read_only_query"
+            )
         uid = user_id or expected.expected_state.get("user_id") or 1
         target_title = (expected.target or expected.expected_state.get("title") or "").strip().lower()
 
@@ -2076,6 +2239,40 @@ class OutcomeVerifier:
         text = (command_or_input or "").strip()
         text_low = text.lower()
 
+        # 0. REMOTE MOBILE DEVICE CONTROL (Phase 6 / Mobile Bridge)
+        # Check action_result or query for mobile targets before Windows desktop launch/close
+        is_mobile_action = (
+            (action_result and (
+                action_result.get("action") == "remote_device"
+                or action_result.get("target") in ("phone", "mobile")
+                or "verified_foreground" in action_result
+                or "verified_closed" in action_result
+                or "whatsapp_call_initiated" in action_result
+                or "call_state" in action_result
+                or "battery_info" in action_result
+                or action_result.get("call_type") in ("cellular", "whatsapp")
+                or action_result.get("status") in ("connected_adb", "unpaired", "device_offline")
+            ))
+            or (intent_up == "DEVICE_CONTROL" and any(k in text_low for k in ["phone", "mobile", "redmi", "android", "whatsapp", "cellular", "dial"]))
+            or re.search(r'\b(?:on|from|to)\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)\b', text_low)
+            or re.search(r'\b(?:whatsapp\s+call|call\s+.+?\s+on\s+whatsapp|video\s+call)\b', text_low)
+        )
+        if is_mobile_action:
+            target = target_hint or ""
+            if not target and action_result:
+                target = action_result.get("app_name") or action_result.get("contact") or action_result.get("target") or ""
+            if not target:
+                m_app = re.search(r'(?:open|launch|start|close|quit|stop)\s+(.+?)\s+on\s+(?:(?:my|the)\s+)?(?:phone|mobile|device|android|redmi[a-z0-9_\-\s]*)', text_low)
+                if m_app:
+                    target = m_app.group(1).strip()
+            return ExpectedOutcome(
+                action="remote_device",
+                target=target,
+                intent="DEVICE_CONTROL",
+                expected_state={"remote_device_handled": True},
+                verification_method="remote_mobile_device_verification"
+            )
+
         # 1. OPEN_APPLICATION / CLOSE_APPLICATION
         is_close_action = (
             intent_up == "CLOSE_APPLICATION"
@@ -2358,7 +2555,17 @@ class OutcomeVerifier:
 
         # 5. REMINDERS
         if intent_up == "REMINDERS" or "remind" in text_low:
+            is_create = bool(re.search(r'\bremind\s+me\s+to\b|\bset\s+(?:a\s+)?reminder\b', text_low))
             is_cancel = any(w in text_low for w in ["cancel", "delete", "remove", "clear"])
+            if not is_create and (any(w in text_low for w in ["list", "show", "check", "view", "what", "conflict", "prepare"]) or (action_result and action_result.get("action") in ("list_reminders", "identify_conflicts", "prepare_schedule", "list"))):
+                act = (action_result.get("action") if action_result else None) or "query_reminders"
+                return ExpectedOutcome(
+                    action=act,
+                    target="reminders",
+                    intent=intent_up,
+                    expected_state={"query_success": True},
+                    verification_method="read_only_query"
+                )
             action = "cancel_reminder" if is_cancel else "create_reminder"
             title = ""
             m_to = re.search(r"\bto\s+([^,]+?)(?:\s+at|\s+in|\s+on|$)", text_low)
@@ -2391,7 +2598,7 @@ class OutcomeVerifier:
             )
 
         # 7. SMART_HOME
-        if intent_up == "SMART_HOME" or any(w in text_low for w in ["light", "fan", "ac", "smart"]):
+        if intent_up == "SMART_HOME" or (intent_up not in ("GENERAL_CONVERSATION", "RAG_SEARCH") and any(re.search(r'\b' + re.escape(w) + r'\b', text_low) for w in ["light", "lights", "fan", "ac", "smart", "thermostat", "plug", "switch"])):
             is_on = False if any(w in text_low for w in ["off", "turn off", "disable"]) else True
             return ExpectedOutcome(
                 action="smart_home_control",
@@ -2567,6 +2774,20 @@ class OutcomeVerifier:
                     observed_state={"action": "calculate", "result": action_result.get("result")},
                     verification_method="calculator_output_verification"
                 )
+
+        elif (
+            expected.action == "remote_device"
+            or expected.verification_method == "remote_mobile_device_verification"
+            or (action_result and (
+                action_result.get("action") == "remote_device"
+                or "verified_foreground" in action_result
+                or "verified_closed" in action_result
+                or "whatsapp_call_initiated" in action_result
+                or "call_state" in action_result
+                or action_result.get("call_type") in ("cellular", "whatsapp")
+            ))
+        ):
+            return VerificationAdapters.verify_remote_mobile_device(expected, obs_dict, state_diff, action_result)
 
         elif expected.action == "close_application":
             return VerificationAdapters.verify_close_application(expected, obs_dict, state_diff, action_result)

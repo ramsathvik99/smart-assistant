@@ -91,7 +91,8 @@ def make_speakable(text: Optional[str]) -> str:
     s = re.sub(r'\s*\bgreater than\b', '', s, flags=re.IGNORECASE)
     s = re.sub(r'<[^>]+>', '', s)
 
-    # 3. Strip raw URLs
+    # 3. Strip Markdown links [text](url) -> text, and raw URLs
+    s = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', s)
     s = re.sub(r'https?://\S+', '', s)
     s = re.sub(r'\bwww\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9._/-]+', '', s)
 
@@ -104,10 +105,12 @@ def make_speakable(text: Optional[str]) -> str:
     s = re.sub(r'```[\s\S]*?```', '', s)
     s = re.sub(r'`([^`]+)`', r'\1', s)
 
-    # 6. Strip Markdown symbols (headers, bold, italics, table pipes, blockquotes)
+    # 6. Strip Markdown symbols (headers, bold, italics, bullets, table pipes, blockquotes)
     s = re.sub(r'^\s*#{1,6}\s*', '', s, flags=re.MULTILINE)
+    s = re.sub(r'^\s*[\*\-•]\s+', '', s, flags=re.MULTILINE)
     s = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', s)
     s = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', s)
+    s = s.replace('*', '')
     s = re.sub(r'^\s*>\s*', '', s, flags=re.MULTILINE)
     s = re.sub(r'\|', ' ', s)
 

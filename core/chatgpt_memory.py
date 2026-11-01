@@ -16,6 +16,7 @@ import time
 import json
 import math
 import hashlib
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -89,6 +90,9 @@ class ChatGPTMemoryManager:
 
     def __init__(self):
         self.pool = get_db_pool()
+        self._user_facts_cache: Dict[int, Tuple[float, Dict[str, str]]] = {}
+        self._cache_lock = threading.Lock()
+        self._cache_ttl = 30.0  # seconds
 
     # ── A. USER FACTS (memory_facts) ──────────────────────────────────────────
 
@@ -257,6 +261,13 @@ class ChatGPTMemoryManager:
                 except Exception:
                     pass
 
+            # Invalidate user facts cache on update
+            try:
+                with self._cache_lock:
+                    self._user_facts_cache.pop(user_id, None)
+            except Exception:
+                pass
+
             return True
         except Exception as e:
             print(f"[MEMORY] set_user_fact error: {e}")
@@ -271,6 +282,14 @@ class ChatGPTMemoryManager:
         if not user_id:
             return {}
         user_id = int(user_id)
+
+        # Fast user-scoped memory cache hit
+        if not include_tentative:
+            with self._cache_lock:
+                cached = self._user_facts_cache.get(user_id)
+                if cached and (time.time() - cached[0] < self._cache_ttl):
+                    return dict(cached[1])
+
         merged: Dict[str, str] = {}
 
         # 1. Load user_memory JSONB
@@ -325,6 +344,10 @@ class ChatGPTMemoryManager:
         except Exception as _e3:
             pass
 
+        if not include_tentative:
+            with self._cache_lock:
+                self._user_facts_cache[user_id] = (time.time(), dict(merged))
+
         return merged
 
     def get_structured_user_memories(self, user_id: int, include_tentative: bool = False) -> List[Dict[str, Any]]:
@@ -369,7 +392,7 @@ class ChatGPTMemoryManager:
         return results
 
     def delete_user_fact(self, user_id: int, key: str) -> bool:
-        """Delete a specific user fact across tables."""
+        """Delete a specific user fact across tables and cache."""
         if not user_id or not key:
             return False
         clean_key = key.strip().lower().replace(" ", "_")
@@ -377,18 +400,46 @@ class ChatGPTMemoryManager:
         deleted = False
         try:
             with self.pool.get_cursor() as cur:
+                # 1. Delete from memory_facts
                 cur.execute("""
                     DELETE FROM memory_facts WHERE user_id = %s AND fact_key = %s RETURNING id
                 """, (user_id, clean_key))
                 deleted = cur.fetchone() is not None
+
+                # 2. Delete from user_preferences if present
+                cur.execute("""
+                    DELETE FROM user_preferences WHERE user_id = %s AND pref_key = %s
+                """, (user_id, clean_key))
+
+                # 3. Clean from user_memory JSONB (top-level and categories)
+                try:
+                    cur.execute("SELECT memory FROM user_memory WHERE user_id = %s;", (user_id,))
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        raw = row[0] if isinstance(row[0], dict) else json.loads(row[0] or "{}")
+                        changed = False
+                        if clean_key in raw:
+                            del raw[clean_key]
+                            changed = True
+                        for cat, cat_dict in list(raw.items()):
+                            if isinstance(cat_dict, dict) and clean_key in cat_dict:
+                                del cat_dict[clean_key]
+                                changed = True
+                        if changed:
+                            cur.execute("""
+                                UPDATE user_memory SET memory = %s WHERE user_id = %s;
+                            """, (json.dumps(raw), user_id))
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[MEMORY] delete_user_fact error: {e}")
 
         try:
-            from legacy.memory_manager import delete_user_memory
-            delete_user_memory(user_id, clean_key)
+            with self._cache_lock:
+                self._user_facts_cache.pop(user_id, None)
         except Exception:
             pass
+
         return deleted
 
     # ── B. USER PREFERENCES (user_preferences) ───────────────────────────────
@@ -407,6 +458,11 @@ class ChatGPTMemoryManager:
                     ON CONFLICT (user_id, pref_key)
                     DO UPDATE SET pref_value = EXCLUDED.pref_value
                 """, (int(user_id), clean_key, val_str))
+            try:
+                with self._cache_lock:
+                    self._user_facts_cache.pop(int(user_id), None)
+            except Exception:
+                pass
             return True
         except Exception as e:
             print(f"[MEMORY] set_preference error: {e}")
@@ -495,11 +551,16 @@ class ChatGPTMemoryManager:
         user_id = int(user_id)
         try:
             with self.pool.get_cursor() as cur:
-                # 1. Check conversations table
+                # 1. Check conversations table (exclude transient outage fallbacks from polluting prompt context)
                 cur.execute("""
                     SELECT user_input, assistant_response, timestamp
                     FROM conversations
                     WHERE user_id = %s
+                      AND (assistant_response IS NULL OR (
+                          assistant_response NOT ILIKE '%%trouble reaching%%'
+                          AND assistant_response NOT ILIKE '%%language model service is currently unavailable%%'
+                          AND assistant_response NOT ILIKE '%%All configured providers%%'
+                      ))
                     ORDER BY id DESC
                     LIMIT %s
                 """, (user_id, limit))
@@ -516,6 +577,11 @@ class ChatGPTMemoryManager:
                     SELECT role, content, created_at
                     FROM messages
                     WHERE user_id = %s
+                      AND (content IS NULL OR (
+                          content NOT ILIKE '%%trouble reaching%%'
+                          AND content NOT ILIKE '%%language model service is currently unavailable%%'
+                          AND content NOT ILIKE '%%All configured providers%%'
+                      ))
                     ORDER BY id DESC
                     LIMIT %s
                 """, (user_id, limit * 2))
@@ -1427,3 +1493,8 @@ def get_chatgpt_memory() -> ChatGPTMemoryManager:
     if _chatgpt_memory_instance is None:
         _chatgpt_memory_instance = ChatGPTMemoryManager()
     return _chatgpt_memory_instance
+
+
+# Backward compatibility alias
+ChatGPTMemory = ChatGPTMemoryManager
+

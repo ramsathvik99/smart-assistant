@@ -739,6 +739,56 @@ def take_screenshot():
             except Exception as e:
                 print(f"[Screenshot Debug] PIL ImageGrab failed: {e}")
 
+        if not saved:
+            try:
+                import ctypes
+                from ctypes import wintypes
+                from PIL import Image
+
+                user32 = ctypes.windll.user32
+                gdi32 = ctypes.windll.gdi32
+                try:
+                    user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+                w = user32.GetSystemMetrics(0)
+                h = user32.GetSystemMetrics(1)
+                hdc_screen = user32.GetDC(0)
+                hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+                hbmp = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
+                gdi32.SelectObject(hdc_mem, hbmp)
+                gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, 0, 0, 0x00CC0020 | 0x40000000)
+
+                class BITMAPINFOHEADER(ctypes.Structure):
+                    _fields_ = [
+                        ('biSize', wintypes.DWORD), ('biWidth', wintypes.LONG), ('biHeight', wintypes.LONG),
+                        ('biPlanes', wintypes.WORD), ('biBitCount', wintypes.WORD), ('biCompression', wintypes.DWORD),
+                        ('biSizeImage', wintypes.DWORD), ('biXPelsPerMeter', wintypes.LONG), ('biYPelsPerMeter', wintypes.LONG),
+                        ('biClrUsed', wintypes.DWORD), ('biClrImportant', wintypes.DWORD)
+                    ]
+
+                bmi = BITMAPINFOHEADER()
+                bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+                bmi.biWidth = w
+                bmi.biHeight = -h
+                bmi.biPlanes = 1
+                bmi.biBitCount = 32
+                bmi.biCompression = 0
+
+                buf = ctypes.create_string_buffer(w * h * 4)
+                gdi32.GetDIBits(hdc_mem, hbmp, 0, h, buf, ctypes.byref(bmi), 0)
+
+                gdi32.DeleteObject(hbmp)
+                gdi32.DeleteDC(hdc_mem)
+                user32.ReleaseDC(0, hdc_screen)
+
+                img = Image.frombuffer('RGBA', (w, h), buf, 'raw', 'BGRA', 0, 1)
+                img.convert('RGB').save(str(filepath))
+                saved = True
+                print("[Debug] Screenshot saved with native Windows GDI capture!")
+            except Exception as e:
+                print(f"[Screenshot Debug] Native Windows GDI failed: {e}")
+
         if not saved and plyer_screenshot:
             try:
                 plyer_screenshot(filename=str(filepath))

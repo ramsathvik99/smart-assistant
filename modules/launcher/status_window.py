@@ -182,12 +182,13 @@ class StatusWindow(tk.Toplevel):
                 
                 # Loaded modules
                 try:
-                    from extensions.plugin_manager import PluginManager
-                    pm = PluginManager()
+                    from extensions.plugin_manager import get_plugin_manager
+                    pm = get_plugin_manager()
                     pm.load_plugins()
                     count = len(pm.plugins)
                     self._update_status("modules", f"● {count} modules loaded", C_OK)
-                except:
+                except Exception as pm_err:
+                    log_debug(f"Plugin status check notice: {pm_err}")
                     self._update_status("modules", "● Unknown", C_DIM)
                 
                 # System resources

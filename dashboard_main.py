@@ -68,6 +68,10 @@ _load_env()
 # Early Qt availability check
 # ---------------------------------------------------------------------------
 try:
+    try:
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+    except Exception:
+        pass
     from PyQt6.QtWidgets import QApplication, QSplashScreen, QMessageBox
     from PyQt6.QtCore import Qt, QTimer
     from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QIcon

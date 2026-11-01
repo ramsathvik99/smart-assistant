@@ -1,16 +1,16 @@
 {
   "user_id": 1,
   "devices": {
-    "android_user1phone_4f38cc58": {
-      "device_id": "android_user1phone_4f38cc58",
+    "android_22111317i_e383b303": {
+      "device_id": "android_22111317i_e383b303",
       "user_id": 1,
-      "name": "User 1 Phone",
+      "name": "22111317I",
       "platform": "android",
-      "os_version": "",
+      "os_version": "14",
       "agent_version": "",
-      "ip": "",
-      "online": false,
-      "battery": null,
+      "ip": "192.168.1.4",
+      "online": true,
+      "battery": 55,
       "charging": false,
       "capabilities": [
         "battery",
@@ -20,22 +20,639 @@
         "volume"
       ],
       "permissions": [],
-      "paired_at": "2026-09-23T11:50:59.105818+00:00",
-      "last_seen": "2026-09-23T11:50:59.237803+00:00",
-      "secret_hash": "366d6e931fa9bbfcce9ebc5db2f0fdb74ba2c9bc1ca88b0146b55ef4c2c1f4af",
-      "revoked": true,
-      "metadata": {}
+      "paired_at": "2026-10-31 21:03:21.959919+05:30",
+      "last_seen": "2026-11-01T10:29:59.028598+00:00",
+      "secret_hash": "ce38c9989878dc63bb84477932ddb5888979ca0f9fb0e8f452cbd73f0c8fee7b",
+      "revoked": false,
+      "metadata": {
+        "host": "192.168.1.4",
+        "imei": "864398068018392",
+        "port": 5555,
+        "brand": "Redmi",
+        "model": "22111317I",
+        "serial": "192.168.1.4:5555",
+        "endpoint": "192.168.1.4:5555",
+        "guidance": [
+          "Xiaomi / Redmi / POCO: Go to Settings -> Additional Settings -> Developer Options -> enable 'USB debugging (Security settings)'.",
+          "Android 14+: Always-on VPN supported natively in Settings -> More connectivity options -> VPN."
+        ],
+        "device_id": "android_22111317i_e383b303",
+        "network_ip": "192.168.1.4",
+        "os_version": "14",
+        "fingerprint": "Redmi/sunstone_in/sunstone:14/UKQ1.240624.001/OS2.0.6.0.UMQINXM:user/release-keys",
+        "screen_size": "1080x2400",
+        "sdk_version": 34,
+        "capabilities": {
+          "type": true,
+          "swipe": true,
+          "touch": true,
+          "stream": true,
+          "keyevent": true,
+          "screenshot": true,
+          "launch_apps": true,
+          "read_battery": true
+        },
+        "control_port": null,
+        "manufacturer": "Xiaomi",
+        "session_type": "adb_direct",
+        "remote_vpn_ip": "10.8.0.3",
+        "last_connected": "2026-10-31T17:01:48Z",
+        "connection_type": "wireless_local",
+        "hardware_serial": "ad7c71e20223",
+        "lifecycle_state": "Offline",
+        "device_reference": "IMEI:864398068018392",
+        "hotspot_endpoint": "192.168.43.1:5555",
+        "ipsec_identifier": "smart-assistant-phone-3",
+        "oem_restrictions": [
+          "MIUI / HyperOS requires 'USB debugging (Security settings)' in Developer Options for simulated taps/clicks."
+        ],
+        "pairing_endpoint": "192.168.1.4:38575",
+        "network_interfaces": [
+          {
+            "ips": [
+              "127.0.0.1/8",
+              "::1/128"
+            ],
+            "state": "UNKNOWN",
+            "interface": "lo"
+          },
+          {
+            "ips": [
+              "fe80::7c36:70ff:fea1:8dd7/64"
+            ],
+            "state": "UNKNOWN",
+            "interface": "dummy0"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "tunl0@NONE"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "gre0@NONE"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "gretap0@NONE"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "erspan0@NONE"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "ip_vti0@NONE"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "ip6_vti0@NONE"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "sit0@NONE"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "ip6tnl0@NONE"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "ip6gre0@NONE"
+          },
+          {
+            "ips": [],
+            "state": "UNKNOWN",
+            "interface": "rmnet_ipa0"
+          },
+          {
+            "ips": [
+              "fe80::786f:49ff:fe84:3f2b/64"
+            ],
+            "state": "UNKNOWN",
+            "interface": "rmnet_data0@rmnet_ipa0"
+          },
+          {
+            "ips": [
+              "100.91.180.227/29",
+              "2401:4900:62db:bc67:bc4d:22ff:fe56:3675/64",
+              "fe80::bc4d:22ff:fe56:3675/64"
+            ],
+            "state": "UNKNOWN",
+            "interface": "rmnet_data1@rmnet_ipa0"
+          },
+          {
+            "ips": [
+              "2401:4900:974e:11ce:c4c:bcff:fe56:b07a/64",
+              "fe80::c4c:bcff:fe56:b07a/64"
+            ],
+            "state": "UNKNOWN",
+            "interface": "rmnet_data2@rmnet_ipa0"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "rmnet_data3@rmnet_ipa0"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "rmnet_data4@rmnet_ipa0"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "rmnet_data5@rmnet_ipa0"
+          },
+          {
+            "ips": [
+              "fe80::18d7:aeff:fea7:a7fd/64"
+            ],
+            "state": "UNKNOWN",
+            "interface": "r_rmnet_data0@rmnet_ipa0"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "r_rmnet_data1@rmnet_ipa0"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "r_rmnet_data2@rmnet_ipa0"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "r_rmnet_data3@rmnet_ipa0"
+          },
+          {
+            "ips": [
+              "192.168.1.4/24",
+              "2401:4900:8fcf:98ff:9422:5efa:fae5:3792/64",
+              "2401:4900:8fcf:98ff:a85f:49ff:fe37:ed8/64",
+              "fe80::a85f:49ff:fe37:ed8/64"
+            ],
+            "state": "UP",
+            "interface": "wlan0"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "wlan1"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "p2p0"
+          },
+          {
+            "ips": [],
+            "state": "DOWN",
+            "interface": "wifi-aware0"
+          }
+        ],
+        "tcpip_5555_enabled": true,
+        "connection_endpoint": "192.168.1.4:5555",
+        "remote_vpn_endpoint": "10.8.0.3:5555",
+        "lifecycle_updated_at": "2026-10-31T19:32:29Z",
+        "active_transport_route": "local_wifi"
+      },
+      "enrollment_code": "",
+      "stable_identity": "",
+      "auth_token_hash": "",
+      "connection_mode": "local",
+      "enrollment_state": "pending",
+      "location": {
+        "latitude": 16.310981,
+        "longitude": 80.420874,
+        "accuracy_m": 100.0,
+        "altitude_m": null,
+        "provider": "android_fused",
+        "timestamp": "2026-11-01T10:29:59.028598+00:00"
+      },
+      "location_history": [
+        {
+          "latitude": 16.310977,
+          "provider": "android_fused",
+          "longitude": 80.420871,
+          "timestamp": "2026-11-01T06:48:46.973662+00:00",
+          "accuracy_m": 12.563,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310977,
+          "provider": "android_fused",
+          "longitude": 80.420871,
+          "timestamp": "2026-11-01T06:49:14.676640+00:00",
+          "accuracy_m": 12.563,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310977,
+          "provider": "android_fused",
+          "longitude": 80.420871,
+          "timestamp": "2026-11-01T06:49:16.283299+00:00",
+          "accuracy_m": 12.563,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310974,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T06:57:51.387343+00:00",
+          "accuracy_m": 12.779,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310974,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T06:59:58.482385+00:00",
+          "accuracy_m": 12.779,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310974,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T07:00:40.737813+00:00",
+          "accuracy_m": 12.779,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310978,
+          "provider": "android_fused",
+          "longitude": 80.420879,
+          "timestamp": "2026-11-01T07:04:55.802358+00:00",
+          "accuracy_m": 12.764,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310978,
+          "provider": "android_fused",
+          "longitude": 80.420879,
+          "timestamp": "2026-11-01T07:07:21.518843+00:00",
+          "accuracy_m": 12.764,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310982,
+          "provider": "android_fused",
+          "longitude": 80.420879,
+          "timestamp": "2026-11-01T07:40:53.773870+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310982,
+          "provider": "android_fused",
+          "longitude": 80.420879,
+          "timestamp": "2026-11-01T07:41:16.529987+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310982,
+          "provider": "android_fused",
+          "longitude": 80.420883,
+          "timestamp": "2026-11-01T07:50:48.566923+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310982,
+          "provider": "android_fused",
+          "longitude": 80.420883,
+          "timestamp": "2026-11-01T07:53:59.789177+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31098,
+          "provider": "android_fused",
+          "longitude": 80.420866,
+          "timestamp": "2026-11-01T08:24:11.932185+00:00",
+          "accuracy_m": 13.351,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31098,
+          "provider": "android_fused",
+          "longitude": 80.420866,
+          "timestamp": "2026-11-01T08:25:28.810878+00:00",
+          "accuracy_m": 13.351,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31098,
+          "provider": "android_fused",
+          "longitude": 80.420866,
+          "timestamp": "2026-11-01T08:31:39.410739+00:00",
+          "accuracy_m": 13.351,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310976,
+          "provider": "android_fused",
+          "longitude": 80.420868,
+          "timestamp": "2026-11-01T08:55:20.434655+00:00",
+          "accuracy_m": 11.535,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310976,
+          "provider": "android_fused",
+          "longitude": 80.420868,
+          "timestamp": "2026-11-01T08:58:07.912397+00:00",
+          "accuracy_m": 11.535,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T09:02:05.439674+00:00",
+          "accuracy_m": 13.372,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T09:06:04.219463+00:00",
+          "accuracy_m": 13.372,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.42086,
+          "timestamp": "2026-11-01T09:12:35.986345+00:00",
+          "accuracy_m": 11.463,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.42086,
+          "timestamp": "2026-11-01T09:14:40.366044+00:00",
+          "accuracy_m": 11.463,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.42086,
+          "timestamp": "2026-11-01T09:16:48.221101+00:00",
+          "accuracy_m": 11.463,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.42086,
+          "timestamp": "2026-11-01T09:16:56.822904+00:00",
+          "accuracy_m": 11.463,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T09:21:39.357015+00:00",
+          "accuracy_m": 12.809,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T09:25:35.944340+00:00",
+          "accuracy_m": 12.809,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T09:25:43.984871+00:00",
+          "accuracy_m": 12.809,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T09:25:45.019062+00:00",
+          "accuracy_m": 12.809,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T09:36:41.782060+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.420875,
+          "timestamp": "2026-11-01T09:39:14.539928+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T09:43:20.614731+00:00",
+          "accuracy_m": 11.864,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T09:45:38.886958+00:00",
+          "accuracy_m": 11.864,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T09:49:44.042447+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T09:52:19.523128+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T09:52:24.815420+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T09:54:36.004901+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T09:57:18.428415+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T10:01:14.530963+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T10:04:17.730155+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T10:06:48.411687+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T10:10:00.659238+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310975,
+          "provider": "android_fused",
+          "longitude": 80.420869,
+          "timestamp": "2026-11-01T10:12:04.476151+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310981,
+          "provider": "android_fused",
+          "longitude": 80.420874,
+          "timestamp": "2026-11-01T10:14:53.097130+00:00",
+          "accuracy_m": 12.504,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310981,
+          "provider": "android_fused",
+          "longitude": 80.420874,
+          "timestamp": "2026-11-01T10:16:55.588956+00:00",
+          "accuracy_m": 12.504,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310981,
+          "provider": "android_fused",
+          "longitude": 80.420874,
+          "timestamp": "2026-11-01T10:19:25.785646+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310981,
+          "provider": "android_fused",
+          "longitude": 80.420874,
+          "timestamp": "2026-11-01T10:23:12.169310+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310981,
+          "provider": "android_fused",
+          "longitude": 80.420874,
+          "timestamp": "2026-11-01T10:25:34.068166+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310981,
+          "provider": "android_fused",
+          "longitude": 80.420874,
+          "timestamp": "2026-11-01T10:27:42.015097+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310981,
+          "provider": "android_fused",
+          "longitude": 80.420874,
+          "timestamp": "2026-11-01T10:27:47.148864+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310981,
+          "longitude": 80.420874,
+          "accuracy_m": 100.0,
+          "altitude_m": null,
+          "provider": "android_fused",
+          "timestamp": "2026-11-01T10:29:45.486211+00:00"
+        },
+        {
+          "latitude": 16.310981,
+          "longitude": 80.420874,
+          "accuracy_m": 100.0,
+          "altitude_m": null,
+          "provider": "android_fused",
+          "timestamp": "2026-11-01T10:29:59.028598+00:00"
+        }
+      ],
+      "network_info": {}
     },
-    "android_user1phone_6c7ffab0": {
-      "device_id": "android_user1phone_6c7ffab0",
+    "android_redminote125g_9cdfd7c6": {
+      "device_id": "android_redminote125g_9cdfd7c6",
       "user_id": 1,
-      "name": "User 1 Phone",
+      "name": "Redmi Note 12 5G",
       "platform": "android",
       "os_version": "",
       "agent_version": "",
       "ip": "",
-      "online": false,
-      "battery": null,
+      "online": true,
+      "battery": 84,
       "charging": false,
       "capabilities": [
         "battery",
@@ -45,11 +662,70 @@
         "volume"
       ],
       "permissions": [],
-      "paired_at": "2026-09-23T11:51:39.341443+00:00",
-      "last_seen": "2026-09-23T11:51:39.352744+00:00",
-      "secret_hash": "2a1eff913fa633a80a5eb2e3fa62b26a8c369ff2a22b604edcad9fe33670eb6d",
-      "revoked": true,
-      "metadata": {}
+      "paired_at": "2026-10-31 15:48:33.029803+05:30",
+      "last_seen": "2026-11-01 14:06:56.200924+05:30",
+      "secret_hash": "c250d912390fb7e7701cfda43bd74f60f9890434f2cc82dcdf7e3b0e6f92d979",
+      "revoked": false,
+      "metadata": {
+        "host": "192.168.1.4",
+        "port": 5555,
+        "serial": "192.168.1.4:5555",
+        "endpoint": "192.168.1.4:5555",
+        "guidance": [
+          "Xiaomi / Redmi / POCO: To allow remote screen clicks, go to Settings -> Additional Settings -> Developer Options -> enable 'USB debugging (Security settings)'."
+        ],
+        "screen_size": "1080x2400",
+        "capabilities": {
+          "model": "Redmi Note 12 5G",
+          "can_type": true,
+          "guidance": [
+            "Xiaomi / Redmi / POCO: To allow remote screen clicks, go to Settings -> Additional Settings -> Developer Options -> enable 'USB debugging (Security settings)'."
+          ],
+          "platform": "android",
+          "can_swipe": true,
+          "can_touch": true,
+          "can_stream": true,
+          "os_version": "14",
+          "can_keyevent": true,
+          "capabilities": {
+            "type": true,
+            "swipe": true,
+            "touch": true,
+            "stream": true,
+            "keyevent": true,
+            "screenshot": true,
+            "launch_apps": true,
+            "read_battery": true
+          },
+          "manufacturer": "Xiaomi",
+          "support_level": "full",
+          "can_screenshot": true,
+          "can_launch_apps": true,
+          "can_read_battery": true,
+          "oem_restrictions": [
+            "MIUI / HyperOS requires 'USB debugging (Security settings)' for simulated clicks."
+          ],
+          "unsupported_features": []
+        },
+        "control_port": null,
+        "session_type": "adb_direct",
+        "last_connected": "2026-10-31T11:34:18Z",
+        "connection_type": "wireless",
+        "lifecycle_state": "Offline",
+        "oem_restrictions": [
+          "MIUI / HyperOS requires 'USB debugging (Security settings)' for simulated clicks."
+        ],
+        "lifecycle_updated_at": "2026-10-31T19:32:41Z",
+        "active_transport_route": "local_wifi"
+      },
+      "enrollment_code": "",
+      "stable_identity": "",
+      "auth_token_hash": "",
+      "connection_mode": "local",
+      "enrollment_state": "pending",
+      "location": {},
+      "location_history": [],
+      "network_info": {}
     }
   }
 }

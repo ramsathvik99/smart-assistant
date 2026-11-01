@@ -52,6 +52,55 @@ def lock_workstation(dry_run: bool = False) -> Dict[str, Any]:
         return {"success": False, "status": "error", "error": str(exc), "message": f"Lock failed: {exc}"}
 
 
+def get_lock_state(dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Check if the Windows workstation/session is currently locked without exposing credentials.
+    Uses OpenInputDesktop and SwitchDesktop user32 APIs.
+    """
+    if sys.platform != "win32":
+        return {
+            "success": False,
+            "status": "unsupported",
+            "is_locked": False,
+            "target": "windows",
+            "message": "Windows lock state check is only supported on Windows.",
+        }
+
+    try:
+        user32 = ctypes.windll.user32
+        # DESKTOP_SWITCHDESKTOP = 0x0100
+        hdesk = user32.OpenInputDesktop(0, False, 0x0100)
+        if not hdesk:
+            # Cannot open input desktop -> workstation is locked or running secure desktop (logon/UAC)
+            is_locked = True
+        else:
+            can_switch = user32.SwitchDesktop(hdesk)
+            user32.CloseDesktop(hdesk)
+            is_locked = not bool(can_switch)
+
+        msg = (
+            "The Windows workstation is currently locked."
+            if is_locked
+            else "The Windows workstation is unlocked and active."
+        )
+        return {
+            "success": True,
+            "status": "inspected",
+            "is_locked": is_locked,
+            "target": "windows",
+            "message": msg,
+        }
+    except Exception as exc:
+        logger.error(f"[SYSTEM] Failed to read Windows lock state: {exc}")
+        return {
+            "success": False,
+            "status": "error",
+            "is_locked": False,
+            "target": "windows",
+            "message": f"Unable to check Windows lock state: {exc}",
+        }
+
+
 def sign_out(dry_run: bool = False) -> Dict[str, Any]:
     """Sign out the current Windows user session."""
     if dry_run or is_safe_mode():

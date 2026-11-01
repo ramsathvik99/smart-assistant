@@ -134,6 +134,10 @@ def select_relevant_categories(
     text = (user_input or "").lower().strip()
     intent = (intent_name or "").upper().strip()
 
+    # Fast optimization: Mobile phone operations only observe mobile devices, never PC windows, apps, or audio
+    if any(w in text for w in ["phone", "mobile", "redmi", "android"]) and not any(w in text for w in ["pc", "computer", "laptop"]):
+        return {"devices"}
+
     # 1. Window & Application
     if intent in ("OPEN_APPLICATION", "WINDOW_CONTEXT") or any(
         w in text for w in ["open ", "launch ", "window", "app", "chrome", "edge", "notepad", "close "]

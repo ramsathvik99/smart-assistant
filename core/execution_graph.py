@@ -10,6 +10,7 @@ Does not automatically execute nodes; executor/planner executes nodes explicitly
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -380,3 +381,39 @@ class ExecutionGraph:
                 graph.nodes[node.node_id] = node
 
         return graph
+
+
+# ----------------------------------------------------------------------------
+# Execution Graph Persistence & Registry
+# ----------------------------------------------------------------------------
+
+class ExecutionGraphPersistence:
+    """Thread-safe in-memory and persistent cache for execution graphs."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._graphs: Dict[str, ExecutionGraph] = {}
+
+    def save_graph(self, graph: ExecutionGraph) -> None:
+        """Store or update execution graph."""
+        with self._lock:
+            self._graphs[graph.graph_id] = graph
+
+    def load_graph(self, graph_id: str) -> Optional[ExecutionGraph]:
+        """Retrieve execution graph by id."""
+        with self._lock:
+            return self._graphs.get(graph_id)
+
+    def delete_graph(self, graph_id: str) -> bool:
+        """Remove execution graph from cache."""
+        with self._lock:
+            return self._graphs.pop(graph_id, None) is not None
+
+
+_execution_graph_persistence = ExecutionGraphPersistence()
+
+
+def get_execution_graph_persistence() -> ExecutionGraphPersistence:
+    """Singleton accessor for ExecutionGraphPersistence."""
+    return _execution_graph_persistence
+

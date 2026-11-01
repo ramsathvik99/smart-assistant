@@ -81,16 +81,16 @@ class SettingsPage(QWidget):
 
     TAB_ORDER = [
         ("profile", "Profile"),
-        ("api_keys", "API Keys & Integrations"),
+        ("api_keys", "API Keys and Integrations"),
         ("identity", "Assistant Identity"),
         ("appearance", "Appearance"),
-        ("voice", "Voice & Audio"),
-        ("intelligence", "Intelligence & Behavior"),
-        ("memory", "Memory & Privacy"),
+        ("voice", "Voice and Audio"),
+        ("intelligence", "Intelligence and Behavior"),
+        ("memory", "Memory and Privacy"),
         ("email", "Email"),
         ("devices", "Devices"),
         ("notifications", "Notifications"),
-        ("security", "Security & Data"),
+        ("security", "Security and Data"),
         ("diagnostics", "Diagnostics"),
     ]
 
@@ -111,13 +111,27 @@ class SettingsPage(QWidget):
         header.setSpacing(Spacing.MD)
         sh = SectionHeader("Settings",
                           "Configure your assistant, appearance, privacy, and integrations.",
-                          accent=C.SEC_SETTINGS)
+                          accent=C.ACC)
         header.addWidget(sh, 1)
 
-        self.save_all_btn = QPushButton(" Save & Apply All ")
+        self.save_all_btn = QPushButton(" Save and Apply All ")
         self.save_all_btn.setObjectName("PrimaryBtn")
-        self.save_all_btn.setIcon(icon(ICONS.SAVE, get_contrast_color(C.ACCENT), 14))
+        self.save_all_btn.setIcon(icon(ICONS.SAVE, get_contrast_color(C.ACC), 14))
         self.save_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_all_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.ACC};
+                color: {get_contrast_color(C.ACC)};
+                border: none;
+                border-radius: 6px;
+                padding: 7px 16px;
+                font-size: 12px;
+                font-weight: 700;
+            }}
+            QPushButton:hover {{
+                background: {rgba_str(C.ACC, 0.88)};
+            }}
+        """)
         self.save_all_btn.clicked.connect(self._on_save_all)
         header.addWidget(self.save_all_btn)
         hw = QWidget(); hw.setLayout(header)
@@ -126,6 +140,8 @@ class SettingsPage(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setUsesScrollButtons(True)
+        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
+        self.tabs.tabBar().setExpanding(False)
         self.tabs.setStyleSheet(self._tab_qss())
         root.addWidget(self.tabs, 1)
 
@@ -144,7 +160,7 @@ class SettingsPage(QWidget):
 
         for key, name in self.TAB_ORDER:
             w = getattr(self, f"_tab_{key}")
-            ic = getattr(self, f"_icon_{key}", lambda: icon(ICONS.SETTINGS, C.SEC_SETTINGS))()
+            ic = getattr(self, f"_icon_{key}", lambda: icon(ICONS.SETTINGS, C.ACC))()
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -153,19 +169,19 @@ class SettingsPage(QWidget):
             self.tabs.addTab(scroll, ic, name)
 
     # -------------------------------------------------------- tab factories
-    # Subtle semantic icon identities per section specification
-    def _icon_profile(self): return icon(ICONS.USER, C.SEC_COMMUNICATIONS)
-    def _icon_api_keys(self): return icon(ICONS.LOCK, C.SEC_SETTINGS)
-    def _icon_identity(self): return icon(ICONS.ASSISTANT, C.SEC_ASSISTANT)
-    def _icon_appearance(self): return icon(ICONS.STAR, C.SEC_SCHEDULE)
-    def _icon_voice(self): return icon(ICONS.VOLUME_UP, C.SEC_CONNECTED)
-    def _icon_intelligence(self): return icon(ICONS.BRAIN, C.SEC_INTELLIGENCE)
-    def _icon_memory(self): return icon(ICONS.DATABASE, C.SEC_WORKSPACE)
-    def _icon_email(self): return icon(ICONS.COMMUNICATIONS, C.SEC_COMMUNICATIONS)
-    def _icon_devices(self): return icon(ICONS.CONNECTED_WORLD, C.SEC_CONNECTED)
-    def _icon_notifications(self): return icon(ICONS.BELL, C.STATUS_WARNING)
-    def _icon_security(self): return icon(ICONS.LOCK, C.STATUS_ERROR)
-    def _icon_diagnostics(self): return icon(ICONS.DIAGNOSTICS, C.STATUS_SUCCESS)
+    # Unified theme accent icon identities per design specification
+    def _icon_profile(self): return icon(ICONS.USER, C.ACC, 13)
+    def _icon_api_keys(self): return icon(ICONS.LOCK, C.ACC, 13)
+    def _icon_identity(self): return icon(ICONS.ASSISTANT, C.ACC, 13)
+    def _icon_appearance(self): return icon(ICONS.STAR, C.ACC, 13)
+    def _icon_voice(self): return icon(ICONS.VOLUME_UP, C.ACC, 13)
+    def _icon_intelligence(self): return icon(ICONS.BRAIN, C.ACC, 13)
+    def _icon_memory(self): return icon(ICONS.DATABASE, C.ACC, 13)
+    def _icon_email(self): return icon(ICONS.COMMUNICATIONS, C.ACC, 13)
+    def _icon_devices(self): return icon(ICONS.CONNECTED_WORLD, C.ACC, 13)
+    def _icon_notifications(self): return icon(ICONS.BELL, C.ACC, 13)
+    def _icon_security(self): return icon(ICONS.LOCK, C.ACC, 13)
+    def _icon_diagnostics(self): return icon(ICONS.DIAGNOSTICS, C.ACC, 13)
 
     # -------------------------------------------------------------- Profile
     def _build_tab_profile(self) -> QWidget:
@@ -228,7 +244,7 @@ class SettingsPage(QWidget):
         lay.setContentsMargins(Spacing.LG, Spacing.LG, Spacing.LG, Spacing.LG)
         lay.setSpacing(Spacing.MD)
 
-        card_info = Card(title="API Keys & Integrations Architecture")
+        card_info = Card(title="API Keys and Integrations Architecture")
         info_lbl = QLabel(
             "Configure your personal credentials for AI models, search engines, and external integrations.\n"
             "• Security: Keys are encrypted per-user using Windows Data Protection API (DPAPI) and stored separately from general settings.\n"
@@ -671,13 +687,13 @@ class SettingsPage(QWidget):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.id_name = QLineEdit()
-        self.id_name.setPlaceholderText("e.g. Friday, Nova, Trevon, JARVIS...")
+        self.id_name.setPlaceholderText("e.g. Nova, Atlas, Jarvis, Assistant...")
         self.id_name.setStyleSheet(self._line_qss())
 
-        self.id_preview = QLabel("“Hello! I am Friday. How can I help you today?”")
+        self.id_preview = QLabel("“Hello! I am Assistant. How can I help you today?”")
         self.id_preview.setStyleSheet(f"color: {C.ACCENT}; font-size: 11px; font-style: italic; padding: 2px 4px;")
         self.id_name.textChanged.connect(lambda t: self.id_preview.setText(
-            f"“Hello! I am {t.strip() or 'Friday'}. How can I help you today?”"
+            f"“Hello! I am {t.strip() or 'Assistant'}. How can I help you today?”"
         ))
 
         self.id_greeting = QLineEdit()
@@ -749,7 +765,7 @@ class SettingsPage(QWidget):
         lay.setSpacing(Spacing.MD)
 
         # Theme / accent
-        card_accent = Card(title="Theme & Accent Color")
+        card_accent = Card(title="Theme and Accent Color")
         accent_row = QHBoxLayout()
         accent_row.setSpacing(Spacing.MD)
         card_accent.body.addLayout(accent_row)
@@ -865,7 +881,7 @@ class SettingsPage(QWidget):
         self.ap_ambient_parallax.setChecked(True)
         self.ap_ambient_parallax.setStyleSheet(f"color:{C.TEXT_PRIMARY};font-weight:500;")
 
-        self.ap_ambient_reactive = QCheckBox("React dynamically to Assistant & System States")
+        self.ap_ambient_reactive = QCheckBox("React dynamically to Assistant and System States")
         self.ap_ambient_reactive.setChecked(True)
         self.ap_ambient_reactive.setStyleSheet(f"color:{C.TEXT_PRIMARY};font-weight:500;")
 
@@ -1125,7 +1141,7 @@ class SettingsPage(QWidget):
         self.ai_ctx.setChecked(True)
         self.ai_ctx.setStyleSheet(f"color:{C.TEXT_PRIMARY};font-weight:500;")
 
-        self.ai_pro = QCheckBox("Proactive assistance (observations & nudges)")
+        self.ai_pro = QCheckBox("Proactive assistance (observations and nudges)")
         self.ai_pro.setChecked(True)
         self.ai_pro.setStyleSheet(f"color:{C.TEXT_PRIMARY};font-weight:500;")
 
@@ -1672,7 +1688,15 @@ class SettingsPage(QWidget):
 
     def _apply_devices(self, devices):
         self.dev_list.setRowCount(0)
-        for d in devices:
+        if isinstance(devices, dict):
+            if "devices" in devices and isinstance(devices["devices"], (dict, list)):
+                devices = list(devices["devices"].values()) if isinstance(devices["devices"], dict) else devices["devices"]
+            else:
+                devices = list(devices.values())
+        if not isinstance(devices, list):
+            devices = []
+        valid_devs = [d for d in devices if isinstance(d, dict)]
+        for d in valid_devs:
             r = self.dev_list.rowCount()
             self.dev_list.insertRow(r)
             self.dev_list.setItem(r, 0, QTableWidgetItem(str(d.get("device_id", d.get("uid", "")))))
@@ -1680,7 +1704,7 @@ class SettingsPage(QWidget):
             self.dev_list.setItem(r, 2, QTableWidgetItem(str(d.get("type", "device"))))
             last = d.get("last_seen") or d.get("paired_at") or "—"
             self.dev_list.setItem(r, 3, QTableWidgetItem(str(last)))
-        if not devices:
+        if not valid_devs:
             self.dev_list.insertRow(0)
             e = QTableWidgetItem("No paired devices — click 'Pair Device' to get started.")
             e.setForeground(QColor(C.TEXT_MUTED))
@@ -1965,7 +1989,7 @@ class SettingsPage(QWidget):
 
         def _on_done(_=None):
             if flash:
-                self._flash("Appearance & 3D ambient settings applied.")
+                self._flash("Appearance and 3D ambient settings applied.")
             win = self.window()
             if hasattr(win, 'ambient_engine') and win.ambient_engine:
                 try:
@@ -2251,16 +2275,9 @@ class SettingsPage(QWidget):
 
     def _on_pair_device(self):
         try:
-            from skills.device_management.device_pairing import DevicePairing
-            ident = get_identity() or {}
-            uid = ident.get("user_id") or 1
-            code = DevicePairing.generate_pairing_code()
-            msg = QMessageBox(self)
-            msg.setIcon(QMessageBox.Icon.Information)
-            msg.setWindowTitle("Pair New Device")
-            msg.setText(f"Pairing code: <b style='color:{C.SEC_SETTINGS};font-size:20px;'>{code}</b>")
-            msg.setInformativeText("Enter this code on your mobile/remote device to complete pairing.\nCodes expire after 5 minutes.")
-            msg.exec()
+            from .connected_world_page import WirelessPairDialog
+            dlg = WirelessPairDialog(self)
+            dlg.exec()
             self._load_devices()
         except Exception as e:
             self._flash(f"Pairing unavailable: {e}")
@@ -2273,10 +2290,10 @@ class SettingsPage(QWidget):
             did = self.dev_list.item(r, 0)
             if not did: continue
             try:
-                from skills.device_management.device_registry import DeviceRegistry
+                from skills.device_management.device_controller import get_device_controller
                 ident = get_identity() or {}
                 uid = ident.get("user_id") or 1
-                DeviceRegistry().remove_device(uid, did.text())
+                get_device_controller().unpair_device(int(uid), did.text())
             except Exception:
                 pass
         self._load_devices()
@@ -2377,84 +2394,152 @@ class SettingsPage(QWidget):
     def _line_qss(self) -> str:
         return f"""
             QLineEdit, QTextEdit, QPlainTextEdit, QTimeEdit, QDateEdit, QDateTimeEdit {{
-                background:{C.SURFACE_BG};color:{C.TEXT_PRIMARY};
-                padding:8px 12px;border-radius:{Radius.SM}px;
-                border:1px solid {C.BORDER};font-size:13px;
+                background: rgba(255, 255, 255, 0.03);
+                color: {C.TEXT};
+                padding: 7px 12px;
+                border-radius: 6px;
+                border: 1px solid rgba(255, 255, 255, 0.10);
+                font-size: 13px;
             }}
             QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{
-                border:1px solid {C.SEC_SETTINGS};background:{rgba_str(C.SEC_SETTINGS,0.04)};
+                border: 1px solid {C.ACC};
+                background: rgba(255, 255, 255, 0.06);
             }}
         """
 
     def _combo_qss(self) -> str:
         return f"""
             QComboBox {{
-                background:{C.SURFACE_BG};color:{C.TEXT_PRIMARY};
-                padding:7px 12px;border-radius:{Radius.SM}px;
-                border:1px solid {C.BORDER};font-size:13px;min-height:18px;
+                background: rgba(255, 255, 255, 0.03);
+                color: {C.TEXT};
+                padding: 6px 12px;
+                border-radius: 6px;
+                border: 1px solid rgba(255, 255, 255, 0.10);
+                font-size: 13px;
+                min-height: 18px;
             }}
-            QComboBox:hover {{ border-color:{rgba_str(C.SEC_SETTINGS,0.4)}; }}
-            QComboBox:focus {{ border-color:{C.SEC_SETTINGS}; }}
-            QComboBox::drop-down {{ border:none;width:24px; }}
-            QComboBox::down-arrow {{ image:none;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid {C.TEXT_MUTED};margin-right:6px; }}
+            QComboBox:hover {{ border-color: {C.ACC}; }}
+            QComboBox:focus {{ border-color: {C.ACC}; }}
+            QComboBox::drop-down {{ border: none; width: 24px; }}
+            QComboBox::down-arrow {{ image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid {C.TEXT_MED}; margin-right: 6px; }}
             QComboBox QAbstractItemView {{
-                background:{C.CARD_BG};color:{C.TEXT_PRIMARY};
-                border:1px solid {C.BORDER};padding:4px;selection-background-color:{rgba_str(C.SEC_SETTINGS,0.18)};outline:0;
+                background: rgba(14, 20, 30, 0.96);
+                color: {C.TEXT};
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                padding: 4px;
+                selection-background-color: {rgba_str(C.ACC, 0.20)};
+                outline: 0;
             }}
         """
 
     def _tab_qss(self) -> str:
         return f"""
             QTabWidget::pane {{
-                border:1px solid {C.BORDER};border-radius:{Radius.MD}px;
-                background:{C.CARD_BG};top:-1px;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-top: 1px solid rgba(255, 255, 255, 0.16);
+                background: rgba(10, 16, 26, 0.45);
+                border-radius: 10px;
+                top: -1px;
+                padding: 10px;
             }}
             QTabBar::tab {{
-                background:transparent;color:{C.TEXT_MUTED};
-                padding:10px 22px;margin-right:2px;border:none;
-                border-top-left-radius:{Radius.MD}px;border-top-right-radius:{Radius.MD}px;
-                font-weight:600;font-size:13px;
+                background: rgba(255, 255, 255, 0.03);
+                color: {C.TEXT_MED};
+                padding: 8px 13px;
+                margin-right: 3px;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-weight: 600;
+                font-size: 12px;
             }}
             QTabBar::tab:selected {{
-                background:{C.CARD_BG};color:{C.SEC_SETTINGS};
-                border:1px solid {C.BORDER};border-bottom:none;
+                background: rgba(255, 255, 255, 0.08);
+                color: {C.TEXT};
+                border: 1px solid rgba(255, 255, 255, 0.16);
+                border-bottom: 2px solid {C.ACC};
             }}
             QTabBar::tab:hover:!selected {{
-                color:{C.TEXT_PRIMARY};background:{C.SURFACE_BG};
+                color: {C.TEXT};
+                background: rgba(255, 255, 255, 0.06);
+            }}
+            QTabBar::scroller {{
+                width: 28px;
+            }}
+            QTabBar QToolButton {{
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 4px;
+                margin: 2px;
+                padding: 2px;
+            }}
+            QTabBar QToolButton:hover {{
+                background: rgba(255, 255, 255, 0.14);
+                border: 1px solid {C.ACC};
+            }}
+            QTabBar QToolButton::right-arrow {{
+                image: none;
+                border-left: 5px solid {C.TEXT};
+                border-top: 4px solid transparent;
+                border-bottom: 4px solid transparent;
+                width: 0;
+                height: 0;
+            }}
+            QTabBar QToolButton::left-arrow {{
+                image: none;
+                border-right: 5px solid {C.TEXT};
+                border-top: 4px solid transparent;
+                border-bottom: 4px solid transparent;
+                width: 0;
+                height: 0;
             }}
         """
 
     def _btn_primary(self) -> str:
         return f"""
             QPushButton {{
-                background:{C.SEC_SETTINGS};color:{get_contrast_color(C.SEC_SETTINGS)};font-weight:600;
-                padding:8px 18px;border-radius:{Radius.MD}px;border:none;
+                background: {C.ACC};
+                color: {get_contrast_color(C.ACC)};
+                font-weight: 700;
+                padding: 7px 16px;
+                border-radius: 6px;
+                border: none;
+                font-size: 12px;
             }}
-            QPushButton:hover {{ background:{_lighten(C.SEC_SETTINGS,10)}; }}
-            QPushButton:pressed {{ background:{_darken(C.SEC_SETTINGS,10)}; }}
-            QPushButton:disabled {{ background:{C.DISABLED};color:{C.TEXT_MUTED}; }}
+            QPushButton:hover {{ background: {rgba_str(C.ACC, 0.88)}; }}
+            QPushButton:pressed {{ background: {rgba_str(C.ACC, 0.75)}; }}
+            QPushButton:disabled {{ background: rgba(255, 255, 255, 0.08); color: {C.TEXT_DIM}; }}
         """
 
     def _btn_ghost(self) -> str:
         return f"""
             QPushButton {{
-                background:{C.SURFACE_BG};color:{C.TEXT_PRIMARY};font-weight:600;
-                padding:8px 18px;border-radius:{Radius.MD}px;
-                border:1px solid {C.BORDER};
+                background: rgba(255, 255, 255, 0.04);
+                color: {C.TEXT};
+                font-weight: 600;
+                padding: 7px 16px;
+                border-radius: 6px;
+                border: 1px solid rgba(255, 255, 255, 0.10);
+                font-size: 12px;
             }}
-            QPushButton:hover {{ border-color:{rgba_str(C.SEC_SETTINGS,0.5)};color:{C.SEC_SETTINGS}; }}
-            QPushButton:pressed {{ background:{rgba_str(C.SEC_SETTINGS,0.08)}; }}
+            QPushButton:hover {{ border-color: {C.ACC}; background: rgba(255, 255, 255, 0.08); }}
+            QPushButton:pressed {{ background: rgba(255, 255, 255, 0.12); }}
         """
 
     def _btn_danger(self) -> str:
         return f"""
             QPushButton {{
-                background:{rgba_str(C.STATUS_ERROR,0.12)};color:{C.STATUS_ERROR};font-weight:600;
-                padding:8px 18px;border-radius:{Radius.MD}px;
-                border:1px solid {rgba_str(C.STATUS_ERROR,0.35)};
+                background: rgba(244, 63, 94, 0.12);
+                color: {C.STATUS_ERROR};
+                font-weight: 600;
+                padding: 7px 16px;
+                border-radius: 6px;
+                border: 1px solid rgba(244, 63, 94, 0.35);
+                font-size: 12px;
             }}
-            QPushButton:hover {{ background:{rgba_str(C.STATUS_ERROR,0.20)}; }}
-            QPushButton:pressed {{ background:{rgba_str(C.STATUS_ERROR,0.28)}; }}
+            QPushButton:hover {{ background: rgba(244, 63, 94, 0.22); }}
+            QPushButton:pressed {{ background: rgba(244, 63, 94, 0.30); }}
         """
 
     # Compatibility methods for pyqt_app integration

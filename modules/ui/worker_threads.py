@@ -34,11 +34,11 @@ class CommandWorker(QObject):
         uid = self._user_id
         if not uid:
             try:
-                from instance.config import settings
-                uid = getattr(settings, 'CURRENT_USER_ID', None)
+                from core.assistant_core import assistant_core
+                uid = assistant_core.get_current_user_id()
                 if not uid:
-                    from core.assistant_core import assistant_core
-                    uid = assistant_core.get_current_user_id()
+                    from instance.config import settings
+                    uid = getattr(settings, 'CURRENT_USER_ID', None) or (settings.get_last_user() if hasattr(settings, 'get_last_user') else None)
             except Exception:
                 uid = None
 

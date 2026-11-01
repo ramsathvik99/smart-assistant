@@ -46,17 +46,39 @@ def get_video_transcript(video_id: str) -> Dict[str, Any]:
             
         data = transcript.fetch()
         text_list = []
+        segments = []
         for entry in data:
-            if hasattr(entry, 'text'):
-                text_list.append(str(entry.text))
-            elif isinstance(entry, dict) and 'text' in entry:
-                text_list.append(str(entry['text']))
+            if hasattr(entry, "text"):
+                txt = str(entry.text)
+                start = getattr(entry, "start", None)
+                dur = getattr(entry, "duration", None)
+            elif isinstance(entry, dict) and "text" in entry:
+                txt = str(entry["text"])
+                start = entry.get("start")
+                dur = entry.get("duration")
+            else:
+                continue
+            text_list.append(txt)
+            segments.append({
+                "text": txt,
+                "start": float(start) if start is not None else None,
+                "duration": float(dur) if dur is not None else None,
+            })
         full_text = " ".join(text_list)
         
         return {
             "success": True,
             "video_id": video_id,
             "transcript": full_text,
+            # Timestamped caption cues -- the real, time-addressable media
+            # evidence. `transcript` above is a flat string; these preserve each
+            # cue's `start`, so a user can ask about a specific section.
+            "segments": segments,
+            "segment_count": len(segments),
+            "duration_seconds": (
+                round((segments[-1]["start"] + (segments[-1]["duration"] or 0.0)), 1)
+                if segments and segments[-1].get("start") is not None else None
+            ),
             "char_count": len(full_text)
         }
     except Exception as e:
@@ -65,8 +87,59 @@ def get_video_transcript(video_id: str) -> Dict[str, Any]:
             "success": False,
             "video_id": video_id,
             "transcript": "",
+            "segments": [],
+            "segment_count": 0,
             "error": str(e)
         }
+
+
+def format_timestamp(seconds: Optional[float]) -> str:
+    """Render seconds as ``H:MM:SS`` / ``M:SS`` for a readable timeline."""
+    try:
+        total = int(max(0, float(seconds or 0)))
+    except (TypeError, ValueError):
+        return "0:00"
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def segments_to_timeline(
+    segments: Optional[list],
+    start: Optional[float] = None,
+    end: Optional[float] = None,
+    max_chars: int = 6000,
+) -> str:
+    """Render caption cues as ``[M:SS] text`` lines.
+
+    ``start``/``end`` window the timeline to a section the user asked about
+    ("what happens at 1:23"). Returns "" when no timestamped cues exist, so the
+    caller can honestly report that no transcript evidence is available rather
+    than inventing one.
+    """
+    if not segments:
+        return ""
+    lines, used = [], 0
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        seg_start = seg.get("start")
+        if seg_start is None:
+            continue
+        if start is not None and seg_start < float(start) - 0.5:
+            continue
+        if end is not None and seg_start > float(end) + 0.5:
+            break
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        line = f"[{format_timestamp(seg_start)}] {text}"
+        if used + len(line) + 1 > max_chars:
+            lines.append("... (timeline truncated)")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
 
 
 def summarize_youtube_video(url_or_query: str) -> Dict[str, Any]:

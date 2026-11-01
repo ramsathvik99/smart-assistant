@@ -1,11 +1,24 @@
 # assistant.py
 import sys
-if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+except Exception:
+    pass
+if sys.stdout is None:
+    try:
+        import os
+        log_path = os.environ.get("SMOKE_TEST_LOG") or os.path.join(os.environ.get("TEMP", "C:/Temp"), "smart_assistant_packaged.log")
+        sys.stdout = open(log_path, "a", encoding="utf-8", buffering=1)
+        sys.stderr = sys.stdout
+    except Exception:
+        pass
+elif hasattr(sys.stdout, 'reconfigure'):
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:
         pass
-print("[DEBUG] Running Python:", sys.executable)
+if sys.stdout:
+    print("[DEBUG] Running Python:", sys.executable)
 import os
 import time
 import signal
@@ -173,6 +186,27 @@ def shutdown():
         proactive_coordinator.stop()
     except Exception:
         pass
+
+    # Stop the proactive personal assistant background scan thread.
+    # It is a daemon thread started in main(); without an explicit stop the
+    # scan loop keeps running (and scanning PostgreSQL) until process exit.
+    try:
+        from core.proactive_service import stop_proactive_service
+        stop_proactive_service()
+    except Exception:
+        pass
+
+    try:
+        from modules.reverse_engineering import get_rea_service
+        get_rea_service().stop()
+    except Exception:
+        pass
+
+    try:
+        from modules.browser.browser_controller import get_active_browser_session
+        get_active_browser_session().close()
+    except Exception:
+        pass
     
     print("[LAUNCHER] [OK] Shutdown complete")
     sys.exit(0)
@@ -299,6 +333,12 @@ def main():
 
     # Initialize Unified Routing
     initialize_unified_routing()
+
+    # Pre-import core memory to prevent concurrent background thread import deadlocks
+    try:
+        import legacy.memory_manager
+    except Exception:
+        pass
 
     # Pre-warm local Whisper STT engine in background so first command is instant
     try:

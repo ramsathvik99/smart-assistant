@@ -85,7 +85,7 @@ class AutomationPage(QWidget):
         root.setSpacing(Spacing.LG)
 
         head = QHBoxLayout(); head.setSpacing(Spacing.MD)
-        sh = SectionHeader("Automation", "Learned preferences, behavioral rules, and scheduled reminders", accent=C.SEC_AUTOMATION)
+        sh = SectionHeader("Automation", "Learned preferences, behavioral rules, and scheduled reminders", accent=C.ACC)
         head.addWidget(sh, 1); head.addStretch(1)
         self._refresh_btn = QPushButton(); self._refresh_btn.setObjectName("IconBtn")
         self._refresh_btn.setIcon(icon(ICONS.REFRESH, C.TEXT, 14)); self._refresh_btn.setFixedSize(34, 34)
@@ -94,34 +94,36 @@ class AutomationPage(QWidget):
         head.addWidget(self._refresh_btn)
         self._new_btn = QPushButton("  New Rule")
         self._new_btn.setObjectName("PrimaryBtn")
-        self._new_btn.setIcon(icon(ICONS.PLUS, get_contrast_color(C.ACCENT), 14))
+        self._new_btn.setIcon(icon(ICONS.PLUS, get_contrast_color(C.ACC), 14))
         self._new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._new_btn.clicked.connect(self._new_rule)
         head.addWidget(self._new_btn)
         hw = QWidget(); hw.setLayout(head)
         root.addWidget(hw)
 
-        stats_row = QHBoxLayout(); stats_row.setSpacing(Spacing.MD)
-        self._sc1 = self._stat_card("Total Rules",  "0", ICONS.AUTOMATION, C.SEC_AUTOMATION)
+        stats_row = QHBoxLayout(); stats_row.setSpacing(Spacing.LG)
+        self._sc1 = self._stat_card("Total Rules",  "0", ICONS.AUTOMATION, C.ACC)
         self._sc2 = self._stat_card("Enabled",      "0", ICONS.POWER,      C.STATUS_SUCCESS)
-        self._sc3 = self._stat_card("Reminders",    "0", ICONS.CLOCK,      C.SEC_AUTOMATION)
-        self._sc4 = self._stat_card("Last trigger", "—", ICONS.BOLT,       C.SEC_AUTOMATION)
+        self._sc3 = self._stat_card("Reminders",    "0", ICONS.CLOCK,      C.ACC)
+        self._sc4 = self._stat_card("Last trigger", "—", ICONS.BOLT,       C.ACC)
         for s in (self._sc1, self._sc2, self._sc3, self._sc4):
             stats_row.addWidget(s, 1)
         srw = QWidget(); srw.setLayout(stats_row)
         root.addWidget(srw)
 
         # Rules table
-        rules_card = Card(title="Learned Rules / Preferences", accent=C.SEC_AUTOMATION)
+        rules_card = Card(title="Learned Rules / Preferences", accent=C.ACC)
+        rules_card.setMinimumHeight(280)
         self._loading = LoadingState("Loading rules…")
         rules_card.body.addWidget(self._loading)
         self._empty = EmptyState(ICONS.AUTOMATION, "No rules defined yet",
                                   "Create a new rule to define assistant behavior preferences.",
-                                  accent=C.SEC_AUTOMATION)
+                                  accent=C.ACC)
         self._empty.setVisible(False)
         rules_card.body.addWidget(self._empty)
 
         self._table = QTableWidget(0, 5)
+        self._table.setMinimumHeight(240)
         self._table.setHorizontalHeaderLabels(["", "ID", "Rule", "Created", "Actions"])
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -140,14 +142,14 @@ class AutomationPage(QWidget):
         rules_card.body.addWidget(self._table, 1)
 
         # Recent reminder runs
-        history_card = Card(title="Recent Triggers (Reminder Notifications)", accent=C.SEC_AUTOMATION)
+        history_card = Card(title="Recent Triggers (Reminder Notifications)", accent=C.ACC)
         hist_scroll = QScrollArea()
         hist_scroll.setWidgetResizable(True)
         hist_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._hist_stack = QVBoxLayout(); self._hist_stack.setSpacing(Spacing.SM)
         self._hist_empty = EmptyState(ICONS.BARS, "No recent triggers",
                                      "The reminder engine will show its most recent activity here.",
-                                     accent=C.SEC_AUTOMATION)
+                                     accent=C.ACC)
         self._hist_stack.addWidget(self._hist_empty)
         hw_w = QWidget(); hw_w.setLayout(self._hist_stack)
         hist_scroll.setWidget(hw_w)
@@ -163,27 +165,10 @@ class AutomationPage(QWidget):
 
         QTimer.singleShot(0, self._reload)
 
-    def _stat_card(self, title: str, value: str, icon_name: str, color: str) -> QFrame:
-        w = QFrame(); w.setProperty("class", "CardPanel")
-        l = QHBoxLayout(w); l.setContentsMargins(Spacing.MD, Spacing.MD, Spacing.MD, Spacing.MD)
-        l.setSpacing(Spacing.MD)
-        tile = QLabel(); tile.setFixedSize(42, 42)
-        tile.setStyleSheet(
-            f"background: {rgba_str(color, 0.14)}; "
-            f"border-radius: {Radius.MD}px;"
-        )
-        tl = QVBoxLayout(tile); tl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ic = QLabel(); ic.setPixmap(icon_pixmap(icon_name, color, 18)); ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tl.addWidget(ic)
-        l.addWidget(tile)
-        col = QVBoxLayout(); col.setSpacing(0)
-        t = QLabel(value); t.setStyleSheet(f"font-size: 18px; font-weight: 700; color: {C.TEXT};")
-        s = QLabel(title); s.setStyleSheet(f"font-size: 11px; color: {C.TEXT_DIM}; letter-spacing: 0.4px;")
-        col.addWidget(t); col.addWidget(s)
-        l.addLayout(col, 1)
-        # keep reference
-        w._val_lbl = t
-        HoverLift.install_on(w, accent=color)
+    def _stat_card(self, title: str, value: str, icon_name: str, color: str) -> QWidget:
+        from ..ds import StatNumeral
+        w = StatNumeral(title, value)
+        w._val_lbl = w._val_lbl
         return w
 
     # ----------------------------- data --------------------------------

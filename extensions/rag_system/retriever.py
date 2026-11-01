@@ -172,6 +172,21 @@ class RAGRetriever:
           4. Returns normalized search documents/snippets with sources and direct answers.
           5. Never logs secrets.
         """
+        import re as _re
+        clean_q = query.strip().strip('"\'')
+        _lead_patterns = [
+            r'^(?:please\s+)?(?:do\s+(?:you|u)\s+know\s+(?:anything\s+)?(?:about|on)|tell\s+me\s+(?:what\s+(?:you|u)\s+know\s+about|all\s+about|about)|what\s+do\s+(?:you|u)\s+know\s+about|what\s+can\s+(?:you|u)\s+tell\s+me\s+about|can\s+(?:you|u)\s+tell\s+me\s+about|search\s+(?:the\s+web\s+for|for|google\s+for)?|look\s+up|find\s+(?:out\s+about|me)?)\s+',
+            r'^(?:what\s+is|whats|who\s+is|who\s+are)\s+(?:the\s+)?',
+        ]
+        for _pat in _lead_patterns:
+            _m = _re.match(_pat, clean_q, _re.IGNORECASE)
+            if _m:
+                _sub = clean_q[_m.end():].strip().rstrip('.?!')
+                if len(_sub) >= 3:
+                    clean_q = _sub
+                break
+        search_target = clean_q if clean_q else query
+
         providers_order = ["serpapi", "tavily"] if self.search_provider == "serpapi" else ["tavily", "serpapi"]
 
         serp_keys = self._get_user_search_keys("serpapi", user_id)
@@ -186,9 +201,9 @@ class RAGRetriever:
                 continue
 
             if provider == "serpapi":
-                result = self._search_serpapi(query, keys=serp_keys)
+                result = self._search_serpapi(search_target, keys=serp_keys)
             elif provider == "tavily":
-                result = self._search_tavily(query, keys=tav_keys)
+                result = self._search_tavily(search_target, keys=tav_keys)
             else:
                 result = None
 
@@ -201,9 +216,9 @@ class RAGRetriever:
         print(f"[RAG RETRIEVER] All configured providers were in cooldown or failed. Attempting fallback.")
         fallback_prov = "tavily" if self.search_provider == "serpapi" else "serpapi"
         if fallback_prov == "tavily":
-            result = self._search_tavily(query, keys=tav_keys)
+            result = self._search_tavily(search_target, keys=tav_keys)
         else:
-            result = self._search_serpapi(query, keys=serp_keys)
+            result = self._search_serpapi(search_target, keys=serp_keys)
 
         if result and result.get("status") == "success" and not result.get("error"):
             return result

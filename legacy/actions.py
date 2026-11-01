@@ -63,7 +63,6 @@ def open_website(url, name=None, confirm=True):
     site_name = name or url
 
     try:
-        speak(f"Opening {site_name}.")
         webbrowser.get().open_new_tab(url)
 
         # Set Global Context via Canonical ContextManager
@@ -75,16 +74,11 @@ def open_website(url, name=None, confirm=True):
         except Exception as e:
             print(f"[CONTEXT ERROR] Failed to set browser context: {e}")
 
-        if confirm:
-            time.sleep(0.5)
-            speak(f"{site_name} is now open. Do you want to do something here?")
-
         return f"Opened {site_name}."
 
     except Exception as e:
         print("[Website Error]", e)
         msg = f"Sorry, I couldn't open {site_name}."
-        speak(msg)
         return msg
 
 
@@ -247,8 +241,6 @@ def close_app(app_name):
     app_name = app_name.lower().strip()
     app_name = re.sub(r'\s+', ' ', app_name)
 
-    speak(f"Closing {app_name}.")
-
     # ---- Special handling for WhatsApp (Store/Desktop) ----
     if "whatsapp" in app_name:
         terminated = False
@@ -338,7 +330,6 @@ def close_app(app_name):
         "file explorer":       ["explorer.exe"],
         "postman":             ["Postman.exe"],
         "steam":               ["steam.exe"],
-        "anydesk":             ["AnyDesk.exe"],
         "zoom":                ["Zoom.exe"],
         "cursor":              ["Cursor.exe"],
     }
@@ -394,6 +385,32 @@ def close_app(app_name):
         except Exception:
             pass
 
+    # Fallback to active browser session or window title matching (for websites / tabs / windows)
+    if not closed_any:
+        try:
+            from modules.browser.browser_controller import get_active_browser_session
+            session = get_active_browser_session()
+            if session and (app_name in (session.current_title or "").lower() or app_name in (session.current_url or "").lower()):
+                session.close()
+                closed_any = True
+        except Exception:
+            pass
+
+    if not closed_any:
+        try:
+            import pygetwindow as gw
+            all_wins = gw.getAllWindows()
+            matching_wins = [w for w in all_wins if w.title and app_name in w.title.lower()]
+            if matching_wins:
+                for w in matching_wins:
+                    try:
+                        w.close()
+                        closed_any = True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     if closed_any:
         display_name = app_name.capitalize()
         speak(f"{display_name} closed.")
@@ -410,7 +427,7 @@ def close_app(app_name):
         return f"{display_name} closed."
     else:
         display_name = app_name.capitalize()
-        msg = f"I could not find or close {display_name}."
+        msg = f"{display_name} is already closed."
         speak(msg)
         return msg
 

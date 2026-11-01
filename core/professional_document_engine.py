@@ -1996,11 +1996,29 @@ class ProfessionalDocumentEngine:
             source_docs=source_paths or []
         )
 
-        if dialogue_state and hasattr(dialogue_state, "session_context"):
-            dialogue_state.session_context["last_artifact_topic"] = topic
-            dialogue_state.session_context["last_artifact_path"] = primary_art["path"]
-            dialogue_state.session_context["last_artifact_type"] = primary_art["type"]
-            dialogue_state.session_context["last_outline"] = [s.to_dict() for s in (ppt_slides if is_presentation else doc_sections)]
+        if dialogue_state:
+            setattr(dialogue_state, "active_artifact", primary_art["path"])
+            if hasattr(dialogue_state, "session_context"):
+                dialogue_state.session_context["active_artifact"] = primary_art["path"]
+                dialogue_state.session_context["last_artifact_topic"] = topic
+                dialogue_state.session_context["last_artifact_path"] = primary_art["path"]
+                dialogue_state.session_context["last_artifact_type"] = primary_art["type"]
+                dialogue_state.session_context["last_outline"] = [s.to_dict() for s in (ppt_slides if is_presentation else doc_sections)]
+            try:
+                from extensions.dialogue_state_manager import get_dialogue_manager
+                dm = get_dialogue_manager(str(user_id))
+                fn = os.path.basename(primary_art["path"])
+                dm._last_mentioned_entity = {
+                    "value": fn,
+                    "name": fn,
+                    "path": primary_art["path"],
+                    "intent": "PROFESSIONAL_DOCUMENT_GENERATION",
+                    "entity_type": "FILE",
+                    "turn": getattr(dialogue_state, "current_turn", 1),
+                    "timestamp": datetime.now().isoformat()
+                }
+            except Exception:
+                pass
 
         # Response Construction
         art_desc = ", ".join([f"{a['type']} ({os.path.basename(a['path'])})" for a in generated_artifacts])
@@ -2015,6 +2033,8 @@ class ProfessionalDocumentEngine:
             "topic": topic,
             "theme": theme.name,
             "artifacts": generated_artifacts,
+            "filepath": primary_art["path"],
+            "path": primary_art["path"],
             "primary_artifact_path": primary_art["path"],
             "response": response_msg,
             "quality_status": "VERIFIED"

@@ -8009,10 +8009,15 @@ class UnifiedCommandRouter:
                     db_manager = DatabaseManager(SimplePoolWrapper(get_connection))
                     reminder_handler = get_handler(db_manager)
                     
-                    # Ensure scheduler is initialized
+                    # Ensure scheduler is initialized with current db_manager and user_id
                     scheduler = get_scheduler()
                     if scheduler is None:
-                        scheduler = initialize_scheduler()
+                        scheduler = initialize_scheduler(db_manager=db_manager, user_id=user_id)
+                    else:
+                        if scheduler.db_manager is None:
+                            scheduler.db_manager = db_manager
+                        if user_id is not None and scheduler.user_id != user_id:
+                            scheduler.reload_for_user(user_id)
                     
                     # Parse the reminder command
                     parse_result = reminder_handler.parse_reminder_command(user_input, user_id)
@@ -8052,7 +8057,7 @@ class UnifiedCommandRouter:
                                 try:
                                     # Also register with in-memory scheduler
                                     due_datetime = datetime.strptime(parse_result["due_at"], "%Y-%m-%d %H:%M:%S")
-                                    scheduler.add_reminder_at_time(parse_result["task_text"], due_datetime, str(reminder_id), user_id, recurrence=parse_result.get("recurrence"))
+                                    scheduler.add_reminder_at_time(parse_result["task_text"], due_datetime, str(reminder_id), user_id, recurrence=parse_result.get("recurrence"), is_db_backed=True)
                                     
                                     # Format response
                                     due_time = datetime.strptime(parse_result["due_at"], "%Y-%m-%d %H:%M:%S")
@@ -8108,13 +8113,11 @@ class UnifiedCommandRouter:
                             result["status"] = "success"
                         
                         elif action in (ReminderAction.DELETE, ReminderAction.DELETE.value) or action_val == "DELETE":
-                            # Delete the reminder
+                            # Authoritative single operation: router delegates directly to scheduler
                             reminder_id = parse_result["reminder_id"]
-                            success = db_manager.delete_reminder(user_id, reminder_id)
+                            success = scheduler.cancel_reminder(str(reminder_id), user_id=user_id)
                             
                             if success:
-                                # Also cancel from scheduler
-                                scheduler.cancel_reminder(str(reminder_id))
                                 result["status"] = "success"
                                 result["response"] = "Reminder deleted."
                             else:
@@ -8122,31 +8125,39 @@ class UnifiedCommandRouter:
                                 result["response"] = "Failed to delete reminder."
                         
                         elif action in (ReminderAction.UPDATE, ReminderAction.UPDATE.value) or action_val == "UPDATE":
-                            # Update the reminder
+                            # Authoritative single operation: router delegates directly to scheduler
                             reminder_id = parse_result["reminder_id"]
-                            success = db_manager.update_reminder(
-                                user_id,
-                                reminder_id,
-                                task_text=parse_result.get("new_task_text"),
-                                due_at=parse_result.get("new_due_at")
-                            )
+                            new_time_str = parse_result.get("new_due_at")
+                            new_text = parse_result.get("new_task_text")
+                            
+                            if new_time_str:
+                                try:
+                                    try:
+                                        new_due_dt = datetime.strptime(new_time_str, "%Y-%m-%d %H:%M:%S")
+                                    except ValueError:
+                                        new_due_dt = datetime.fromisoformat(new_time_str)
+                                    success = scheduler.reschedule_reminder(
+                                        str(reminder_id),
+                                        new_due_dt,
+                                        new_text=new_text,
+                                        user_id=user_id
+                                    )
+                                except Exception as parse_err:
+                                    self.logger.error(f"Error parsing update time {new_time_str}: {parse_err}")
+                                    success = False
+                            else:
+                                success = scheduler.edit_reminder(
+                                    str(reminder_id),
+                                    new_text=new_text,
+                                    user_id=user_id
+                                )
                             
                             if success:
-                                # Re-register with scheduler if time changed
-                                if parse_result.get("new_due_at"):
-                                    scheduler.cancel_reminder(str(reminder_id))
-                                    due_datetime = datetime.strptime(parse_result["new_due_at"], "%Y-%m-%d %H:%M:%S")
-                                    # Get updated reminder text
-                                    reminder = db_manager.get_reminder_by_id(user_id, reminder_id)
-                                    if reminder:
-                                        scheduler.add_reminder_at_time(reminder["task_text"], due_datetime, str(reminder_id), user_id)
-                                
                                 result["status"] = "success"
                                 result["response"] = "Reminder updated."
                             else:
                                 result["status"] = "error"
                                 result["response"] = "Failed to update reminder."
-                        
                         else:
                             result["status"] = "error"
                             result["response"] = "Reminder action not implemented yet."

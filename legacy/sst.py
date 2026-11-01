@@ -1228,6 +1228,17 @@ def _process_utterance(audio_item):
         if text and text.strip():
             clean_cmd = text.strip()
 
+            # Acoustic Echo Suppression: Ignore transcript matching assistant's own recent speech
+            try:
+                from legacy.tts import is_echo_of_assistant_speech
+                if is_echo_of_assistant_speech(clean_cmd):
+                    print(f"[ECHO SUPPRESSION] Dropped transcript matching assistant's own recent speech: '{clean_cmd}'")
+                    if vl:
+                        vl.reset_to_idle()
+                    return
+            except Exception as _echo_err:
+                pass
+
             # Alexa-Style Voice Interaction: Filter incidental speech during active music playback
             try:
                 from modules.music.music_controller import get_controller

@@ -222,18 +222,20 @@ class TTSCoordinator:
     # ------------------------------------------------------------------
 
     def wait_until_spoken(self, timeout: float = 30.0) -> None:
-        """Block until the coordinator queue is empty.
+        """Block until the coordinator queue is empty with timeout.
 
         Also waits for the underlying legacy TTS queue to drain.
         """
-        try:
-            self.queue.join()
-        except Exception:
-            pass
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if getattr(self.queue, "unfinished_tasks", 0) == 0 and not self.is_speaking():
+                break
+            time.sleep(0.05)
         # Also wait for the underlying legacy engine to finish
         try:
             from legacy.tts import wait_for_silence
-            wait_for_silence(timeout=timeout)
+            rem_timeout = max(0.1, deadline - time.monotonic())
+            wait_for_silence(timeout=rem_timeout)
         except Exception:
             pass
 

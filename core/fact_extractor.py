@@ -963,4 +963,138 @@ def extract_candidate_facts(text: str) -> List[ExtractedFact]:
                 source_ref=raw_text
             ))
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # T. Interview outcome response (post follow-up, outcome unknown -> known)
+    # These are answers to a "How did your interview go?" follow-up. Each outcome
+    # records a distinct consequence: an offer updates employment, a rejection
+    # closes the event, a postponement moves the date (or stays tentative if the
+    # new date is unknown), "attended" records participation without inventing a
+    # result, and "went well" records the user's own impression only. The stale
+    # 'commitment' fact is superseded so the dated commitment stops driving the
+    # milestone engine and follow-ups do not repeat once the outcome is known.
+    #
+    # Gate: an offer is recognized even without the word "interview" ("I got the
+    # offer from Google"), because a bare offer announcement must still confirm
+    # employment. Rejection / postponement / attended / not-attended only run when
+    # "interview" appears in the text, so e.g. "the flight was postponed" or "I was
+    # rejected by the university" (admissions, not a job) are never misread as an
+    # interview outcome.
+    #
+    # The offer rule requires explicit hiring context: the offer noun tied to a
+    # company or to the interview ("offer from Google", "offer for the interview"),
+    # the fixed compounds "job offer" / "offer letter", or a hiring verb. A bare
+    # "offer"/"placement" carrying an unrelated complement ("an offer on the house",
+    # "the placement drive", "a hackathon offer") is NOT a job outcome and must
+    # never mark the user employed.
+    # ──────────────────────────────────────────────────────────────────────────
+    _offer_only = re.search(
+        r'\b(?:'
+        r'job\s+offer\b'
+        r'|offer\s+letter\b'
+        r'|(?:got|received|landed|accepted|signed|bagged)\b[^.]*?'
+        r'\boffer\b\s*(?:(?:from|at|with)\b|for\s+(?:the\s+)?interview\b)'
+        r'|(?:got|was|were|been|am)\s+hired\b'
+        r')',
+        raw_text, re.IGNORECASE
+    )
+    if _offer_only or "interview" in text_lower:
+        outcome = None
+        company = None
+
+        # Postponement carries an optional new day ("to Monday", "to May 5").
+        m_postpone = re.search(
+            r'\b(?:postponed|rescheduled|moved|pushed)(?:\s+(?:the\s+)?interview)?\s+'
+            r'(?:to|until|by)\s+(?:next\s+)?([a-zA-Z0-9,\s]{1,30})',
+            raw_text, re.IGNORECASE
+        )
+        if m_postpone:
+            outcome = "postponed"
+            company = _clean_str(m_postpone.group(1))
+        else:
+            # "not attended" must be evaluated BEFORE the positive "attended"
+            # pattern, otherwise "I have not attended" matches "attended" as a
+            # substring and is misclassified as a completed interview.
+            m_not_attended = re.search(
+                r'\b(?:have|had)?\s*not\s+(?:yet\s+)?attended\b|'
+                r'\bhaven\'?t\s+(?:attended|yet\s+attended)\b|'
+                r'\bdidn\'?t\s+attend\b|\bdid\s+not\s+attend\b',
+                raw_text, re.IGNORECASE
+            )
+            if m_not_attended:
+                outcome = "not_attended"
+
+            if not outcome:
+                # Offer: require the success verb and an offer/placement noun in the
+                # same clause. Company is captured only when it immediately follows
+                # "from"/"at" (e.g. "got the offer from Google"), so trailing
+                # clauses like "for the interview" are never misread as a company.
+                if _offer_only:
+                    outcome = "offer_received"
+                    m_company = re.search(
+                        r'\b(?:from|at)\s+([A-Z][A-Za-z0-9.&–\-]{1,30})',
+                        raw_text
+                    )
+                    if m_company:
+                        company = _clean_str(m_company.group(1)).strip()
+
+            if not outcome and re.search(r'\b(?:was|were|they|i\s+am)\s+not\s+(?:selected|chosen|shortlisted)\b|\brejected\b|\bgot\s+rejected\b|\bdidn\'?t\s+(?:get\s+)?(?:selected|crack|clear)\b', raw_text, re.IGNORECASE):
+                outcome = "rejected"
+
+            if not outcome and re.search(
+                r'\b(?:i\s+)?(?:attended|completed|gave|took|finished)\s+(?:the\s+|my\s+)?interview\b|'
+                r'\binterview\s+(?:went\s+well|was\s+(?:good|great|excellent|smooth|positive))\b',
+                raw_text, re.IGNORECASE
+            ):
+                # "attended" records participation only. "went well" is the
+                # user's impression and must NOT invent an offer or result.
+                outcome = "attended"
+
+        if outcome:
+            # 1. Record the interview outcome (no expiration: the result is durable).
+            add_fact(ExtractedFact(
+                key="interview_outcome",
+                value=outcome,
+                category="commitments",
+                confidence=0.96,
+                status="confirmed",
+                source_ref=raw_text
+            ))
+
+            # 2. An offer confirms employment and supersedes the job-search goal.
+            #    A rejection or postponement must NOT imply the user got a job.
+            if outcome == "offer_received":
+                add_fact(ExtractedFact(
+                    key="employment_status",
+                    value="employed",
+                    category="employment",
+                    confidence=0.95,
+                    status="confirmed",
+                    source_ref=raw_text,
+                    supersedes_key="employment_status"  # replaces job_searching if present
+                ))
+                if company:
+                    add_fact(ExtractedFact(
+                        key="employer",
+                        value=company,
+                        category="employment",
+                        confidence=0.95,
+                        status="confirmed",
+                        source_ref=raw_text,
+                        supersedes_key="goal"
+                    ))
+
+            # 3. Close the dated commitment: a final outcome (offer/rejected/attended)
+            #    supersedes the 'commitment' fact so the milestone engine stops
+            #    generating INTERVIEW/INTERVIEW_FOLLOWUP for it. Postponement keeps
+            #    the commitment active; not-attended leaves it pending.
+            if outcome in ("offer_received", "rejected", "attended"):
+                add_fact(ExtractedFact(
+                    key="commitment",
+                    value=f"interview {outcome}",
+                    category="commitments",
+                    confidence=0.96,
+                    status="confirmed",
+                    source_ref=raw_text
+                ))
+
     return facts

@@ -7,7 +7,7 @@ root_env_path = os.path.join(project_root, '.env')
 load_dotenv(root_env_path)
 
 # Path to store local runtime settings (like remembered user)
-CONFIG_FILE = "runtime_config.json"
+CONFIG_FILE = os.path.join(project_root, "runtime_config.json")
 
 # -----------------------------
 # Load / Save runtime config

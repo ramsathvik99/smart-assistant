@@ -64,6 +64,154 @@ def open_url(url: str) -> Dict[str, Any]:
         return {"success": False, "status": "error", "message": f"Failed to open browser: {e}"}
 
 
+class ActiveBrowserSession:
+    """
+    Maintains a persistent browser session across multi-step compound commands.
+    Allows navigating, reading titles, and scrolling the same page without
+    spawning and destroying separate browsers per action.
+    """
+    def __init__(self):
+        self._pw = None
+        self._browser = None
+        self._page = None
+        self.current_url = None
+        self.current_title = None
+
+    def navigate(self, url: str, timeout_ms: int = 12000) -> Dict[str, Any]:
+        target = url.strip()
+        if not target.startswith("http://") and not target.startswith("https://"):
+            target = f"https://{target}"
+
+        # Try Playwright
+        try:
+            from playwright.sync_api import sync_playwright
+            if not self._pw:
+                self._pw = sync_playwright().start()
+            if not self._browser:
+                self._browser = self._pw.chromium.launch(
+                    headless=True,
+                    args=["--remote-debugging-port=9222"]
+                )
+            if not self._page:
+                self._page = self._browser.new_page()
+
+            self._page.goto(target, timeout=timeout_ms, wait_until="domcontentloaded")
+            self.current_url = self._page.url
+            self.current_title = self._page.title() or target
+            return {
+                "success": True,
+                "status": "success",
+                "url": self.current_url,
+                "title": self.current_title,
+                "message": f"Navigated to '{self.current_title}'."
+            }
+        except Exception as pw_err:
+            logger.info(f"[BROWSER SESSION] Playwright navigation fallback: {pw_err}")
+            # Fallback to HTTP for title extraction
+            try:
+                import urllib.request
+                req = urllib.request.Request(target, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    html = resp.read().decode('utf-8', errors='ignore')
+                    m = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
+                    self.current_title = m.group(1).strip() if m else target
+                    self.current_url = target
+                    return {
+                        "success": True,
+                        "status": "success",
+                        "url": self.current_url,
+                        "title": self.current_title,
+                        "message": f"Navigated to '{self.current_title}'."
+                    }
+            except Exception as http_err:
+                return {
+                    "success": False,
+                    "status": "error",
+                    "url": target,
+                    "message": f"Failed to navigate to {target}: {http_err}"
+                }
+
+    def get_title(self) -> Optional[str]:
+        if self._page:
+            try:
+                t = self._page.title()
+                if t:
+                    self.current_title = t
+            except Exception:
+                pass
+        return self.current_title
+
+    def scroll(self, direction: str = "down", amount: int = 500) -> Dict[str, Any]:
+        if self._page:
+            try:
+                delta = amount if direction.lower() == "down" else -amount
+                before_y = self._page.evaluate("() => window.scrollY || window.pageYOffset || 0")
+                self._page.mouse.wheel(0, delta)
+                self._page.evaluate(f"() => window.scrollBy(0, {delta})")
+                self._page.wait_for_timeout(300)
+                after_y = self._page.evaluate("() => window.scrollY || window.pageYOffset || 0")
+                return {
+                    "success": True,
+                    "status": "success",
+                    "direction": direction,
+                    "amount": amount,
+                    "scroll_y": after_y,
+                    "title": self.current_title,
+                    "message": f"Scrolled {direction}."
+                }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "status": "error",
+                    "direction": direction,
+                    "message": f"Could not scroll: {e}"
+                }
+        return {
+            "success": False,
+            "status": "error",
+            "direction": direction,
+            "message": "No active browser session to scroll."
+        }
+
+    def close(self):
+        try:
+            if self._page:
+                self._page.close()
+            if self._browser:
+                self._browser.close()
+            if self._pw:
+                self._pw.stop()
+        except Exception:
+            pass
+        finally:
+            self._page = None
+            self._browser = None
+            self._pw = None
+            self.current_url = None
+            self.current_title = None
+
+    def ensure_session(self, url: str = "https://example.com") -> bool:
+        """Ensures that the managed browser process is running with remote debugging enabled."""
+        if not self._browser or not self._page:
+            res = self.navigate(url)
+            return bool(res.get("success", False))
+        return True
+
+    def reset(self):
+        self.close()
+
+
+_active_session_instance: Optional[ActiveBrowserSession] = None
+
+
+def get_active_browser_session() -> ActiveBrowserSession:
+    global _active_session_instance
+    if _active_session_instance is None:
+        _active_session_instance = ActiveBrowserSession()
+    return _active_session_instance
+
+
+
 def extract_page_text(url: str, max_chars: int = 8000, max_length: Optional[int] = None) -> Dict[str, Any]:
     """
     Extract clean article/page text from a web page.
@@ -267,13 +415,18 @@ def get_search_results(query: str, max_results: int = 5) -> List[Dict[str, Any]]
 
 
 def go_back() -> Dict[str, Any]:
-    """Navigate back in active browser."""
+    """Navigate back in active browser.
+
+    Returns an evidence-based result: success only when the navigation
+    keystroke was actually sent; otherwise a failure the caller can surface
+    (never report success for an unverified/failed navigation).
+    """
     try:
         import pyautogui
         pyautogui.hotkey('alt', 'left')
-    except Exception:
-        pass
-    return {"success": True, "status": "success", "message": "Navigated back."}
+        return {"success": True, "status": "success", "message": "Navigated back."}
+    except Exception as e:
+        return {"success": False, "status": "error", "message": f"Could not navigate back: {e}"}
 
 
 def search_web(query: str, search_engine: str = "google", open_browser: bool = True) -> Dict[str, Any]:
@@ -405,10 +558,32 @@ def type_into_element(url: str, selector: Optional[str] = None, text: str = "", 
         return {"success": False, "status": "error", "message": f"Could not type into element: {e}"}
 
 
-def scroll_page(url: str, direction: str = "down", amount: int = 500) -> Dict[str, Any]:
+def _run_browser_action(func, *args, **kwargs):
     """
-    Scroll up or down on a web page.
+    Executes a synchronous browser automation function safely. If an asyncio event loop
+    is currently running on the calling thread, executes the function in a dedicated worker thread
+    to prevent Playwright Sync API from raising:
+    'It looks like you are using Playwright Sync API inside the asyncio loop.'
     """
+    has_loop = False
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        if loop and loop.is_running():
+            has_loop = True
+    except (RuntimeError, AttributeError):
+        has_loop = False
+
+    if has_loop:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func, *args, **kwargs)
+            return future.result(timeout=25)
+    else:
+        return func(*args, **kwargs)
+
+
+def _do_scroll_page(url: str, direction: str = "down", amount: int = 500) -> Dict[str, Any]:
     target = url.strip()
     if not target.startswith("http://") and not target.startswith("https://"):
         target = f"https://{target}"
@@ -438,10 +613,14 @@ def scroll_page(url: str, direction: str = "down", amount: int = 500) -> Dict[st
         return {"success": False, "status": "error", "message": f"Could not scroll page: {e}"}
 
 
-def press_key(url: str, key: str = "Enter") -> Dict[str, Any]:
+def scroll_page(url: str, direction: str = "down", amount: int = 500) -> Dict[str, Any]:
     """
-    Simulate pressing a keyboard key (e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown') on a page.
+    Scroll up or down on a web page.
     """
+    return _run_browser_action(_do_scroll_page, url, direction=direction, amount=amount)
+
+
+def _do_press_key(url: str, key: str = "Enter") -> Dict[str, Any]:
     target = url.strip()
     if not target.startswith("http://") and not target.startswith("https://"):
         target = f"https://{target}"
@@ -465,6 +644,13 @@ def press_key(url: str, key: str = "Enter") -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"[BROWSER] Key press error: {e}")
         return {"success": False, "status": "error", "message": f"Could not press key '{key}': {e}"}
+
+
+def press_key(url: str, key: str = "Enter") -> Dict[str, Any]:
+    """
+    Simulate pressing a keyboard key (e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown') on a page.
+    """
+    return _run_browser_action(_do_press_key, url, key=key)
 
 
 def fill_form_fields(url: str, fields: Dict[str, str]) -> Dict[str, Any]:

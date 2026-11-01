@@ -1934,11 +1934,11 @@ class MusicController:
         if not songs:
             lang_str = self.session.requested_language.capitalize() if self.session.requested_language else ""
             if lang_str:
-                self.last_status_message = f"Could not find any verified {lang_str} songs matching your request."
+                self.last_status_message = f"Could not find any verified {lang_str} songs matching your request. Try specifying an artist or genre."
             elif self.session.exact_song_requested:
-                self.last_status_message = f"Could not find verified song '{self.session.exact_song_requested}'."
+                self.last_status_message = f"Could not find verified song '{self.session.exact_song_requested}'. Try specifying the artist name, or ask me to search on YouTube."
             else:
-                self.last_status_message = f"Could not find verified songs for '{raw_command}'."
+                self.last_status_message = f"Could not find verified songs for '{raw_command}'. Try specifying the artist name, or ask me to search on YouTube."
             print(f"[MUSIC] {self.last_status_message}")
             return False
 
@@ -1956,13 +1956,14 @@ class MusicController:
         self.session.active_session = True
 
         res = self.play_current()
-        if res:
+        if res and bool(self.is_playing):
             base_msg = f"Playing '{self.get_current_track_title()}'."
             if self.session.trend_verification_limited:
                 base_msg += " (Note: trend verification is limited due to available metadata)"
             self.last_status_message = base_msg
         else:
-            self.last_status_message = "Failed to start music playback."
+            self.last_status_message = f"Failed to start playback for '{self.get_current_track_title() or raw_command}'. The audio stream could not be loaded."
+            res = False
         return res
 
     def play_video(self, raw_command: str) -> bool:
@@ -2412,6 +2413,9 @@ _default_music_controller = MusicController()
 
 def get_controller() -> MusicController:
     return _default_music_controller
+
+
+get_music_controller = get_controller
 
 
 def get_queue_status() -> Dict[str, Any]:

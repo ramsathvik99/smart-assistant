@@ -68,7 +68,7 @@ class WorkspacePage(QWidget):
 
         # Header
         head = QHBoxLayout(); head.setSpacing(Spacing.MD)
-        sh = SectionHeader("Workspace", "Recent files and on-demand document generation", accent=C.SEC_WORKSPACE)
+        sh = SectionHeader("Workspace", "Recent files and on-demand document generation", accent=C.ACC)
         head.addWidget(sh, 1); head.addStretch(1)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search files…")
@@ -93,12 +93,25 @@ class WorkspacePage(QWidget):
         hw = QWidget(); hw.setLayout(head)
         root.addWidget(hw)
 
+        # Open Stat Numerals Bar
+        stats_row = QHBoxLayout(); stats_row.setSpacing(Spacing.LG)
+        from ..ds import StatNumeral
+        self._stat_files = StatNumeral("Indexed Files", "0")
+        self._stat_gen = StatNumeral("Generated Docs", "0")
+        self._stat_types = StatNumeral("File Types", "4 Formats")
+        stats_row.addWidget(self._stat_files, 1)
+        stats_row.addWidget(self._stat_gen, 1)
+        stats_row.addWidget(self._stat_types, 1)
+        stats_row.addStretch(2)
+        stat_w = QWidget(); stat_w.setLayout(stats_row)
+        root.addWidget(stat_w)
+
         # Document Studio: Generate Documents (form) + Generated Documents (list)
         studio_row = QHBoxLayout()
         studio_row.setSpacing(Spacing.LG)
 
         # Generate Documents
-        gen_card = Card(title="Generate Documents", accent=C.SEC_WORKSPACE)
+        gen_card = Card(title="Generate Documents", accent=C.ACC)
         gen_grid = QGridLayout(); gen_grid.setHorizontalSpacing(Spacing.MD); gen_grid.setVerticalSpacing(Spacing.SM)
         gen_grid.setColumnStretch(0, 0)
         gen_grid.setColumnStretch(1, 1)
@@ -141,7 +154,7 @@ class WorkspacePage(QWidget):
         btn_row.addWidget(self._gen_status)
         self._gen_btn = QPushButton("Generate Document")
         self._gen_btn.setObjectName("PrimaryBtn")
-        self._gen_btn.setIcon(icon(ICONS.WAND_MAGIC, get_contrast_color(C.SEC_WORKSPACE), 14))
+        self._gen_btn.setIcon(icon(ICONS.WAND_MAGIC, get_contrast_color(C.ACC), 14))
         self._gen_btn.setFixedHeight(36)
         self._gen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._gen_btn.clicked.connect(self._generate)
@@ -149,11 +162,10 @@ class WorkspacePage(QWidget):
         gen_grid.addLayout(btn_row, 3, 1)
 
         gen_card.body.addLayout(gen_grid)
-        gen_card.setFixedHeight(260)
         studio_row.addWidget(gen_card, 3)
 
         # Generated files card
-        gen_list_card = Card(title="Generated Documents", accent=C.SEC_WORKSPACE)
+        gen_list_card = Card(title="Generated Documents", accent=C.ACC)
         gen_scroll = QScrollArea()
         gen_scroll.setWidgetResizable(True)
         gen_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -162,18 +174,17 @@ class WorkspacePage(QWidget):
         self._gen_list.setContentsMargins(0, 0, 0, 0)
         self._gen_empty = EmptyState(ICONS.FILE_PDF, "No generated documents yet",
                                      "Use the form on the left to generate PDFs, DOCX, XLSX or PPTX files.",
-                                     accent=C.SEC_WORKSPACE, compact=True)
+                                     accent=C.ACC, compact=True)
         self._gen_list.addWidget(self._gen_empty)
         gw = QWidget(); gw.setLayout(self._gen_list)
         gen_scroll.setWidget(gw)
         gen_list_card.body.addWidget(gen_scroll, 1)
-        gen_list_card.setFixedHeight(260)
         studio_row.addWidget(gen_list_card, 2)
 
         root.addLayout(studio_row)
 
         # Recent files table
-        files_card = Card(title="Recent Files", accent=C.SEC_WORKSPACE)
+        files_card = Card(title="Recent Files", accent=C.ACC)
         files_card.setMinimumHeight(280)
         self._files_loading = LoadingState("Indexing recent files…")
         files_card.body.addWidget(self._files_loading)
@@ -226,6 +237,10 @@ class WorkspacePage(QWidget):
                          or q in (f.get("extension") or "").lower()]
         self._files = all_files
         
+        if hasattr(self, '_stat_files'):
+            self._stat_files.set_value(len(all_files))
+            self._stat_gen.set_value(len(self._generated))
+
         if not all_files:
             self._files_table.setVisible(False)
             self._files_empty.setVisible(True)
@@ -258,13 +273,7 @@ class WorkspacePage(QWidget):
                 self._files_table.setItem(i, j, it)
 
     def _ext_color(self, ext: str) -> str:
-        return {
-            "pdf": C.STATUS_ERROR,
-            "docx": C.SEC_COMMUNICATIONS, "doc": C.SEC_COMMUNICATIONS,
-            "xlsx": C.STATUS_SUCCESS, "xls": C.STATUS_SUCCESS,
-            "pptx": C.STATUS_WARNING, "ppt": C.STATUS_WARNING,
-            "png": C.SEC_SCHEDULE, "jpg": C.SEC_SCHEDULE, "jpeg": C.SEC_SCHEDULE, "gif": C.SEC_SCHEDULE,
-        }.get((ext or "").lower(), C.TEXT_MED)
+        return C.ACC
 
     def _selected_path(self) -> Optional[str]:
         rows = list({it.row() for it in self._files_table.selectedItems()})
@@ -368,7 +377,7 @@ class WorkspacePage(QWidget):
             if not self._generated:
                 empty = EmptyState(ICONS.FILE_PDF, "No generated documents yet",
                                    "Use the form on the left to generate PDFs, DOCX, XLSX or PPTX files.",
-                                   accent=C.SEC_WORKSPACE, compact=True)
+                                   accent=C.ACC, compact=True)
                 self._gen_list.addWidget(empty)
                 return
             for p in self._generated[:15]:

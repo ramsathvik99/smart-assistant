@@ -31,9 +31,18 @@ class ReminderScheduler:
         self.db_manager = db_manager
         self.user_id = user_id
         self._lock = threading.Lock()
+        self._mem_id_counter = 1000000000
         
         # Start the background scheduler
         self.start()
+
+        if self.db_manager and self.user_id is not None:
+            _load_reminders_from_database(self, self.db_manager, self.user_id)
+
+    def _get_next_mem_id(self) -> int:
+        with self._lock:
+            self._mem_id_counter += 1
+            return self._mem_id_counter
     
     def start(self):
         """Start the background scheduler thread."""
@@ -58,7 +67,8 @@ class ReminderScheduler:
         user_id: Optional[int] = None,
         trigger_time: Optional[float] = None,
         target_time: Optional[datetime.datetime] = None,
-        recurrence: Optional[Dict] = None
+        recurrence: Optional[Dict] = None,
+        is_db_backed: Optional[bool] = None
     ) -> str:
         """
         Add a new reminder to the scheduler.
@@ -71,15 +81,11 @@ class ReminderScheduler:
             trigger_time: Optional exact POSIX timestamp for trigger
             target_time: Optional target datetime
             recurrence: Optional recurrence specification (e.g. {"frequency": "daily"})
+            is_db_backed: Explicit flag indicating whether the reminder is backed by PostgreSQL
             
         Returns:
             The reminder ID for tracking
         """
-        has_custom_id = bool(reminder_id)
-        if not reminder_id:
-            reminder_id = str(uuid.uuid4())
-        reminder_id = str(reminder_id)
-
         # Calculate exact trigger timestamp
         if trigger_time is not None:
             exact_trigger_time = float(trigger_time)
@@ -91,58 +97,130 @@ class ReminderScheduler:
                 return ""
             exact_trigger_time = time.time() + float(delay_seconds)
 
+        eff_user_id = user_id if user_id is not None else self.user_id
+        has_custom_id = bool(reminder_id)
+        newly_inserted = False
+        persisted = False
+
+        if has_custom_id:
+            reminder_id_str = str(reminder_id)
+            with self._lock:
+                existing = next((r for r in self.reminders if str(r.get("id")) == reminder_id_str), None)
+                if existing:
+                    # Ownership validation on existing reminder
+                    owner_id = existing.get("user_id")
+                    if eff_user_id is None and owner_id is not None:
+                        print(f"[REMINDER ENGINE] Unauthorized update: No authenticated user provided for reminder {reminder_id_str}")
+                        return ""
+                    if eff_user_id is not None and owner_id is not None and eff_user_id != owner_id:
+                        print(f"[REMINDER ENGINE] Unauthorized update: User {eff_user_id} cannot update reminder {reminder_id_str} owned by {owner_id}")
+                        return ""
+            
+            if is_db_backed is not None:
+                persisted = bool(is_db_backed)
+            elif existing is not None:
+                persisted = bool(existing.get("is_db_backed", False))
+            elif self.db_manager and eff_user_id is not None:
+                try:
+                    with self.db_manager._get_cursor() as cur:
+                        cur.execute("SELECT 1 FROM reminders WHERE user_id = %s AND id = %s", (eff_user_id, reminder_id_str))
+                        persisted = (cur.fetchone() is not None)
+                except Exception:
+                    persisted = False
+            else:
+                persisted = False
+            reminder_id = reminder_id_str
+        else:
+            if is_db_backed is False:
+                reminder_id = str(self._get_next_mem_id())
+                persisted = False
+            else:
+                if self.db_manager and eff_user_id is not None:
+                    try:
+                        due_datetime = target_time if target_time else datetime.datetime.fromtimestamp(exact_trigger_time)
+                        due_dt_str = due_datetime.strftime("%Y-%m-%d %H:%M:%S")
+                        db_id = self.db_manager.add_reminder(eff_user_id, text, due_dt_str)
+                        if db_id is not None:
+                            reminder_id = str(db_id)
+                            persisted = True
+                            newly_inserted = True
+                    except Exception as db_err:
+                        print(f"[REMINDER ENGINE] Database insert error during add_reminder: {db_err}")
+                
+                # Safe in-memory fallback if db_manager is unavailable or DB insert failed
+                if not reminder_id:
+                    reminder_id = str(self._get_next_mem_id())
+                    persisted = False
+            reminder_id = str(reminder_id)
+
         # Effective delay for metadata
         calculated_delay = max(0.0, exact_trigger_time - time.time())
         
-        with self._lock:
-            # 1. Stable Reminder ID: If this ID is already in the scheduler, update it
-            existing = next((r for r in self.reminders if str(r.get("id")) == reminder_id), None)
-            if existing:
-                existing["text"] = text
-                existing["trigger_time"] = exact_trigger_time
-                existing["target_time"] = target_time
-                existing["delay_seconds"] = calculated_delay
-                existing["user_id"] = user_id
-                existing["triggered"] = False
-                if recurrence:
-                    existing["recurrence"] = recurrence
-                trigger_datetime = datetime.datetime.fromtimestamp(exact_trigger_time)
-                print(f"[REMINDER ENGINE] Updated existing scheduled reminder {reminder_id}: '{text}' at {trigger_datetime.strftime('%H:%M:%S')} for user {user_id}")
-                return reminder_id
+        try:
+            with self._lock:
+                # 1. Stable Reminder ID: If this ID is already in the scheduler, update it
+                existing = next((r for r in self.reminders if str(r.get("id")) == reminder_id), None)
+                if existing:
+                    existing["text"] = text
+                    existing["trigger_time"] = exact_trigger_time
+                    existing["target_time"] = target_time
+                    existing["delay_seconds"] = calculated_delay
+                    existing["user_id"] = eff_user_id
+                    existing["triggered"] = False
+                    existing["state"] = "SCHEDULED"
+                    existing["is_db_backed"] = persisted
+                    if recurrence:
+                        existing["recurrence"] = recurrence
+                    trigger_datetime = datetime.datetime.fromtimestamp(exact_trigger_time)
+                    print(f"[REMINDER ENGINE] Updated existing scheduled reminder {reminder_id}: '{text}' at {trigger_datetime.strftime('%H:%M:%S')} for user {eff_user_id}")
+                    return reminder_id
 
-            # 2. Deduplication on un-ID'd inputs:
-            # Only perform fuzzy text/time matching if caller did NOT supply a pre-assigned stable ID
-            # (e.g. rapid double-tap from live user utterance before DB assignment).
-            # Persisted records with distinct database IDs must NEVER be merged!
-            if not has_custom_id:
-                norm_text = text.strip().lower()
-                duplicate = next(
-                    (r for r in self.reminders 
-                     if not r.get("triggered") 
-                     and r.get("user_id") == user_id 
-                     and r.get("text", "").strip().lower() == norm_text 
-                     and abs(r.get("trigger_time", 0) - exact_trigger_time) < 1.0),
-                    None
-                )
-                if duplicate:
-                    print(f"[REMINDER ENGINE] Deduplicated reminder '{text}' for user {user_id}")
-                    return duplicate["id"]
+                # 2. Deduplication on un-ID'd inputs:
+                if not has_custom_id:
+                    norm_text = text.strip().lower()
+                    duplicate = next(
+                        (r for r in self.reminders 
+                         if not r.get("triggered") 
+                         and r.get("user_id") == eff_user_id 
+                         and r.get("text", "").strip().lower() == norm_text 
+                         and abs(r.get("trigger_time", 0) - exact_trigger_time) < 1.0),
+                        None
+                    )
+                    if duplicate:
+                        # Clean up redundant DB record if duplicate matched an in-memory job with different ID
+                        if newly_inserted and str(duplicate["id"]) != str(reminder_id) and self.db_manager and eff_user_id is not None:
+                            try:
+                                self.db_manager.delete_reminder(eff_user_id, reminder_id)
+                            except Exception:
+                                pass
+                        print(f"[REMINDER ENGINE] Deduplicated reminder '{text}' for user {eff_user_id}")
+                        return str(duplicate["id"])
 
-            self.reminders.append({
-                "id": reminder_id,
-                "text": text,
-                "trigger_time": exact_trigger_time,
-                "target_time": target_time,
-                "delay_seconds": calculated_delay,
-                "triggered": False,
-                "created_at": time.time(),
-                "user_id": user_id,
-                "recurrence": recurrence
-            })
+                self.reminders.append({
+                    "id": reminder_id,
+                    "text": text,
+                    "trigger_time": exact_trigger_time,
+                    "target_time": target_time,
+                    "delay_seconds": calculated_delay,
+                    "triggered": False,
+                    "state": "SCHEDULED",
+                    "created_at": time.time(),
+                    "user_id": eff_user_id,
+                    "recurrence": recurrence,
+                    "is_db_backed": persisted
+                })
+        except Exception as reg_err:
+            print(f"[REMINDER ENGINE] Scheduler registration error: {reg_err}")
+            if newly_inserted and self.db_manager and eff_user_id is not None:
+                try:
+                    self.db_manager.delete_reminder(eff_user_id, reminder_id)
+                except Exception as rb_err:
+                    print(f"[REMINDER ENGINE] Rollback deletion error: {rb_err}")
+            return ""
         
         # Calculate human-readable time from exact timestamp
         trigger_datetime = datetime.datetime.fromtimestamp(exact_trigger_time)
-        print(f"[REMINDER ENGINE] Scheduled: '{text}' at {trigger_datetime.strftime('%H:%M:%S')} for user {user_id}")
+        print(f"[REMINDER ENGINE] Scheduled: '{text}' at {trigger_datetime.strftime('%H:%M:%S')} for user {eff_user_id}")
         
         return reminder_id
     
@@ -152,7 +230,8 @@ class ReminderScheduler:
         target_time: datetime.datetime,
         reminder_id: Optional[str] = None,
         user_id: Optional[int] = None,
-        recurrence: Optional[Dict] = None
+        recurrence: Optional[Dict] = None,
+        is_db_backed: Optional[bool] = None
     ) -> str:
         """
         Add a reminder for a specific time, preserving exact timestamp semantics.
@@ -163,13 +242,11 @@ class ReminderScheduler:
             reminder_id: Optional custom ID
             user_id: The user ID this reminder belongs to
             recurrence: Optional recurrence rule dictionary
+            is_db_backed: Explicit flag indicating whether the reminder is backed by PostgreSQL
             
         Returns:
             The reminder ID for tracking
         """
-        if not reminder_id:
-            reminder_id = str(uuid.uuid4())
-        
         now = datetime.datetime.now()
         if target_time <= now:
             # If time is in the past, schedule for tomorrow
@@ -184,27 +261,88 @@ class ReminderScheduler:
             user_id=user_id,
             trigger_time=exact_trigger_time,
             target_time=target_time,
-            recurrence=recurrence
+            recurrence=recurrence,
+            is_db_backed=is_db_backed
         )
     
-    def cancel_reminder(self, reminder_id: str) -> bool:
+    def cancel_reminder(self, reminder_id: str, user_id: Optional[int] = None) -> bool:
         """
         Cancel a pending reminder.
-        
-        Args:
-            reminder_id: The ID of the reminder to cancel
-            
-        Returns:
-            True if cancelled, False if not found
+        Validates ownership against the reminder's owner_id.
+        If database-backed, deletes from database.
+        Synchronizes in-memory scheduler state atomically via state transitions without holding global lock across DB I/O.
         """
         target_id_str = str(reminder_id)
+        eff_user_id = user_id if user_id is not None else self.user_id
+
+        # 1. Inspect memory under lock for existence, ownership validation, and atomic state transition
         with self._lock:
-            for i, reminder in enumerate(self.reminders):
-                if str(reminder.get("id")) == target_id_str and not reminder.get("triggered"):
-                    del self.reminders[i]
-                    print(f"[REMINDER ENGINE] Cancelled reminder: {target_id_str}")
-                    return True
-        return False
+            existing = next((r for r in self.reminders if str(r.get("id")) == target_id_str), None)
+            if not existing:
+                # Fallback: check if row exists directly in database if db_manager is present
+                if self.db_manager and eff_user_id is not None:
+                    try:
+                        db_deleted = self.db_manager.delete_reminder(eff_user_id, target_id_str)
+                        return bool(db_deleted)
+                    except Exception as e:
+                        print(f"[REMINDER ENGINE] Database delete error during cancel_reminder fallback: {e}")
+                        return False
+                return False
+            
+            owner_id = existing.get("user_id")
+            # Enforce ownership: Caller must be authenticated if reminder has an owner
+            if eff_user_id is None and owner_id is not None:
+                print(f"[REMINDER ENGINE] Unauthorized cancellation: No authenticated user provided for reminder {target_id_str}")
+                return False
+            # Caller cannot cancel another user's reminder
+            if eff_user_id is not None and owner_id is not None and eff_user_id != owner_id:
+                print(f"[REMINDER ENGINE] Unauthorized cancellation: User {eff_user_id} cannot cancel reminder {target_id_str} owned by User {owner_id}")
+                return False
+            
+            # Atomic state guard
+            curr_state = existing.get("state", "SCHEDULED")
+            if curr_state in ("CANCELLING", "TRIGGERING", "TRIGGERED", "RESCHEDULING", "EDITING"):
+                print(f"[REMINDER ENGINE] Cannot cancel reminder {target_id_str}: in state {curr_state}")
+                return False
+            if existing.get("triggered", False):
+                print(f"[REMINDER ENGINE] Cannot cancel reminder {target_id_str}: already triggered")
+                return False
+            
+            # Transition to CANCELLING under lock
+            existing["state"] = "CANCELLING"
+            is_db_backed = bool(existing.get("is_db_backed", False))
+            target_owner = owner_id if owner_id is not None else eff_user_id
+
+        # 2. Database cancellation outside lock (avoiding deadlocks)
+        if is_db_backed:
+            if not self.db_manager or target_owner is None:
+                print(f"[REMINDER ENGINE] Cannot delete DB-backed reminder {target_id_str}: Database unavailable")
+                with self._lock:
+                    if existing in self.reminders and existing.get("state") == "CANCELLING":
+                        existing["state"] = "SCHEDULED"
+                return False
+            try:
+                db_deleted = self.db_manager.delete_reminder(target_owner, target_id_str)
+                if not db_deleted:
+                    print(f"[REMINDER ENGINE] Database deletion failed for reminder {target_id_str}")
+                    with self._lock:
+                        if existing in self.reminders and existing.get("state") == "CANCELLING":
+                            existing["state"] = "SCHEDULED"
+                    return False
+            except Exception as e:
+                print(f"[REMINDER ENGINE] Database delete error during cancel_reminder: {e}")
+                with self._lock:
+                    if existing in self.reminders and existing.get("state") == "CANCELLING":
+                        existing["state"] = "SCHEDULED"
+                return False
+
+        # 3. Synchronize in-memory scheduler state
+        with self._lock:
+            if existing in self.reminders:
+                self.reminders.remove(existing)
+                print(f"[REMINDER ENGINE] Cancelled reminder: {target_id_str}")
+                return True
+            return False
 
     def reschedule_reminder(
         self,
@@ -215,56 +353,99 @@ class ReminderScheduler:
     ) -> bool:
         """
         Reschedule a reminder to a new target time.
-        Updates both database (if available) and the active scheduler job.
+        Updates both database (if database-backed) and the active scheduler job.
         Ensures the reminder will not fire at the old time.
         """
         target_id_str = str(reminder_id)
         eff_user_id = user_id if user_id is not None else self.user_id
 
-        # 1. Update database if db_manager is available
-        if self.db_manager and eff_user_id is not None:
+        # 1. Inspect memory under lock for existence, ownership validation, and atomic state transition
+        with self._lock:
+            existing = next((r for r in self.reminders if str(r.get("id")) == target_id_str), None)
+            if not existing:
+                # Fallback: check database if DB-backed and user_id provided
+                if self.db_manager and eff_user_id is not None:
+                    try:
+                        rem = self.db_manager.get_reminder_by_id(eff_user_id, target_id_str)
+                        if rem:
+                            new_time_str = new_target_time.strftime("%Y-%m-%d %H:%M:%S")
+                            db_updated = self.db_manager.update_reminder(eff_user_id, target_id_str, task_text=new_text, due_at=new_time_str)
+                            if db_updated:
+                                now = datetime.datetime.now()
+                                if new_target_time > now:
+                                    self.add_reminder_at_time(
+                                        new_text or rem.get("task_text", ""),
+                                        new_target_time,
+                                        reminder_id=target_id_str,
+                                        user_id=eff_user_id,
+                                        is_db_backed=True
+                                    )
+                                return True
+                    except Exception as e:
+                        print(f"[REMINDER ENGINE] DB fallback error during reschedule: {e}")
+                return False
+            
+            owner_id = existing.get("user_id")
+            if eff_user_id is None and owner_id is not None:
+                print(f"[REMINDER ENGINE] Unauthorized reschedule: No authenticated user provided for reminder {target_id_str}")
+                return False
+            if eff_user_id is not None and owner_id is not None and eff_user_id != owner_id:
+                print(f"[REMINDER ENGINE] Unauthorized reschedule: User {eff_user_id} cannot reschedule reminder {target_id_str} owned by User {owner_id}")
+                return False
+            
+            curr_state = existing.get("state", "SCHEDULED")
+            if curr_state in ("CANCELLING", "TRIGGERING", "TRIGGERED", "RESCHEDULING", "EDITING"):
+                print(f"[REMINDER ENGINE] Cannot reschedule reminder {target_id_str}: in state {curr_state}")
+                return False
+            if existing.get("triggered", False):
+                print(f"[REMINDER ENGINE] Cannot reschedule reminder {target_id_str}: already triggered")
+                return False
+            
+            existing["state"] = "RESCHEDULING"
+            is_db_backed = bool(existing.get("is_db_backed", False))
+            target_owner = owner_id if owner_id is not None else eff_user_id
+
+        # 2. Database update outside lock (avoiding deadlocks)
+        if is_db_backed:
+            if not self.db_manager or target_owner is None:
+                print(f"[REMINDER ENGINE] Cannot reschedule DB-backed reminder {target_id_str}: Database unavailable")
+                with self._lock:
+                    if existing in self.reminders and existing.get("state") == "RESCHEDULING":
+                        existing["state"] = "SCHEDULED"
+                return False
             try:
                 new_time_str = new_target_time.strftime("%Y-%m-%d %H:%M:%S")
-                self.db_manager.update_reminder(eff_user_id, reminder_id, task_text=new_text, due_at=new_time_str)
-                if hasattr(self.db_manager, "_get_cursor"):
-                    with self.db_manager._get_cursor() as cur:
-                        if cur:
-                            cur.execute("UPDATE reminders SET is_notified = FALSE WHERE id = %s", (reminder_id,))
+                db_updated = self.db_manager.update_reminder(target_owner, target_id_str, task_text=new_text, due_at=new_time_str)
+                if not db_updated:
+                    print(f"[REMINDER ENGINE] Database update returned false for reminder {target_id_str}")
+                    with self._lock:
+                        if existing in self.reminders and existing.get("state") == "RESCHEDULING":
+                            existing["state"] = "SCHEDULED"
+                    return False
             except Exception as e:
                 print(f"[REMINDER ENGINE] Database reschedule error: {e}")
+                with self._lock:
+                    if existing in self.reminders and existing.get("state") == "RESCHEDULING":
+                        existing["state"] = "SCHEDULED"
+                return False
 
-        # 2. Update active in-memory scheduler job
+        # 3. Synchronize in-memory scheduler state
         now = datetime.datetime.now()
         exact_trigger_time = new_target_time.timestamp()
         delay_seconds = max(0.0, (new_target_time - now).total_seconds())
 
         with self._lock:
-            existing = next((r for r in self.reminders if str(r.get("id")) == target_id_str), None)
-            if existing:
+            if existing in self.reminders:
                 if new_text:
                     existing["text"] = new_text
                 existing["trigger_time"] = exact_trigger_time
                 existing["target_time"] = new_target_time
                 existing["delay_seconds"] = delay_seconds
                 existing["triggered"] = False
-                if eff_user_id is not None:
-                    existing["user_id"] = eff_user_id
+                existing["state"] = "SCHEDULED"
                 print(f"[REMINDER ENGINE] Rescheduled existing reminder {target_id_str} to {new_target_time.strftime('%Y-%m-%d %H:%M:%S')}")
                 return True
-            else:
-                text_to_use = new_text or f"Reminder {target_id_str}"
-                self.reminders.append({
-                    "id": target_id_str,
-                    "text": text_to_use,
-                    "trigger_time": exact_trigger_time,
-                    "target_time": new_target_time,
-                    "delay_seconds": delay_seconds,
-                    "triggered": False,
-                    "created_at": time.time(),
-                    "user_id": eff_user_id
-                })
-                print(f"[REMINDER ENGINE] Registered rescheduled reminder {target_id_str} at {new_target_time.strftime('%Y-%m-%d %H:%M:%S')}")
-                return True
+            return False
 
     def edit_reminder(
         self,
@@ -279,25 +460,61 @@ class ReminderScheduler:
         
         target_id_str = str(reminder_id)
         eff_user_id = user_id if user_id is not None else self.user_id
-        
-        if self.db_manager and eff_user_id is not None and new_text:
-            try:
-                self.db_manager.update_reminder(eff_user_id, reminder_id, task_text=new_text)
-            except Exception as e:
-                print(f"[REMINDER ENGINE] Database edit error: {e}")
 
         with self._lock:
             existing = next((r for r in self.reminders if str(r.get("id")) == target_id_str), None)
-            if existing:
+            if not existing:
+                if self.db_manager and eff_user_id is not None and new_text:
+                    try:
+                        db_ok = self.db_manager.update_reminder(eff_user_id, target_id_str, task_text=new_text)
+                        return bool(db_ok)
+                    except Exception as e:
+                        print(f"[REMINDER ENGINE] DB fallback error during edit: {e}")
+                return False
+            
+            owner_id = existing.get("user_id")
+            if eff_user_id is None and owner_id is not None:
+                return False
+            if eff_user_id is not None and owner_id is not None and eff_user_id != owner_id:
+                return False
+            
+            curr_state = existing.get("state", "SCHEDULED")
+            if curr_state in ("CANCELLING", "TRIGGERING", "TRIGGERED", "RESCHEDULING", "EDITING"):
+                return False
+            if existing.get("triggered", False):
+                return False
+            
+            existing["state"] = "EDITING"
+            is_db_backed = bool(existing.get("is_db_backed", False))
+            target_owner = owner_id if owner_id is not None else eff_user_id
+
+        if is_db_backed and self.db_manager and target_owner is not None and new_text:
+            try:
+                db_ok = self.db_manager.update_reminder(target_owner, target_id_str, task_text=new_text)
+                if not db_ok:
+                    with self._lock:
+                        if existing in self.reminders and existing.get("state") == "EDITING":
+                            existing["state"] = "SCHEDULED"
+                    return False
+            except Exception as e:
+                print(f"[REMINDER ENGINE] Database edit error: {e}")
+                with self._lock:
+                    if existing in self.reminders and existing.get("state") == "EDITING":
+                        existing["state"] = "SCHEDULED"
+                return False
+
+        with self._lock:
+            if existing in self.reminders:
                 if new_text:
                     existing["text"] = new_text
+                existing["state"] = "SCHEDULED"
                 return True
         return False
-    
+
     def get_pending_reminders(self) -> List[Dict]:
         """Get list of pending (not triggered) reminders."""
         with self._lock:
-            return [r for r in self.reminders if not r["triggered"]]
+            return [r for r in self.reminders if not r["triggered"] and r.get("state", "SCHEDULED") == "SCHEDULED"]
     
     def get_all_reminders(self) -> List[Dict]:
         """Get list of all reminders (including triggered)."""
@@ -320,7 +537,7 @@ class ReminderScheduler:
         """Remove all completed reminders from memory."""
         with self._lock:
             before_count = len(self.reminders)
-            self.reminders = [r for r in self.reminders if not r["triggered"]]
+            self.reminders = [r for r in self.reminders if not r["triggered"] and r.get("state", "SCHEDULED") != "TRIGGERED"]
             removed = before_count - len(self.reminders)
             if removed > 0:
                 print(f"[REMINDER ENGINE] Cleared {removed} completed reminders")
@@ -337,8 +554,9 @@ class ReminderScheduler:
                 # Find reminders that need to trigger
                 with self._lock:
                     for reminder in self.reminders:
-                        if not reminder["triggered"] and now >= reminder["trigger_time"]:
+                        if not reminder.get("triggered") and reminder.get("state", "SCHEDULED") == "SCHEDULED" and now >= reminder["trigger_time"]:
                             reminders_to_trigger.append(reminder)
+                            reminder["state"] = "TRIGGERING"
                             reminder["triggered"] = True
                 
                 # Trigger reminders outside of lock to avoid blocking
@@ -365,6 +583,7 @@ class ReminderScheduler:
                 return
             reminder["_in_trigger"] = True
             reminder["triggered"] = True
+            reminder["state"] = "TRIGGERING" 
 
         try:
             reminder_text = reminder["text"]
@@ -421,6 +640,14 @@ class ReminderScheduler:
                     next_time = base_time + datetime.timedelta(days=1)
                 elif freq == "weekly":
                     next_time = base_time + datetime.timedelta(weeks=1)
+                elif freq in ("yearly", "annually"):
+                    # Birthday / anniversary. Preserve month+day across leap years
+                    # (Feb 29 -> Mar 1 in non-leap years), then advance the year.
+                    try:
+                        next_time = base_time.replace(year=base_time.year + 1)
+                    except ValueError:
+                        # base_time is Feb 29 and next year is not a leap year
+                        next_time = base_time.replace(year=base_time.year + 1, month=3, day=1)
                 elif freq == "monthly":
                     y = base_time.year + (base_time.month // 12)
                     m = (base_time.month % 12) + 1
@@ -430,7 +657,7 @@ class ReminderScheduler:
                     next_time = base_time + datetime.timedelta(days=1)
 
                 # Reschedule recurring reminder in database and memory
-                if self.db_manager:
+                if self.db_manager and reminder.get("is_db_backed", True):
                     try:
                         u_id = reminder.get("user_id", self.user_id)
                         next_str = next_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -446,6 +673,7 @@ class ReminderScheduler:
                     reminder["trigger_time"] = next_time.timestamp()
                     reminder["target_time"] = next_time
                     reminder["triggered"] = False
+                    reminder["state"] = "SCHEDULED"
                     reminder["delay_seconds"] = max(0.0, (next_time - datetime.datetime.now()).total_seconds())
                 print(f"[REMINDER ENGINE] Rescheduled recurring reminder {reminder_id}: '{reminder_text}' for {next_time.strftime('%Y-%m-%d %H:%M:%S')}")
                 
@@ -454,6 +682,8 @@ class ReminderScheduler:
         finally:
             with self._lock:
                 reminder["_in_trigger"] = False
+                if reminder.get("state") == "TRIGGERING":
+                    reminder["state"] = "TRIGGERED" 
     
     def _cleanup_old_reminders(self):
         """Remove old completed reminders to prevent memory leaks."""
@@ -608,7 +838,8 @@ def _load_reminders_from_database(scheduler: ReminderScheduler, db_manager, user
                         user_id=reminder_user_id,
                         trigger_time=exact_trigger_time,
                         target_time=due_at,
-                        recurrence=rec
+                        recurrence=rec,
+                        is_db_backed=True
                     )
                     scheduled_count += 1
             else:

@@ -1,20 +1,34 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Smart Assistant Desktop Client (.exe) Production Spec
 
+import os
+
 block_cipher = None
+
+datas = [
+    ('dashboard/static', 'dashboard/static'),
+    ('modules/reverse_engineering/rea_runtime', 'modules/reverse_engineering/rea_runtime'),
+    ('modules/reverse_engineering/bin/PROVENANCE.md', 'modules/reverse_engineering/bin'),
+]
+if os.path.exists('skills/device_management/resources'):
+    datas.append(('skills/device_management/resources', 'skills/device_management/resources'))
+if os.path.exists('legacy/icon.ico'):
+    datas.append(('legacy/icon.ico', 'legacy'))
 
 a = Analysis(
     ['assistant.py'],
     pathex=['.'],
-    binaries=[],
-    datas=[
-        ('dashboard/static', 'dashboard/static'),
-        ('legacy/icon.ico', 'legacy'),
+    binaries=[
+        ('modules/reverse_engineering/bin/node.exe', 'modules/reverse_engineering/bin'),
     ],
+    datas=datas,
     hiddenimports=[
         'core.api_client',
         'core.credential_manager',
         'instance.config',
+        'modules.reverse_engineering',
+        'modules.reverse_engineering.rea_service',
+        'modules.reverse_engineering.mcp_client',
         'modules.ui.pyqt_app',
         'modules.ui.login_window',
         'modules.ui.floating_launcher',
@@ -26,6 +40,13 @@ a = Analysis(
         'modules.ui.visual_response_surface',
         'modules.ui.notification_toast',
         'modules.ui.worker_threads',
+        'skills.device_management',
+        'skills.device_management.adb_adapter',
+        'skills.device_management.platform_adapter',
+        'skills.device_management.device_controller',
+        'skills.device_management.device_registry',
+        'skills.device_management.device_pairing',
+        'skills.device_management.device_dispatcher',
         'PyQt6',
         'PyQt6.QtCore',
         'PyQt6.QtGui',
@@ -62,8 +83,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
+    upx=False,
+    upx_exclude=['node.exe'],
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
@@ -71,5 +92,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='legacy/icon.ico',
+    icon='legacy/icon.ico' if os.path.exists('legacy/icon.ico') else None,
 )

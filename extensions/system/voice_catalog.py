@@ -45,6 +45,29 @@ def get_voice_catalog() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.warning("[VOICE CATALOG] Could not load neural voices: %s", e)
 
+    # 1b. VoiceStudio Studio Voices
+    try:
+        from modules.voice_studio.voice_studio_bridge import VoiceStudioTTSBackend
+        vs_backend = VoiceStudioTTSBackend()
+        raw_vs = vs_backend.get_voices()
+        for v in raw_vs:
+            vid = getattr(v, "id", "")
+            if not vid or vid in seen_ids:
+                continue
+            seen_ids.add(vid)
+            name = getattr(v, "name", vid)
+            catalog.append({
+                "id": vid,
+                "name": name,
+                "gender": getattr(v, "gender", "female"),
+                "language": getattr(v, "language", "en-US"),
+                "provider": "voicestudio",
+                "category": "VoiceStudio Studio",
+                "label": f"{name} — {getattr(v, 'gender', 'female').title()} ({getattr(v, 'language', 'en-US')}, Studio)",
+            })
+    except Exception as e:
+        logger.debug("[VOICE CATALOG] Could not load VoiceStudio voices: %s", e)
+
     # 2. SAPI / OneCore Voices (Basic Windows voices)
     try:
         from legacy.tts import enumerate_voices

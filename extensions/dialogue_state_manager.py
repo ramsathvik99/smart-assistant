@@ -127,6 +127,8 @@ class DialogueState:
     recent_successful_actions: List[Dict[str, Any]] = field(default_factory=list)
     recent_failed_actions: List[Dict[str, Any]] = field(default_factory=list)
     previous_contexts: List[Dict[str, Any]] = field(default_factory=list)
+    current_topic: Optional[str] = None
+    previous_topic: Optional[str] = None
     
     # Accumulated context
     entities: Dict[str, Any] = field(default_factory=dict)
@@ -399,7 +401,15 @@ class DialogueStateManager:
             else:
                 resolved_input, reference_was_resolved = self._resolve_references(user_input)
         else:
-            resolved_input, reference_was_resolved = self._resolve_references(user_input)
+            active_offer = self.current_state.session_context.get("active_offer")
+            if active_offer and re.match(r'^(?:yes|yeah|yep|sure|ok|okay|affirmative|certainly|of\s+course|go\s+ahead|please\s+do)\b', lower_input):
+                self.current_state.session_context["pending_commitment"] = dict(active_offer)
+                self.current_state.session_context.pop("active_offer", None)
+                resolved_input = "affirm_offer"
+                reference_was_resolved = True
+                print(f"[OFFER_COMMITMENT] Promoted offer '{active_offer.get('offer_type')}' to pending commitment.")
+            else:
+                resolved_input, reference_was_resolved = self._resolve_references(user_input)
 
         # ------------------------------------------------------------------
         # Steps 1–4 unchanged — operate on the resolved input
@@ -455,6 +465,25 @@ class DialogueStateManager:
         if reference_was_resolved:
             turn.carried_forward_context["reference_resolved"] = resolved_input
 
+        # Topic tracking and topic transition management (Requirement 8)
+        m_return = re.search(r'\b(?:back\s+to|returning\s+to|return\s+to|as\s+for|regarding)\s+([A-Za-z0-9_\-\s]+?)(?:[,\.\?!]|\s+explain|\s+what|\s+how|$)', user_input, re.IGNORECASE)
+        if m_return:
+            ret_topic = m_return.group(1).strip()
+            ret_topic = re.sub(r'^(?:the|an?)\s+', '', ret_topic, flags=re.IGNORECASE).strip()
+            if self.current_state.previous_topic and (self.current_state.previous_topic.lower() in ret_topic.lower() or ret_topic.lower() in self.current_state.previous_topic.lower()):
+                old_curr = self.current_state.current_topic
+                self.current_state.current_topic = self.current_state.previous_topic
+                self.current_state.previous_topic = old_curr
+            else:
+                self.current_state.previous_topic = self.current_state.current_topic
+                self.current_state.current_topic = ret_topic
+        elif not reference_was_resolved:
+            new_top = self._extract_topic_from_text(user_input)
+            if new_top:
+                if self.current_state.current_topic and self.current_state.current_topic.lower() != new_top.lower():
+                    self.current_state.previous_topic = self.current_state.current_topic
+                self.current_state.current_topic = new_top
+
         self.current_state.turns.append(turn)
         self.current_state.last_activity = datetime.now().isoformat()
 
@@ -470,6 +499,57 @@ class DialogueStateManager:
             "session_id": self.current_state.session_id,
         }
     
+    def _extract_topic_from_text(self, text: str) -> Optional[str]:
+        """Extract substantive topic or subject from conversational utterance."""
+        if not text or not text.strip():
+            return None
+        clean = re.sub(
+            r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|nova|trevon|jarvis|assistant|computer)[,\s:]*',
+            '',
+            text,
+            flags=re.IGNORECASE
+        ).strip()
+
+        # 1. Weather queries: "watch the weather in Tokyo", "what is the weather in Paris", "weather in London"
+        m_weather = re.search(
+            r'\b(?:watch|check|get|see|show|what(?:\x27s|\s+is)|how(?:\x27s|\s+is))\s+(?:the\s+)?weather(?:\s+in\s+([A-Za-z0-9_\-\s]+))?',
+            clean,
+            re.IGNORECASE
+        )
+        if m_weather:
+            loc = m_weather.group(1).strip() if (m_weather.lastindex and m_weather.group(1)) else None
+            loc = re.sub(r'[\.\?!]+$', '', loc).strip() if loc else None
+            return f"weather in {loc}" if loc else "weather"
+        elif re.search(r'\bweather\s+in\s+([A-Za-z0-9_\-\s]+)', clean, re.IGNORECASE):
+            m_win = re.search(r'\bweather\s+in\s+([A-Za-z0-9_\-\s]+)', clean, re.IGNORECASE)
+            loc = m_win.group(1).strip().rstrip('.?!')
+            return f"weather in {loc}"
+
+        # 2. Conceptual follow-ups: "how about memory", "what about CPU", "what is the use of CPU"
+        m_about = re.search(
+            r'^(?:how\s+about|what\s+about|what\s+is\s+the\s+use\s+of)\s+([A-Za-z0-9_\-\s]+?)[\.\?!]?$',
+            clean,
+            re.IGNORECASE
+        )
+        if m_about:
+            cand = m_about.group(1).strip()
+            cand = re.sub(r'^(?:an?|the)\s+', '', cand, flags=re.IGNORECASE).strip()
+            if cand and cand.lower() not in ("it", "that", "this", "something", "anything", "them"):
+                return cand
+
+        # 3. Explanations: "explain how a GPU works", "explain GPU memory", "tell me about quantum computing"
+        m = re.search(
+            r'^(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain\s+(?:how\s+(?:an?|the)\s+)?|tell\s+me\s+about\s+(?:an?|the|my)?\s*|what\s+is\s+(?:an?|the|my)?\s*|how\s+does\s+(?:an?|the)?\s*)([A-Za-z0-9_\-\s]+?)(?:\s+works?|\s+work)?[\.\?!]?$',
+            clean,
+            re.IGNORECASE
+        )
+        if m:
+            cand = m.group(1).strip()
+            cand = re.sub(r'^(?:an?|the)\s+', '', cand, flags=re.IGNORECASE).strip()
+            if cand and cand.lower() not in ("it", "that", "this", "something", "anything", "them"):
+                return cand
+        return None
+
     def resolve_references(self, user_input: str) -> Dict[str, Any]:
         """Public interface for reference resolution."""
         resolved, was_resolved = self._resolve_references(user_input)
@@ -507,6 +587,28 @@ class DialogueStateManager:
         )
         if is_list_nav_command:
             return user_input, False
+
+        # ---- Conversational Commitment / Offer Resolution ----
+        # When an offer was confirmed (e.g. user said "Sure" to capability offer)
+        # and user now asks "Show me the info", "Show the information", "Show it", etc.
+        pending_commit = self.current_state.session_context.get("pending_commitment")
+        if pending_commit:
+            is_show_commit = bool(re.search(
+                r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:show|display|give)\s+(?:me\s+)?(?:the\s+)?(?:info|information|details|list|full\s+list|everything|it|that)|show\s+me\s+the\s+info|show\s+the\s+info)[.!?]?$',
+                lower
+            ))
+            if is_show_commit:
+                commit_type = pending_commit.get("offer_type")
+                if commit_type == "capabilities_list":
+                    self.current_state.session_context.pop("pending_commitment", None)
+                    resolved = "show me the full list of capabilities"
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (fulfilled commitment for {commit_type})")
+                    return resolved, True
+                elif commit_type == "general_offer" and pending_commit.get("action"):
+                    self.current_state.session_context.pop("pending_commitment", None)
+                    resolved = pending_commit["action"]
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (fulfilled general commitment)")
+                    return resolved, True
 
         # ---- Destructive schedule-management scope clarification ----
         # "Remove all the schedules" is ambiguous about WHICH schedule store is
@@ -546,13 +648,16 @@ class DialogueStateManager:
         # Guard: If user is asking to read aloud or transfer/insert content/artifacts,
         # "them" / "those" refers to content/artifacts (WHAT), NOT applications (WHERE)!
         is_content_or_reading_op = bool(
-            re.search(r'\b(?:read|recite|speak|listen)\b', lower) or
+            re.search(r'\b(?:read|recite|speak|listen|explain|clarify|summarize|simplify|break\s+down)\b', lower) or
             re.search(r'\b(?:write|insert|paste|type|put)\s+(?:them|those|all\s+of\s+them|it|this|that|these)\b', lower)
+        )
+        is_spatial_discovery = bool(
+            re.search(r'\b(?:find|search|nearby|places|restaurants|hospitals|pharmacies|cafes|stores)\b', lower) and "map" in lower
         )
         plural_patterns = [
             r"\b(?:both(?:\s+of\s+them)?|both\s+apps|both\s+applications|those\s+two|these\s+two|the\s+two(?:\s+apps|\s+applications)?|all\s+of\s+them|all\s+open\s+(?:apps|applications|files|documents)|them)\b",
         ]
-        plural_match = (not is_content_or_reading_op) and any(re.search(pat, lower) for pat in plural_patterns)
+        plural_match = (not is_content_or_reading_op) and (not is_spatial_discovery) and any(re.search(pat, lower) for pat in plural_patterns)
         if plural_match:
             # Check for an action verb in the command (e.g. "close both", "open both of them")
             m_act = re.match(r'^(?:please\s+|can\s+you\s+)?(close|quit|exit|terminate|kill|shut|open|launch|start|run|delete|remove)\b', clean_text, re.IGNORECASE)
@@ -697,12 +802,29 @@ class DialogueStateManager:
                 print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (intra-utterance self-correction)")
                 return resolved, True
 
-        # ── 0. Interruption / Goal Cancellation ("Stop", "Cancel that", "Abort") ──
-        if re.match(r'^(?:stop|cancel(?:\s+that|\s+it)?|abort|halt|no,?\s+don\'t\s+do\s+that|don\'t\s+do\s+that)[.!]?$', lower):
-            if self.current_state.goal_status in ("RUNNING", "PENDING", "WAITING_FOR_USER") or self.current_state.current_goal:
-                resolved = "cancel current goal"
-                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (interrupting active goal)")
-                return resolved, True
+        # ── 0. Discourse Pivot & Interruption / Cancellation ──
+        # Handles "Actually, forget that. Help me fix this error instead" or "Nevermind, open calculator"
+        m_pivot = re.match(
+            r'^(?:actually,?\s*)?(?:forget\s+(?:that|it|about\s+that)|never\s*mind|nevermind|scratch\s+that|cancel\s+(?:that|it|the\s+request)?|abort|stop(?:\s+that|\s+it)?|don\'t\s+do\s+that|leave\s+(?:that|it))[.,;! ]*(.*)',
+            lower
+        )
+        if m_pivot:
+            remainder = m_pivot.group(1).strip()
+            # Cancel active/waiting goal immediately
+            if self.current_state.goal_status in ("RUNNING", "PENDING", "WAITING_FOR_USER") or self.current_state.current_goal or self.current_state.pending_goal_continuation:
+                self.current_state.goal_status = "IDLE"
+                self.current_state.pending_goal_continuation = None
+                self.current_state.pending_action = None
+                self.current_state.pending_confirmation = False
+                self.current_state.session_context.pop("active_goal", None)
+                print(f"[REFERENCE_RESOLUTION] Cancelled goal on discourse pivot: '{user_input}'")
+            is_pure_cancel = not remainder or bool(re.match(r'^(?:cancel(?:\s+(?:that|it|the\s+request))?|forget\s+(?:that|it)|stop(?:\s+(?:that|it))?|never\s*mind|nevermind|please|now|[.!? ])+$', remainder, re.IGNORECASE))
+            if not is_pure_cancel:
+                clean_remainder = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+|just\s+)+', '', remainder).strip()
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{clean_remainder}' (discourse pivot with new command)")
+                return clean_remainder, True
+            else:
+                return "cancel current goal", True
 
         # ── 0b. Task Cancellation / Stop ("cancel it", "stop it", "cancel that", "abort it") ──
         if re.match(r'^(?:cancel|stop|abort)\s+(?:it|that|the\s+task|this\s+task)[.!?]?$', lower):
@@ -884,7 +1006,7 @@ class DialogueStateManager:
                 resolved = f"is {app} running"
                 return resolved, True
 
-        # ── 3. Comparative follow-ups ("What about Hyderabad?", "What about Java?") ──
+        # ── 3. Comparative follow-ups ("What about Hyderabad?", "What about Java?", "What about its memory?") ──
         m_about = re.match(r'^(?:what|how)\s+about\s+([A-Za-z0-9_\-\s.]+?)[?.!]?$', stripped, re.IGNORECASE)
         if m_about:
             candidate = m_about.group(1).strip()
@@ -900,6 +1022,31 @@ class DialogueStateManager:
             if (self.current_state.current_turn - last_turn) <= 2:
                 cand_low = candidate.lower()
                 last_turn_text = (self.current_state.turns[-1].user_input.lower() + " " + self.current_state.turns[-1].assistant_response.lower()) if self.current_state.turns else ""
+
+                # 3a. Possessive reference resolution ("What about its memory?", "What about their architecture?")
+                if cand_low.startswith("its ") or cand_low.startswith("their "):
+                    prop = candidate[4:].strip() if cand_low.startswith("its ") else candidate[6:].strip()
+                    top = self.current_state.current_topic or self._extract_topic_from_text(self.current_state.turns[-1].user_input)
+                    if top:
+                        resolved = f"what about {top} {prop}"
+                        print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (possessive pronoun '{top}' for '{prop}')")
+                        return resolved, True
+
+                # 3b. Alternative selection ("What about the other one?", "What about the previous option?")
+                if cand_low in ("the other one", "the other option", "the previous option", "the other app", "the other file"):
+                    if len(self.current_state.active_applications) >= 2:
+                        curr = (self.current_state.active_application or "").lower()
+                        others = [a for a in self.current_state.active_applications if a.lower() != curr]
+                        if others:
+                            resolved = f"what about {others[0]}"
+                            print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (other active application: '{others[0]}')")
+                            return resolved, True
+                    if self.current_state.last_search_results and len(self.current_state.last_search_results) > 1:
+                        other_item = self.current_state.last_search_results[1]
+                        resolved = f"tell me about {other_item}"
+                        print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (other search result: '{other_item}')")
+                        return resolved, True
+
                 is_edu_ctx = any(k in last_turn_text for k in ("study", "studies", "studied", "university", "college", "intermediate", "school", "education", "10th", "degree", "srm"))
                 is_edu_cand = any(k in cand_low for k in ("10th", "tenth", "intermediate", "inter", "school", "college", "degree", "major", "graduation"))
                 if is_edu_cand or (is_edu_ctx and last_intent in ("MEMORY_QUERY", "GENERAL_CONVERSATION")):
@@ -937,6 +1084,128 @@ class DialogueStateManager:
                     print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (web search follow-up for: '{candidate}')")
                     return resolved, True
 
+        # ── 3a0. Explicit topic return with follow-up ("Back to the GPU, explain that again") ──
+        m_back_followup = re.search(
+            r'^(?:(?:back\s+to|returning\s+to|return\s+to|as\s+for|regarding)\s+([A-Za-z0-9_\-\s]+?)[,\s]+)(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain|describe|tell\s+me\s+about)\s+(?:that|it|this)(?:\s+(?:further|in\s+detail|again))?[.!?]?$',
+            lower
+        )
+        if m_back_followup:
+            target_topic = m_back_followup.group(1).strip()
+            target_topic = re.sub(r'^(?:the|an?)\s+', '', target_topic, flags=re.IGNORECASE).strip()
+            self.current_state.previous_topic = self.current_state.current_topic
+            self.current_state.current_topic = target_topic
+            resolved = f"explain {target_topic} in more detail"
+            print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (explicit topic return follow-up)")
+            return resolved, True
+
+        # ── 3a1. Conversational & Explanatory Follow-ups ("Why?", "How does that work?", "Can you explain that?", "What happens next?", "Can you change it?") ──
+        if self.current_state.turns:
+            last_turn_idx = self.current_state.turns[-1].turn_number
+            if (self.current_state.current_turn - last_turn_idx) <= 3:
+                prev_turn = self.current_state.turns[-1]
+                prev_input = prev_turn.user_input
+                active_topic = self._extract_topic_from_text(prev_input) or self.current_state.current_topic
+
+                # Case: "Why?" / "Why so?" / "Why is that?" / "Why did you do that?"
+                if re.match(r'^(?:why\??|why\s+so\??|why\s+is\s+that\??|why\s+did\s+you\s+do\s+(?:that|it)\??|why\s+did\s+you\??)[.!?]?$', lower):
+                    last_act = self.current_state.last_action or {}
+                    if last_act and last_act.get("intent") in ("OPEN_APPLICATION", "CLOSE_APPLICATION", "FILE_OPERATIONS", "DEVICE_CONTROL"):
+                        tgt = last_act.get("target") or self.current_state.active_application or "that"
+                        verb = "open" if last_act.get("intent") == "OPEN_APPLICATION" else "do"
+                        resolved = f"why did you {verb} {tgt}"
+                        print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (action explanation follow-up)")
+                        return resolved, True
+                    elif active_topic:
+                        resolved = f"why does {active_topic} work that way"
+                        print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (topic explanation follow-up)")
+                        return resolved, True
+
+                # Case: "How does that work?" / "How does it work?" / "How so?"
+                if re.match(r'^(?:how\s+does\s+(?:that|it|this)\s+work\??|how\s+so\??|how\s+does\s+it\??)[.!?]?$', lower):
+                    if active_topic:
+                        resolved = f"how does {active_topic} work"
+                        print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (how it works follow-up)")
+                        return resolved, True
+
+                prev_resp = prev_turn.assistant_response or getattr(self.current_state, "current_response", "")
+
+                # Case: "Can you explain that in simpler words?" / "Can you explain that in simpler terms?" / "In simpler words"
+                m_simpler = re.match(
+                    r'^(?:(?:so|then|okay|ok)[,\s]+)?(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain\s+(?:that|it|this)\s+)?in\s+simpler\s+(?:words|terms|language)[.!?]?$',
+                    lower
+                ) or re.match(r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:simplify|make\s+(?:it|that|this)\s+simpler))[.!?]?$', lower)
+                if m_simpler:
+                    if active_topic:
+                        resolved = f"explain {active_topic} in simpler words using everyday analogies"
+                    elif prev_resp:
+                        resolved = f"explain that in simpler words: {prev_resp[:200]}"
+                    else:
+                        resolved = "explain that in simpler words"
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (simplify explanation follow-up)")
+                    return resolved, True
+
+                # Case: "Can you give me an example?" / "Give me an example" / "Can you give an example?"
+                m_example = re.match(
+                    r'^(?:(?:so|then|okay|ok)[,\s]+)?(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:give|show|provide)\s+(?:me\s+)?(?:an?\s+)?example(?:\s+of\s+(?:that|it|this))?[.!?]?$',
+                    lower
+                ) or lower in ("example please", "give an example", "an example", "example")
+                if m_example:
+                    if active_topic:
+                        resolved = f"give a concrete real-world example of {active_topic}"
+                    elif prev_resp:
+                        resolved = f"give an example of that: {prev_resp[:200]}"
+                    else:
+                        resolved = "give an example of that"
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (example follow-up)")
+                    return resolved, True
+
+                # Case: "Can you explain that in more detail?" / "Explain that in more detail" / "Can you elaborate?" / "Go into more detail"
+                m_detail = re.match(
+                    r'^(?:(?:so|then|okay|ok)[,\s]+)?(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain\s+(?:that|it|this)\s+in\s+more\s+detail|elaborate(?:\s+on\s+(?:that|it|this))?|go\s+into\s+more\s+detail(?:\s+on\s+(?:that|it|this))?|in\s+more\s+detail)[.!?]?$',
+                    lower
+                )
+                if m_detail:
+                    if active_topic:
+                        resolved = f"explain {active_topic} in more detail"
+                    elif prev_resp:
+                        resolved = f"explain that in more detail: {prev_resp[:200]}"
+                    else:
+                        resolved = "explain that in more detail"
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (detail elaboration follow-up)")
+                    return resolved, True
+
+                # Case: "Can you explain that?" / "Can you explain that further?" / "Explain that further" / "Can you explain it?" / "So explain that again"
+                if re.match(r'^(?:(?:so|then|okay|ok)[,\s]+)?(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain|describe)\s+(?:that|it|this)(?:\s+(?:further|in\s+detail|again))?[.!?]?$', lower):
+                    if active_topic:
+                        if "weather" in active_topic.lower() and prev_resp:
+                            resolved = f"explain that weather report in simpler words: {prev_resp}"
+                        elif "weather" in active_topic.lower():
+                            resolved = f"what is the {active_topic}"
+                        elif "again" in lower:
+                            resolved = f"explain {active_topic} again in simple terms with an analogy"
+                        else:
+                            resolved = f"explain {active_topic} in more detail"
+                        print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (explanation elaboration follow-up)")
+                        return resolved, True
+                    elif prev_resp:
+                        resolved = f"explain that again in simpler words: {prev_resp[:200]}"
+                        print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (explanation repetition follow-up)")
+                        return resolved, True
+
+                # Case: "What happens next?" / "What is next?" / "And then?"
+                if re.match(r'^(?:what\s+(?:happens|is)\s+next\??|what\s+next\??|and\s+then\??|then\s+what\??)[.!?]?$', lower):
+                    if active_topic:
+                        resolved = f"what happens next with {active_topic}"
+                        print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (subsequent step follow-up)")
+                        return resolved, True
+
+                # Case: "Can you change it?" / "Can you change that?"
+                if re.match(r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?change\s+(?:it|that|this)\??)[.!?]?$', lower):
+                    tgt = (self.current_state.last_action or {}).get("target") or (self._last_mentioned_entity or {}).get("value") or self.current_state.active_application or "it"
+                    resolved = f"change {tgt}"
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (change entity follow-up)")
+                    return resolved, True
+
         # ── 3a2. Follow-ups to content acquisition, research, or pending/unresolved topic ──
         # Handles: "tell me about it", "tell me about that", "tell me more about it", "what about it", "explain it"
         m_topic_followup = re.match(
@@ -944,11 +1213,16 @@ class DialogueStateManager:
             lower
         )
         if m_topic_followup:
+            prev_top = None
+            if self.current_state.turns:
+                prev_top = self._extract_topic_from_text(self.current_state.turns[-1].user_input)
             topic_target = (
-                self.current_state.session_context.get("pending_unresolved_topic") or
+                prev_top or
+                self.current_state.current_topic or
                 self.current_state.session_context.get("last_content_topic") or
                 self.current_state.session_context.get("last_artifact_topic") or
                 (self.current_state.active_artifact or {}).get("topic") or
+                self.current_state.session_context.get("pending_unresolved_topic") or
                 self.current_state.session_context.get("last_failed_topic")
             )
             if topic_target:
@@ -1066,13 +1340,79 @@ class DialogueStateManager:
                 print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (verification of prior turn)")
                 return resolved, True
 
-        # Conversational simplification ("Explain that challenge in simpler terms", "explain it more simply")
-        m_simpler = re.match(r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain|describe)\s+(?:that|it|this|the\s+challenge|that\s+challenge)(?:\s+in\s+simpler\s+terms|\s+more\s+simply|\s+simply)?)[.!?]?$', lower)
+        # Conversational why inquiry ("Why?", "Why is that?", "Why so?")
+        if re.match(r'^(?:why\??|why\s+is\s+that\??|why\s+so\??|why\s+did\s+that\s+happen\??)$', lower):
+            if self.current_state.turns:
+                last_turn_q = self.current_state.turns[-1].user_input
+                resolved = f"why does that happen regarding: {last_turn_q}"
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (standalone why question)")
+                return resolved, True
+
+        # Conversational simplification ("Explain that challenge in simpler terms", "explain it more simply", "in one sentence")
+        m_simpler = re.match(r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain|describe|tell\s+me\s+about)\s+(?:that|it|this|them|the\s+challenge|that\s+challenge)(?:\s+(?:in\s+(?:simple|simpler)\s+terms|in\s+simple\s+words|in\s+one\s+sentence|more\s+simply|simply|briefly))?)[.!?]?$', lower)
         if m_simpler and self.current_state.turns:
             prev_input = self.current_state.turns[-1].user_input
-            resolved = f"explain that in simpler terms: {prev_input}"
+            m_how = re.search(r'in\s+(?:simple|simpler)\s+terms|in\s+simple\s+words|in\s+one\s+sentence|more\s+simply|simply|briefly', lower)
+            phrase = m_how.group(0) if m_how else "in simpler terms"
+            resolved = f"explain {prev_input} {phrase}"
             print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (conversational simplification follow-up)")
             return resolved, True
+
+        # ── 3c. Definite Noun Categorical Reference Resolution ("the car" -> Tesla Roadster) ──
+        m_def_noun = re.search(r'\b(?:the|this|that)\s+(car|vehicle|automobile|phone|mobile|device|laptop|computer|movie|film|song|track|company)\b', clean_text, re.IGNORECASE)
+        if m_def_noun and self.current_state.turns:
+            noun_cat = m_def_noun.group(1).lower()
+            matched_entity = None
+            cat_keywords = {
+                "car": ["car", "vehicle", "tesla", "roadster", "ferrari", "porsche", "automobile", "bmw", "mercedes", "audi", "sedan", "suv", "ev"],
+                "vehicle": ["car", "vehicle", "tesla", "roadster", "ferrari", "porsche", "automobile", "bmw", "mercedes", "audi", "sedan", "suv", "ev"],
+                "automobile": ["car", "vehicle", "tesla", "roadster", "ferrari", "porsche", "automobile"],
+                "phone": ["phone", "mobile", "smartphone", "iphone", "pixel", "galaxy", "redmi", "android"],
+                "mobile": ["phone", "mobile", "smartphone", "iphone", "pixel", "galaxy", "redmi", "android"],
+                "device": ["phone", "mobile", "device", "laptop", "pc", "computer", "redmi", "android"],
+                "laptop": ["laptop", "thinkpad", "macbook", "notebook", "computer"],
+                "computer": ["computer", "pc", "laptop", "workstation", "desktop"],
+                "movie": ["movie", "film", "cinema", "watch", "stream"],
+                "film": ["movie", "film", "cinema", "watch", "stream"],
+                "song": ["song", "track", "music", "single"],
+                "track": ["song", "track", "music", "single"],
+                "company": ["company", "corporation", "firm", "business", "tesla", "apple", "google", "microsoft", "amazon"],
+            }.get(noun_cat, [noun_cat])
+
+            for turn in reversed(self.current_state.turns[-3:]):
+                t_input = turn.user_input
+                # Check turn topic
+                cand_top = self._extract_topic_from_text(t_input)
+                if cand_top and (any(k in cand_top.lower() for k in cat_keywords) or noun_cat in cand_top.lower()):
+                    matched_entity = cand_top
+                    break
+                for ent_k, ent_v in getattr(turn, "extracted_entities", {}).items():
+                    val = ent_v.get("value") if isinstance(ent_v, dict) else str(ent_v)
+                    if any(k in val.lower() for k in cat_keywords):
+                        matched_entity = val
+                        break
+                if matched_entity:
+                    break
+                _skip = {"tell", "explain", "what", "show", "how", "describe", "can", "could", "please", "is", "are", "the", "a", "an", "i", "we", "you", "they", "he", "she", "it", "let", "lets", "let's"}
+                cands = [m.group(0).strip() for m in re.finditer(r'\b[A-Z][a-zA-Z0-9_\-]+(?:\s+[A-Z][a-zA-Z0-9_\-]+)*\b', t_input)]
+                for cand in cands:
+                    if cand.lower() not in _skip and (any(k in cand.lower() for k in cat_keywords) or any(k in t_input.lower() for k in cat_keywords)):
+                        matched_entity = cand
+                        break
+                if matched_entity:
+                    break
+
+            if not matched_entity and self.current_state.primary_active_entity:
+                pae_val = self.current_state.primary_active_entity.get("value", "")
+                if any(k in pae_val.lower() for k in cat_keywords):
+                    matched_entity = pae_val
+
+            if matched_entity:
+                sub_pattern = rf'\b(?:the|this|that)\s+{re.escape(m_def_noun.group(1))}\b'
+                resolved = re.sub(sub_pattern, matched_entity, clean_text, count=1, flags=re.IGNORECASE)
+                if resolved != clean_text:
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (definite noun resolution: '{noun_cat}' -> '{matched_entity}')")
+                    return resolved, True
 
         # ── 4. Active browser contextual search & result interaction ──
         active_site = self.current_state.session_context.get("active_site", "")
@@ -1361,6 +1701,7 @@ class DialogueStateManager:
                 or (self._last_mentioned_entity and self._last_mentioned_entity.get("entity_type") == "APPLICATION")
                 or bool(self.current_state.active_applications)
                 or bool(self.current_state.active_application)
+                or candidate.lower() in ("edge", "msedge", "chrome", "notepad", "calculator", "terminal", "powershell", "word", "excel", "powerpoint", "spotify", "discord", "slack", "browser")
             ):
                 if candidate.lower() in ("the other app", "the other application", "the other one", "other app", "other application", "other one"):
                     opened_apps = self.current_state.active_applications or self.current_state.session_context.get("opened_applications", []) or self.current_state.active_entity_set.get("APPLICATION", [])
@@ -1381,6 +1722,14 @@ class DialogueStateManager:
                 print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (application correction to '{clean_app}')")
                 return resolved, True
 
+
+        # If this is a location intelligence query (e.g. "go to the second one", "navigate to the second one"), let location controller handle it
+        try:
+            from core.semantic_understanding import SemanticUnderstandingEngine
+            if SemanticUnderstandingEngine.is_location_intelligence_query(user_input):
+                return user_input, False
+        except Exception:
+            pass
 
         # ── 5. Disambiguation & Alternative Selection ("The second one", "Show me the other one", "The first one", "The fifth one") ──
         m_ordinal = re.search(r'\b(?:the\s+)?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|other|1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th)\s+(?:one|file|presentation|document|option)\b|^the\s+(first|second|third|fourth|fifth|other|1st|2nd|3rd|4th|5th)\s+one[?.!]?$', lower)
@@ -1691,9 +2040,9 @@ class DialogueStateManager:
                     print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (typing reference resolution)")
                     return resolved, True
 
-                # Check for "that file" / "this file" / "the file" / "that presentation" / "that sentence"
+                # Check for "that file" / "this file" / "the file" / "that presentation" / "that PDF" / "that spreadsheet" / etc.
                 m_target_phrase = re.search(
-                    r'\b(?:that|this|the|those)\s+(?:file|document|presentation|folder|app|task|sentences?|text|words?|phrase|message|content)\b',
+                    r'\b(?:that|this|the|those)\s+(?:file|document|presentation|ppt|pptx|pdf|docx|word|spreadsheet|excel|sheet|report|folder|app|task|sentences?|text|words?|phrase|message|content|info|information|details)\b',
                     clean_stripped,
                     re.IGNORECASE
                 )
@@ -1704,6 +2053,35 @@ class DialogueStateManager:
                         elif clean_stripped.lower().startswith("open"):
                             return "clarify_candidate_selection_unavailable", True
                         return user_input, False
+
+                    target_word = m_target_phrase.group(0).lower().split()[-1]
+                    # If target is information/details, do not overwrite with stale document entity unless opening
+                    if target_word in ("info", "information", "details"):
+                        pending_commit = self.current_state.session_context.get("pending_commitment")
+                        if pending_commit and pending_commit.get("offer_type") == "capabilities_list":
+                            self.current_state.session_context.pop("pending_commitment", None)
+                            return "show me the full list of capabilities", True
+                        if not clean_stripped.lower().startswith(("open", "view", "launch")):
+                            return user_input, False
+                    # Format alignment check: if user asked for a specific format (e.g. PDF), align with matching active artifact
+                    if target_word == "pdf" and not clean_entity.lower().endswith(".pdf"):
+                        art = self.current_state.active_artifact
+                        art_path = (art.get("filepath") or art.get("path")) if isinstance(art, dict) else art
+                        if art_path and str(art_path).lower().endswith(".pdf"):
+                            clean_entity = os.path.basename(str(art_path))
+                            entity_type = "FILE"
+                    elif target_word in ("spreadsheet", "excel", "sheet", "xlsx") and not clean_entity.lower().endswith(".xlsx"):
+                        art = self.current_state.active_artifact
+                        art_path = (art.get("filepath") or art.get("path")) if isinstance(art, dict) else art
+                        if art_path and str(art_path).lower().endswith(".xlsx"):
+                            clean_entity = os.path.basename(str(art_path))
+                            entity_type = "FILE"
+                    elif target_word in ("presentation", "ppt", "pptx") and not any(clean_entity.lower().endswith(ext) for ext in (".ppt", ".pptx")):
+                        art = self.current_state.active_artifact
+                        art_path = (art.get("filepath") or art.get("path")) if isinstance(art, dict) else art
+                        if art_path and any(str(art_path).lower().endswith(ext) for ext in (".ppt", ".pptx")):
+                            clean_entity = os.path.basename(str(art_path))
+                            entity_type = "FILE"
 
                     start, end = m_target_phrase.start(), m_target_phrase.end()
                     prefix_word = "file " if entity_type == "FILE" and not clean_stripped.lower().startswith("delete") else ("folder " if entity_type == "FOLDER" and not clean_stripped.lower().startswith(("delete", "remove")) else "")
@@ -3273,6 +3651,26 @@ class DialogueStateManager:
             last_turn.assistant_response = response
             last_turn.response_timestamp = datetime.now().isoformat()
         self.current_state.current_response = response
+        if response:
+            resp_low = response.lower()
+            if "if you want, i can show you the full list" in resp_low or "show you what i can do" in resp_low or "show you the full list" in resp_low or "show the full list" in resp_low:
+                self.current_state.session_context["active_offer"] = {
+                    "offer_type": "capabilities_list",
+                    "topic": "capabilities",
+                    "action": "show_capabilities",
+                    "offer_text": response,
+                    "turn": self.current_state.current_turn
+                }
+            elif any(p in resp_low for p in ("would you like me to show", "i can show you", "want me to show you")):
+                m_off = re.search(r'(?:would\s+you\s+like\s+me\s+to\s+show|i\s+can\s+show\s+you|want\s+me\s+to\s+show\s+you)\s+(?:the\s+)?([a-zA-Z0-9_\s\-]+)', resp_low)
+                topic_cand = m_off.group(1).strip().rstrip('.?!') if m_off else "details"
+                self.current_state.session_context["active_offer"] = {
+                    "offer_type": "general_offer",
+                    "topic": topic_cand,
+                    "action": f"show_{topic_cand}",
+                    "offer_text": response,
+                    "turn": self.current_state.current_turn
+                }
 
     # ── Conversational Continuation Methods ─────────────────────────────────
     def update_continuation_state(

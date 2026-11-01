@@ -1,6 +1,7 @@
 """
 Device Pairing Manager
 Coordinates pairing handshakes between mobile devices and the assistant using 6-digit PINs or QR codes.
+Extended with 16-char enrollment code support for persistent remote enrollment.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 from uuid import uuid4
 
-from .device_auth import generate_pairing_code, generate_pairing_token
+from .device_auth import generate_pairing_code, generate_pairing_token, generate_enrollment_code, normalize_enrollment_code
 from .device_models import DeviceRecord, PairingOffer, now_iso
 from .device_registry import DeviceRegistry, get_device_registry
 
@@ -23,14 +24,16 @@ class DevicePairingManager:
     """
     Manages active pairing sessions.
     Generates pairing offers (with 6-digit PIN and QR payload) with TTL expiration.
+    Also manages 16-char Crockford enrollment codes for cross-network device enrollment.
     """
 
     def __init__(self, registry: Optional[DeviceRegistry] = None):
         self.registry = registry or get_device_registry()
         self._lock = threading.RLock()
-        self._offers: dict[str, PairingOffer] = {}  # offer_id -> PairingOffer
-        self._code_index: dict[str, str] = {}      # code -> offer_id
-        self._token_index: dict[str, str] = {}     # token -> offer_id
+        self._offers: dict[str, PairingOffer] = {}   # offer_id -> PairingOffer
+        self._code_index: dict[str, str] = {}         # pairing_code -> offer_id
+        self._token_index: dict[str, str] = {}        # token -> offer_id
+        self._enrollment_index: dict[str, str] = {}   # enrollment_code -> offer_id
 
     def _prune(self) -> None:
         """Remove expired pairing offers."""
@@ -50,20 +53,23 @@ class DevicePairingManager:
                 if offer:
                     self._code_index.pop(offer.code, None)
                     self._token_index.pop(offer.token, None)
+                    if offer.enrollment_code:
+                        self._enrollment_index.pop(offer.enrollment_code, None)
 
     def create_offer(
         self,
         user_id: int,
         gateway_host: str = "0.0.0.0",
         gateway_port: int = 8765,
-        ttl_seconds: int = 300,
+        ttl_seconds: int = 3600,
     ) -> PairingOffer:
-        """Create a new pairing offer with a 6-digit code and QR payload."""
+        """Create a new pairing offer with a 6-digit code, enrollment code, and QR payload."""
         with self._lock:
             self._prune()
             offer_id = uuid4().hex[:12]
             code = generate_pairing_code()
             token = generate_pairing_token()
+            enrollment_code = generate_enrollment_code()
             expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
 
             offer = PairingOffer(
@@ -74,11 +80,14 @@ class DevicePairingManager:
                 expires_at=expires_at,
                 gateway_host=gateway_host,
                 gateway_port=gateway_port,
+                enrollment_code=enrollment_code,
             )
             self._offers[offer_id] = offer
             self._code_index[code] = offer_id
             self._token_index[token] = offer_id
-            logger.info(f"Created pairing offer {offer_id} with code {code} for user {user_id}")
+            self._enrollment_index[enrollment_code] = offer_id
+            logger.info(f"Created pairing offer {offer_id} with code {code} "
+                        f"and enrollment code {enrollment_code} for user {user_id}")
             return offer
 
     def get_offer_by_code(self, code: str) -> Optional[PairingOffer]:
@@ -92,6 +101,82 @@ class DevicePairingManager:
             self._prune()
             offer_id = self._token_index.get(token.strip())
             return self._offers.get(offer_id) if offer_id else None
+
+    def get_offer_by_enrollment_code(self, enrollment_code: str) -> Optional[PairingOffer]:
+        """Look up an active pairing offer by its 16-char enrollment code."""
+        with self._lock:
+            self._prune()
+            normalized = normalize_enrollment_code(enrollment_code)
+            formatted = f"{normalized[0:4]}-{normalized[4:8]}-{normalized[8:12]}-{normalized[12:16]}"
+            offer_id = self._enrollment_index.get(formatted)
+            return self._offers.get(offer_id) if offer_id else None
+
+    def get_or_create_enrollment_code_for_user(self, user_id: int) -> str:
+        """
+        Return the existing active enrollment code for user_id, or create a new offer
+        and return its enrollment code. Used by the dashboard to display to the user.
+        """
+        existing = self.get_active_offer_for_user(user_id)
+        if existing and existing.enrollment_code:
+            return existing.enrollment_code
+        offer = self.create_offer(user_id)
+        return offer.enrollment_code
+
+    def approve_enrollment(
+        self,
+        enrollment_code: str,
+        device_name: str,
+        stable_identity: str,
+        platform: str = "android",
+        os_version: str = "",
+        ip: str = "",
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> tuple[Optional[DeviceRecord], Optional[str]]:
+        """
+        Approve enrollment from a remote device presenting a valid enrollment code.
+        Delegates to registry.enroll_device() and cleans up the pairing offer.
+        Returns (DeviceRecord, plaintext_auth_token) or (None, None).
+        """
+        with self._lock:
+            offer = self.get_offer_by_enrollment_code(enrollment_code)
+            if not offer:
+                # Also check registry directly (re-enrollment)
+                existing = self.registry.get_device_by_enrollment_code(enrollment_code)
+                if existing:
+                    # Re-issue token via enroll_device
+                    record, token = self.registry.enroll_device(
+                        user_id=existing.user_id,
+                        enrollment_code=enrollment_code,
+                        device_name=device_name or existing.name,
+                        stable_identity=stable_identity,
+                        platform=platform,
+                        os_version=os_version,
+                        ip=ip,
+                        metadata=metadata,
+                    )
+                    return record, token
+                logger.warning(f"Enrollment code not found: {enrollment_code}")
+                return None, None
+
+            record, token = self.registry.enroll_device(
+                user_id=offer.user_id,
+                enrollment_code=offer.enrollment_code,
+                device_name=device_name,
+                stable_identity=stable_identity,
+                platform=platform,
+                os_version=os_version,
+                ip=ip,
+                metadata=metadata,
+            )
+
+            if record:
+                # Clean up the offer so it can't be reused
+                self._offers.pop(offer.offer_id, None)
+                self._code_index.pop(offer.code, None)
+                self._token_index.pop(offer.token, None)
+                self._enrollment_index.pop(offer.enrollment_code, None)
+
+            return record, token
 
     def get_active_offer_for_user(self, user_id: int) -> Optional[PairingOffer]:
         """Get the current active, unexpired, unapproved pairing offer for user if one exists."""
@@ -122,7 +207,7 @@ class DevicePairingManager:
         metadata: Optional[dict[str, Any]] = None,
     ) -> tuple[Optional[DeviceRecord], Optional[str]]:
         """
-        Approve pairing and register device in registry.
+        Approve pairing (legacy 6-digit PIN path) and register device in registry.
         Returns (DeviceRecord, plaintext_secret) or (None, None) if invalid offer.
         """
         with self._lock:
@@ -151,6 +236,8 @@ class DevicePairingManager:
             self._offers.pop(offer_id, None)
             self._code_index.pop(offer.code, None)
             self._token_index.pop(offer.token, None)
+            if offer.enrollment_code:
+                self._enrollment_index.pop(offer.enrollment_code, None)
 
             return record, secret
 
@@ -160,6 +247,8 @@ class DevicePairingManager:
             if offer:
                 self._code_index.pop(offer.code, None)
                 self._token_index.pop(offer.token, None)
+                if offer.enrollment_code:
+                    self._enrollment_index.pop(offer.enrollment_code, None)
                 return True
             return False
 

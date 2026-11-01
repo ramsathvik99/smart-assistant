@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+import re
 import json
 import time
 import base64
@@ -735,6 +736,104 @@ class CredentialManager:
             return self._save_vault_unlocked(user_id, data)
 
     # ── Core Credential API ──────────────────────────────────────────────────
+    def get_credentials(self, user_context: Any, provider_name: str) -> List[str]:
+        """
+        Authoritative retrieval of all decrypted credentials for a given user and provider.
+        Aggregates credentials from:
+          1. In-memory cache
+          2. PostgreSQL database (provider, provider_keys, provider_key_1, etc.)
+          3. Local encrypted vault (provider, provider_keys, provider_key_1, etc.)
+        Supports comma-separated, newline-separated, or JSON list values.
+        Returns deduplicated list of non-empty strings, preserving order.
+        Guarantees user isolation: never returns keys belonging to another user.
+        """
+        uid = self._resolve_user_id(user_context)
+        if not uid or uid <= 0:
+            return []
+
+        prov = provider_name.strip().lower()
+        collected_raw: List[str] = []
+
+        # Check in-memory cache
+        with self._cache_lock:
+            user_cache = self._cache.get(str(uid), {})
+            if prov in user_cache and user_cache[prov]:
+                collected_raw.append(user_cache[prov])
+
+        # 1. Try PostgreSQL Database
+        try:
+            from core.db_pool import get_db_pool
+            pool = get_db_pool()
+            if pool and pool.is_healthy():
+                with pool.get_cursor() as cur:
+                    cur.execute(
+                        "SELECT provider, encrypted_value FROM user_api_credentials WHERE user_id = %s AND (provider = %s OR provider LIKE %s);",
+                        (uid, prov, f"{prov}_%")
+                    )
+                    rows = cur.fetchall()
+                    for r_prov, r_enc in rows:
+                        if r_enc:
+                            dec = self._decrypt_for_user(r_enc, uid)
+                            if dec:
+                                collected_raw.append(dec)
+        except Exception as e:
+            logger.debug(f"DB credentials query skipped or failed: {e}")
+
+        # 2. Try Local Encrypted Vault
+        vault = self._load_vault_for_user(uid)
+        val = vault.get(prov)
+        if val:
+            dec = self._decrypt_for_user(val, uid) if (str(val).startswith("dpapi:") or str(val).startswith("fernet:")) else str(val)
+            if dec:
+                collected_raw.append(dec)
+
+        # Check multi-key entries, e.g. "groq_keys", "groq_key_1", "groq_key_2"
+        for k, v in vault.items():
+            if k == f"{prov}_keys" or k.startswith(f"{prov}_key_"):
+                dec = self._decrypt_for_user(v, uid) if (str(v).startswith("dpapi:") or str(v).startswith("fernet:")) else str(v)
+                if dec:
+                    collected_raw.append(dec)
+
+        # Special case: Ollama
+        if prov == "ollama":
+            raw_url = vault.get("ollama_url")
+            if raw_url and (str(raw_url).startswith("dpapi:") or str(raw_url).startswith("fernet:")):
+                dec = self._decrypt_for_user(raw_url, uid)
+                if dec:
+                    collected_raw.append(dec)
+            elif raw_url:
+                collected_raw.append(str(raw_url))
+            if not collected_raw:
+                collected_raw.append("http://localhost:11434")
+
+        # Parse comma, newline, or JSON formatted keys
+        final_keys: List[str] = []
+        for item in collected_raw:
+            item_str = str(item).strip()
+            if not item_str:
+                continue
+            if item_str.startswith("[") and item_str.endswith("]"):
+                try:
+                    parsed = json.loads(item_str)
+                    if isinstance(parsed, list):
+                        for sub in parsed:
+                            s = str(sub).strip()
+                            if s and s not in final_keys:
+                                final_keys.append(s)
+                        continue
+                except Exception:
+                    pass
+            for part in re.split(r'[,;\n\r]+', item_str):
+                p = part.strip()
+                if p and p not in final_keys:
+                    final_keys.append(p)
+
+        if final_keys and prov != "ollama":
+            with self._cache_lock:
+                self._cache.setdefault(str(uid), {})[prov] = final_keys[0]
+
+        return final_keys
+
     def get_credential(self, user_context: Any, provider_name: str) -> Optional[str]:
         """
         Authoritative retrieval of a user's decrypted credential.

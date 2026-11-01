@@ -12,7 +12,7 @@
       "room": "Bedroom",
       "device_type": "light",
       "image_key": "light",
-      "is_on": true,
+      "is_on": false,
       "traits": {
         "brightness": 70,
         "color_temp": 3000,
@@ -20,7 +20,7 @@
       },
       "online": true,
       "created_at": 1790597154.1818762,
-      "updated_at": 1790658037.9203773
+      "updated_at": 1793294916.7560763
     },
     "daikin_3e7313": {
       "device_id": "daikin_3e7313",
@@ -32,15 +32,15 @@
       "room": "Bedroom",
       "device_type": "ac",
       "image_key": "ac",
-      "is_on": true,
+      "is_on": false,
       "traits": {
         "temperature": 24,
         "mode": "Cool",
-        "is_on": true
+        "is_on": false
       },
       "online": true,
       "created_at": 1790597154.1864226,
-      "updated_at": 1791441717.1310804
+      "updated_at": 1793294928.4465454
     },
     "tuya_163e29": {
       "device_id": "tuya_163e29",
@@ -56,8 +56,8 @@
       "traits": {},
       "online": true,
       "created_at": 1790597154.188727,
-      "updated_at": 1790658015.6429377
+      "updated_at": 1793294916.7612963
     }
   },
-  "updated_at": 1791441717.1310804
+  "updated_at": 1793294928.4527516
 }

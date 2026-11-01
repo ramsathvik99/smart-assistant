@@ -17,7 +17,7 @@ Provides:
 3. Model-level and key-level failure tracking:
    - Isolates model failure (404 / unsupported) from key failure (401 / 429 quota).
    - Distinguishes exhausted account credits (does not retry other models on same dead key).
-4. Explicit exclusion of Ollama from automatic execution.
+4. Automatic local Ollama model candidate participation and failover.
 """
 
 from __future__ import annotations
@@ -109,12 +109,62 @@ class ModelRegistry:
 
             for item in all_mods:
                 cand = ModelCandidate(item)
-                # Ensure no local Ollama model enters cloud model pool
-                if cand.provider == "ollama":
-                    continue
                 tag = f"{cand.provider}:{cand.id}:{cand.key_fingerprint}"
                 new_models[tag] = cand
                 by_prov.setdefault(cand.provider, []).append(cand)
+
+            # Register local Ollama model candidate when daemon is reachable
+            try:
+                from core.llm_health import is_ollama_reachable
+                from instance.config import settings as _cfg
+                ollama_base = getattr(_cfg, "OLLAMA_API_BASE", "http://127.0.0.1:11434")
+                if is_ollama_reachable(ollama_base):
+                    ollama_mod_name = getattr(_cfg, "OLLAMA_MODEL", "llama3.2:latest")
+                    discovered_models = [ollama_mod_name]
+                    try:
+                        import requests
+                        for probe_url in (ollama_base, "http://127.0.0.1:11434"):
+                            r = requests.get(f"{probe_url.rstrip('/')}/api/tags", timeout=1.0)
+                            if r.status_code == 200:
+                                tags = [m.get("name") for m in r.json().get("models", []) if m.get("name")]
+                                if tags:
+                                    discovered_models = list(dict.fromkeys([ollama_mod_name] + tags))
+                                    break
+                    except Exception:
+                        pass
+
+                    for mod_name in discovered_models:
+                        capabilities = [
+                            "general_conversation",
+                            "code_generation",
+                            "code_debugging",
+                            "summarization",
+                            "complex_reasoning",
+                        ]
+                        if any(x in mod_name.lower() for x in ["3.2", "mini", "1b", "3b", "flash"]):
+                            capabilities.append("fast_inference")
+
+                        ollama_cand = ModelCandidate({
+                            "provider": "ollama",
+                            "id": mod_name,
+                            "display_name": f"Local Ollama ({mod_name})",
+                            "key_fingerprint": "local",
+                            "credential_reference": "local:ollama",
+                            "api_compatibility": "ollama",
+                            "status": "available",
+                            "input_modalities": ["text"],
+                            "output_modalities": ["text"],
+                            "context_window": 8192,
+                            "max_output_tokens": 4096,
+                            "capabilities": capabilities,
+                            "is_preview": False,
+                            "is_deprecated": False,
+                        })
+                        o_tag = f"ollama:{mod_name}:local"
+                        new_models[o_tag] = ollama_cand
+                        by_prov.setdefault("ollama", []).append(ollama_cand)
+            except Exception as _oe:
+                logger.debug("Could not register local Ollama candidate: %s", _oe)
 
             self._models = new_models
             self._models_by_provider = by_prov
@@ -234,7 +284,7 @@ class ModelRegistry:
             # Deep logic, frontier models, high capacity
             if "complex_reasoning" in cand.capabilities:
                 score += 25.0
-            if any(x in m_id_low for x in ["deepseek-v4-pro", "gemini-2.5-pro", "gpt-4o", "gpt-5", "o1", "o3", "120b"]):
+            if any(x in m_id_low for x in ["deepseek-reasoner", "gemini-2.5-pro", "gpt-4o", "gpt-5", "o1", "o3", "120b"]):
                 score += 20.0
             if cand.context_window >= 128000:
                 score += 5.0

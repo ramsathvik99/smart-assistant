@@ -51,8 +51,17 @@ class RequestLatencyTracker:
         self._printed: bool = False
 
     def record(self, metric_name: str, ts: Optional[float] = None) -> None:
-        """Record monotonic timestamp for a pipeline step."""
+        """Record monotonic timestamp for a pipeline step with cross-turn sanity validation."""
         now = ts if ts is not None else time.monotonic()
+        if metric_name == "tts_first_audio_timestamp":
+            t_asr = self.timestamps.get("transcription_complete_timestamp")
+            if t_asr is not None and now < t_asr:
+                # Discard cross-turn bleed-through from a prior utterance
+                return
+        if metric_name == "tts_playback_end_timestamp":
+            t_first = self.timestamps.get("tts_first_audio_timestamp")
+            if t_first is not None and now < t_first:
+                return
         self.timestamps[metric_name] = now
 
     def record_llm_call(self, provider: str) -> None:
@@ -207,3 +216,65 @@ def start_new_tracker(request_id: Optional[str] = None) -> RequestLatencyTracker
     global _active_tracker
     _active_tracker = RequestLatencyTracker(request_id=request_id)
     return _active_tracker
+
+
+class ActionExecutionTelemetry:
+    """Phase 8: Action Execution Telemetry Tracker."""
+
+    def __init__(self, command_id: str, user_input: str):
+        self.command_id: str = command_id
+        self.user_input: str = user_input
+        self.resolved_intent: str = ""
+        self.target_device: str = "windows"
+        self.selected_function: str = ""
+        self.t_input_received: float = time.monotonic()
+        self.t_routing_start: float = time.monotonic()
+        self.t_routing_end: float = 0.0
+        self.t_dispatch_start: float = 0.0
+        self.t_dispatch_end: float = 0.0
+        self.t_execution_start: float = 0.0
+        self.t_execution_end: float = 0.0
+        self.t_verification_start: float = 0.0
+        self.t_verification_end: float = 0.0
+        self.success: bool = False
+        self.details: str = ""
+
+    def mark_routed(self, intent: str, target_device: str, selected_func: str):
+        self.t_routing_end = time.monotonic()
+        self.resolved_intent = intent
+        self.target_device = target_device
+        self.selected_function = selected_func
+
+    def start_execution(self):
+        self.t_execution_start = time.monotonic()
+
+    def end_execution(self, success: bool = True, details: str = ""):
+        self.t_execution_end = time.monotonic()
+        self.success = success
+        self.details = details
+
+    def start_verification(self):
+        self.t_verification_start = time.monotonic()
+
+    def end_verification(self):
+        self.t_verification_end = time.monotonic()
+
+    def log_telemetry(self):
+        now = time.monotonic()
+        routing_ms = (self.t_routing_end - self.t_routing_start) * 1000 if self.t_routing_end else 0.0
+        exec_ms = (self.t_execution_end - self.t_execution_start) * 1000 if self.t_execution_end else 0.0
+        verif_ms = (self.t_verification_end - self.t_verification_start) * 1000 if self.t_verification_end else 0.0
+        total_ms = (now - self.t_input_received) * 1000
+
+        print(
+            f"[ACTION TELEMETRY] [{self.command_id}] target={self.target_device} "
+            f"intent={self.resolved_intent} func={self.selected_function} "
+            f"routing={routing_ms:.1f}ms exec={exec_ms:.1f}ms verif={verif_ms:.1f}ms "
+            f"total_completion={total_ms:.1f}ms success={self.success}"
+        )
+        logger.info(
+            f"[ACTION TELEMETRY] [{self.command_id}] target={self.target_device} "
+            f"intent={self.resolved_intent} func={self.selected_function} "
+            f"routing={routing_ms:.1f}ms exec={exec_ms:.1f}ms verif={verif_ms:.1f}ms "
+            f"total_completion={total_ms:.1f}ms success={self.success}"
+        )

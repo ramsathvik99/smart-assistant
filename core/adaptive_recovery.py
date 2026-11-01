@@ -827,9 +827,10 @@ class AdaptiveRecoveryEngine:
                 reminders = assistant_core.get_user_reminders(user_id=uid)
                 if isinstance(reminders, list) and len(reminders) > 0:
                     # Check if matching reminder was already inserted despite verification failure
+                    _stopwords = {"set", "a", "an", "the", "in", "at", "to", "for", "on", "of", "and", "remind", "reminder", "reminders", "please", "me"}
                     for r in reminders:
                         r_title = (r.get("title") or r.get("task") or "").lower()
-                        if r_title and (r_title in cmd_low or any(w in r_title for w in cmd_low.split())):
+                        if r_title and (r_title in cmd_low or any(len(w) > 2 and w not in _stopwords and re.search(r'\b' + re.escape(w) + r'\b', r_title) for w in cmd_low.split())):
                             return True  # Already exists! Repeating would duplicate.
             except Exception:
                 pass

@@ -86,6 +86,99 @@ class FastPathProcessor:
         # Strip assistant wake word prefix or suffix if present (e.g. "Friday what can you do" or "How are you, Friday?")
         norm_low = re.sub(r'^(?:hey\s+|ok\s+|okay\s+)?(?:friday|trevon|nova|jarvis|assistant)[,\s:]*', '', low, flags=re.IGNORECASE).strip()
         norm_low = re.sub(r'[,:\s]+(?:friday|trevon|nova|jarvis|assistant)\s*$', '', norm_low, flags=re.IGNORECASE).strip()
+        # Expand common chat abbreviations (e.g. "who are u", "who r u")
+        norm_low = re.sub(r'\bu\b', 'you', norm_low)
+        norm_low = re.sub(r'\bur\b', 'your', norm_low)
+        norm_low = re.sub(r'\br\b', 'are', norm_low)
+
+        # Correct high-frequency speech recognition (ASR) phonetic slip-ups
+        norm_low = re.sub(r'\bwat\b', 'what', norm_low)
+        norm_low = re.sub(r'\btiime\b', 'time', norm_low)
+        norm_low = re.sub(r'\bcalulate\b', 'calculate', norm_low)
+        norm_low = re.sub(r'\bcalcualte\b', 'calculate', norm_low)
+        norm_low = re.sub(r'\bopn\b', 'open', norm_low)
+        norm_low = re.sub(r'\bwether\b', 'weather', norm_low)
+        norm_low = re.sub(r'\bcerate\b', 'create', norm_low)
+        norm_low = re.sub(r'\bdocumnet\b', 'document', norm_low)
+        norm_low = re.sub(r'\bplai\b', 'play', norm_low)
+        norm_low = re.sub(r'\bcancle\b', 'cancel', norm_low)
+        norm_low = re.sub(r'\bdelte\b', 'delete', norm_low)
+        norm_low = re.sub(r'\bremindr\b', 'reminder', norm_low)
+        norm_low = re.sub(r'\bnotpad\b', 'notepad', norm_low)
+        norm_low = re.sub(r'\bnote\s+pad\b', 'notepad', norm_low)
+
+        # ---------------------------------------------------------------------
+        # 0.9 Instructional & How-To Queries (Distinguish explanation from execution)
+        # ---------------------------------------------------------------------
+        if re.search(r'\b(?:explain\s+what\s+(?:is\s+)?(?:an?\s+)?android\s+pairing\s+code|what\s+is\s+(?:an?\s+)?android\s+pairing\s+code|what\s+is\s+a\s+pairing\s+code)\b', norm_low):
+            resp = "An Android pairing code is a temporary 6-digit numeric PIN used for Wireless Debugging on Android 11+. It securely pairs your phone with your PC over Wi-Fi without needing a USB cable. You can find it on your phone under Settings -> Developer Options -> Wireless Debugging."
+            return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
+
+        if re.match(r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain\s+how\s+to|how\s+(?:do|can|would|should)\s+i|how\s+to|what\s+are\s+the\s+steps\s+to|guide\s+me\s+on\s+how\s+to|tell\s+me\s+how\s+to))\s+(?:create|make|write|generate)\s+(?:an?|the)?\s*(?:word\s+doc(?:ument)?|docx|document|file)\b', norm_low):
+            resp = "To create a Word document, just tell me what topic and content you'd like—for example, 'Create a Word document about Quantum Computing'—and I will generate and save it directly to your desktop."
+            return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
+
+        if re.search(r'\b(?:how\s+(?:do|can)\s+i\s+pair\s+my\s+phone|how\s+to\s+pair\s+my\s+phone|how\s+do\s+i\s+connect\s+my\s+phone)\b', norm_low):
+            resp = "To pair your phone, enable Developer Options on your Android device, turn on Wireless Debugging, and select 'Pair device with pairing code'. Then say 'connect my phone' with the IP address and 6-digit code shown on your phone screen."
+            return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
+
+        # ---------------------------------------------------------------------
+        # 0.95 Statements of Tentative Intent vs Immediate Execution
+        # ---------------------------------------------------------------------
+        # 0.92 Deterministic Mobile Phone Control & Live Status Fast Path
+        # ---------------------------------------------------------------------
+        from core.unified_command_router import UnifiedCommandRouter
+        if UnifiedCommandRouter._is_mobile_phone_command(norm_low) or UnifiedCommandRouter._is_mobile_phone_command(low):
+            from core.unified_command_router import unified_router
+            exec_res = unified_router.execute_single_action(user_input, user_id=user_id)
+            resp_str = exec_res.get("response") or exec_res.get("message") or "Mobile command completed."
+            res = cls._build_result("DEVICE_CONTROL", resp_str, dialogue_mgr)
+            res.update(exec_res)
+            res["response"] = resp_str
+            res["spoken_response"] = exec_res.get("spoken_response") or resp_str
+            return res
+        # ---------------------------------------------------------------------
+        if re.search(r'\b(?:i(?:\'m|\s+am)\s+(?:thinking\s+of|planning\s+to|considering)|i\s+(?:plan\s+to|might\s+need\s+to|may\s+want\s+to|will\s+probably|will\s+likely))\b', norm_low) and not any(k in norm_low for k in ("now", "immediately", "right now", "remind", "reminder", "schedule", "calendar")):
+            if "clean" in norm_low and "desktop" in norm_low:
+                resp = "Understood! Whenever you're ready to organize your desktop, just say 'clean up my desktop' and I'll sort your files."
+                return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
+            elif "memo" in norm_low or "note" in norm_low or "letter" in norm_low or "document" in norm_low:
+                resp = "Got it! Whenever you're ready to draft that, just let me know the topic and I'll prepare it for you."
+                return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
+            elif "weather" in norm_low:
+                resp = "Sure thing! Whenever you want to check the weather, just ask and I'll get the latest forecast."
+                return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
+            else:
+                resp = "Sounds good! Just let me know whenever you're ready and I'll take care of it."
+                return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
+
+        # ---------------------------------------------------------------------
+        # 0.98 Incomplete Requests Requiring Clarification
+        # ---------------------------------------------------------------------
+        if norm_low in ("create a document", "create document", "make a document", "make document", "generate a document", "new document", "write a document"):
+            if dialogue_mgr and getattr(dialogue_mgr, "current_state", None):
+                dialogue_mgr.current_state.goal_status = "WAITING_FOR_USER"
+                dialogue_mgr.current_state.pending_goal_continuation = {
+                    "type": "document_generation_clarification",
+                    "raw_input": user_input,
+                    "doc_type": "docx"
+                }
+            resp = "What would you like the document to be about, and which format (Word, PDF, PowerPoint, or Excel) do you prefer?"
+            res = cls._build_result("DOCUMENT_GENERATION", resp, dialogue_mgr)
+            res["status"] = "waiting_for_user"
+            return res
+
+        if norm_low in ("set a reminder", "create a reminder", "add a reminder", "new reminder", "remind me"):
+            if dialogue_mgr and getattr(dialogue_mgr, "current_state", None):
+                dialogue_mgr.current_state.goal_status = "WAITING_FOR_USER"
+                dialogue_mgr.current_state.pending_goal_continuation = {
+                    "type": "reminder_clarification",
+                    "raw_input": user_input
+                }
+            resp = "What would you like me to remind you about, and when should I remind you?"
+            res = cls._build_result("REMINDERS", resp, dialogue_mgr)
+            res["status"] = "waiting_for_user"
+            return res
 
         # ---------------------------------------------------------------------
         # 1. Greetings, Politeness & Identity
@@ -117,7 +210,8 @@ class FastPathProcessor:
             return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
 
         identity_queries = (
-            "who are you", "what is your name", "what's your name", "whats your name",
+            "who are you", "who are u", "who r u", "who r you", "what is your name", "what's your name", "whats your name",
+            "what is ur name", "whats ur name",
             "who're you", "tell me about yourself", "introduce yourself", "who made you",
             "who created you", "who built you", "what are you", "who am i speaking with",
             "who am i talking to", "what is your identity", "whats your identity", "who is this",
@@ -182,6 +276,69 @@ class FastPathProcessor:
                 pass  # Fall through to normal pipeline
 
         # ---------------------------------------------------------------------
+        # 1.1c Fast Arithmetic Calculation (Deterministic, Zero Latency)
+        # ---------------------------------------------------------------------
+        m_calc = re.match(r'^(?:(?:calculate|compute|what\s+is|whats)\s+)?([\d\.\s\+\-\*\/\(\)\^x]+|[\d\.]+\s*(?:plus|minus|times|multiplied\s+by|divided\s+by)\s*[\d\.]+)[.?!]?$', norm_low)
+        if m_calc:
+            expr_str = m_calc.group(1).strip()
+            expr_clean = expr_str.replace("plus", "+").replace("minus", "-").replace("times", "*").replace("multiplied by", "*").replace("divided by", "/").replace("x", "*").replace("^", "**")
+            if re.match(r'^[\d\.\s\+\-\*\/\(\)]+$', expr_clean) and any(op in expr_clean for op in "+-*/"):
+                try:
+                    val = eval(expr_clean, {"__builtins__": None}, {})
+                    if isinstance(val, (int, float)):
+                        if isinstance(val, float) and val.is_integer():
+                            val = int(val)
+                        resp = f"{expr_str} = {val}"
+                        if getattr(dialogue_mgr, "current_state", None):
+                            dialogue_mgr.current_state.active_calculation = {"expression": expr_str, "result": val}
+                        return cls._build_result("CALCULATOR", resp, dialogue_mgr)
+                except Exception:
+                    pass
+
+        # Contextual Calculation Follow-up ("divide that by 5", "multiply that by 2", "add 10 to that")
+        m_calc_ctx = re.match(r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:calculate|compute|now\s+)?)(divide|multiply|add|subtract|times|plus|minus)\s+(?:that|it|the\s+result|the\s+answer)\s+(?:by|with|to|from)?\s*([\d\.]+)[.?!]?$', norm_low)
+        if not m_calc_ctx:
+            m_calc_ctx = re.match(r'^(?:(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:calculate|compute|now\s+)?)(add|subtract|plus|minus)\s+([\d\.]+)\s+(?:to|from)\s+(?:that|it|the\s+result|the\s+answer)[.?!]?$', norm_low)
+        if m_calc_ctx:
+            last_calc = getattr(getattr(dialogue_mgr, "current_state", None), "active_calculation", None)
+            prev_val = None
+            if last_calc and isinstance(last_calc, dict):
+                prev_val = last_calc.get("result")
+            if prev_val is None and getattr(dialogue_mgr, "conversation_history", None):
+                last_turn = dialogue_mgr.conversation_history[-1] if dialogue_mgr.conversation_history else None
+                if last_turn:
+                    last_resp = getattr(last_turn, "response", "") or ""
+                    m_prev = re.search(r'=\s*([\d\.]+)', last_resp) or re.search(r'\b(?:is|equals)\s+([\d\.]+)', last_resp)
+                    if m_prev:
+                        try:
+                            prev_val = float(m_prev.group(1))
+                            if prev_val.is_integer():
+                                prev_val = int(prev_val)
+                        except Exception:
+                            pass
+            if prev_val is not None:
+                op_word = m_calc_ctx.group(1).lower()
+                arg_val = float(m_calc_ctx.group(2))
+                if arg_val.is_integer():
+                    arg_val = int(arg_val)
+                res_val = None
+                if op_word in ("divide", "divided"):
+                    res_val = prev_val / arg_val if arg_val != 0 else "undefined (division by zero)"
+                elif op_word in ("multiply", "times"):
+                    res_val = prev_val * arg_val
+                elif op_word in ("add", "plus"):
+                    res_val = prev_val + arg_val
+                elif op_word in ("subtract", "minus"):
+                    res_val = prev_val - arg_val
+                if res_val is not None:
+                    if isinstance(res_val, float) and res_val.is_integer():
+                        res_val = int(res_val)
+                    resp = f"{prev_val} {op_word} {arg_val} = {res_val}"
+                    if getattr(dialogue_mgr, "current_state", None):
+                        dialogue_mgr.current_state.active_calculation = {"expression": f"{prev_val} {op_word} {arg_val}", "result": res_val}
+                    return cls._build_result("CALCULATOR", resp, dialogue_mgr)
+
+        # ---------------------------------------------------------------------
         # 1.2 Volume, Audio Control & Media Fast Path (Deterministic, Zero Latency)
         # ---------------------------------------------------------------------
         m_vol = (
@@ -236,9 +393,19 @@ class FastPathProcessor:
             play_query = m_play.group(1).strip()
             if play_query and len(play_query) > 1:
                 try:
-                    from modules.music.music_controller import play_music
-                    play_music(play_query)
-                    return cls._build_result("MUSIC", f"Playing {play_query}.", dialogue_mgr)
+                    from modules.music.music_controller import get_music_controller
+                    ctrl = get_music_controller()
+                    success = ctrl.play_music(play_query)
+                    msg = getattr(ctrl, "last_status_message", None)
+                    if success and bool(ctrl.is_playing):
+                        track_title = ctrl.get_current_track_title() or play_query
+                        return cls._build_result("MUSIC", msg or f"Playing '{track_title}'.", dialogue_mgr)
+                    else:
+                        if not msg:
+                            msg = f"Could not find verified songs for '{play_query}'. Try specifying the artist or searching on YouTube."
+                        res = cls._build_result("MUSIC", msg, dialogue_mgr)
+                        res["status"] = "failed"
+                        return res
                 except Exception:
                     pass  # Fall through to normal pipeline
 
@@ -250,10 +417,42 @@ class FastPathProcessor:
                 cmd_id, display_name = cls.KNOWN_APP_MAPPINGS[app_req]
                 try:
                     from legacy.actions import open_app
-                    open_app(display_name)
-                    return cls._build_result("OPEN_APPLICATION", f"Opened {display_name}.", dialogue_mgr)
+                    app_res = open_app(display_name)
+                    if app_res and not str(app_res).startswith("Opened"):
+                        res = cls._build_result("OPEN_APPLICATION", str(app_res), dialogue_mgr)
+                        res["status"] = "failed"
+                        return res
+                    res = cls._build_result("OPEN_APPLICATION", f"Opened {display_name}.", dialogue_mgr)
+                    res["app_name"] = display_name
+                    res["target"] = display_name
+                    res["application"] = display_name
+                    res["action"] = "open_application"
+                    if dialogue_mgr and hasattr(dialogue_mgr, "current_state"):
+                        try:
+                            cs = dialogue_mgr.current_state
+                            cs.active_application = display_name
+                            if display_name not in cs.active_applications:
+                                cs.active_applications.append(display_name)
+                            if "APPLICATION" not in cs.active_entity_set:
+                                cs.active_entity_set["APPLICATION"] = []
+                            if display_name not in cs.active_entity_set["APPLICATION"]:
+                                cs.active_entity_set["APPLICATION"].append(display_name)
+                            cs.primary_active_entity = {"value": display_name, "entity_type": "APPLICATION"}
+                            cs.last_action = {
+                                "intent": "OPEN_APPLICATION",
+                                "action": "open_application",
+                                "target": display_name,
+                                "command": user_input,
+                            }
+                        except Exception:
+                            pass
+                    return res
                 except Exception:
                     pass
+
+        if norm_low == "affirm_offer":
+            resp = "Alright! Just let me know when you'd like to see it—or say 'show me the info' or 'show the list'."
+            return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
 
         # ---------------------------------------------------------------------
         # 1b. Runtime Capabilities & Registry Query
@@ -480,7 +679,7 @@ class FastPathProcessor:
             "what is my current working directory", "what's my current working directory",
             "what is my working directory", "what's my working directory", "whats my working directory",
             "what directory am i in", "what folder am i in", "which directory am i in",
-            "where am i", "where am i located", "pwd", "current directory", "working directory",
+            "pwd", "current directory", "working directory",
             "get current directory", "show current directory", "tell me my current directory"
         ):
             curr_dir = os.getcwd()

@@ -811,3 +811,6 @@ def set_voice_profile_db(user_id, voice_id: str, voice_gender: str,
           f"tone={voice_tone}, rate={voice_rate}, volume={voice_volume}, provider={voice_provider}")
     return ok
 
+
+# Alias for backwards-compatibility with modules/ui/main_window.py
+get_recent_context_db = get_chat_history

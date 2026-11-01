@@ -18,7 +18,7 @@ import os
 from datetime import datetime
 from typing import Callable, Dict, Optional
 
-from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal, QEvent, QPointF, QRectF, pyqtProperty
+from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal, QEvent, QPoint, QPointF, QRectF, pyqtProperty
 from PyQt6.QtGui import QAction, QColor, QIcon, QPixmap, QPainter, QBrush, QRadialGradient, QPalette, QPen, QConicalGradient
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QVBoxLayout, QFrame, QLabel, QPushButton,
@@ -69,25 +69,10 @@ _NAV_ITEMS: list[tuple[str, str, str, type]] = [
 class AssistantOrb(QWidget):
     """Minimal animated orb in the topbar / sidebar that reflects current state.
 
-    Explicitly supports all 7 states: IDLE, LISTENING, THINKING, SPEAKING,
-    EXECUTING, ERROR, OFFLINE. Each state has a distinct visual signature.
+    Supports all 7 states: IDLE, LISTENING, THINKING, SPEAKING,
+    EXECUTING, ERROR, OFFLINE. Driven by Settings theme colour with
+    error (red) and offline (grey) states.
     """
-
-    _STATE_RGB = {
-        "idle": (0, 212, 255),
-        "listening": (0, 170, 255),
-        "thinking": (168, 85, 247),
-        "speaking": (0, 229, 107),
-        "executing": (255, 140, 0),
-        "working": (255, 140, 0),
-        "processing": (255, 140, 0),
-        "error": (255, 71, 87),
-        "failed": (255, 71, 87),
-        "offline": (74, 112, 128),
-        "paused": (74, 112, 128),
-        "muted": (74, 112, 128),
-        "disabled": (74, 112, 128),
-    }
 
     def __init__(self, size: int = 14, parent=None):
         super().__init__(parent)
@@ -96,9 +81,6 @@ class AssistantOrb(QWidget):
         self._pulse = 0.0
         self._last_err_flash = 0.0
         self.setFixedSize(size, size)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(50)
 
     def set_state(self, state: str):
         s = (state or "idle").lower()
@@ -107,14 +89,22 @@ class AssistantOrb(QWidget):
         self._state = s
         self.update()
 
-    def _tick(self):
-        self._pulse = (self._pulse + 0.14) % (2 * 3.14159)
+    def sync_tick(self, master_time: float):
+        """Driven exclusively by the master animation clock — no per-widget timer."""
+        self._pulse = (master_time * 2.8) % (2 * 3.14159)
         self.update()
 
     def paintEvent(self, ev):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r, g, b = self._STATE_RGB.get(self._state, self._STATE_RGB["idle"])
+        is_error = self._state in ("error", "failed")
+        is_offline = self._state in ("offline", "paused", "muted", "disabled")
+        if is_error:
+            r, g, b = (255, 71, 87)
+        elif is_offline:
+            r, g, b = (110, 125, 135)
+        else:
+            r, g, b = hex_to_rgb(C.ACC)
         w = float(self.width())
         h = float(self.height())
         cx, cy = w / 2.0, h / 2.0
@@ -133,10 +123,10 @@ class AssistantOrb(QWidget):
                 halo_alpha = 0.25 + 0.35 * err_beat
             else:
                 halo_alpha = 0.10 + 0.08 * (0.5 + 0.5 * math_sin(self._pulse * 0.8))
-            halo_r = w * (1.15 if not active else 1.35)
-            gr = QRadialGradient(cx, cy, halo_r, cx, cy, w * 0.30)
-            gr.setColorAt(0.0, QColor(r, g, b, int(220 * halo_alpha)))
-            gr.setColorAt(0.55, QColor(r, g, b, int(70 * halo_alpha)))
+            halo_r = min(cx, cy) * 0.95
+            gr = QRadialGradient(cx, cy, halo_r, cx, cy, halo_r * 0.25)
+            gr.setColorAt(0.0, QColor(r, g, b, int(200 * halo_alpha)))
+            gr.setColorAt(0.55, QColor(r, g, b, int(60 * halo_alpha)))
             gr.setColorAt(1.0, QColor(r, g, b, 0))
             p.setBrush(QBrush(gr))
             p.setPen(Qt.PenStyle.NoPen)
@@ -148,7 +138,7 @@ class AssistantOrb(QWidget):
             p.translate(cx, cy)
             speed = 2.0 if self._state == "thinking" else 4.5
             p.rotate(math.degrees(self._pulse * speed))
-            rr = w * 0.44
+            rr = min(cx, cy) * 0.78
             arc_g = QConicalGradient(0.0, 0.0, 0.0)
             arc_g.setColorAt(0.0, QColor(r, g, b, 250))
             arc_g.setColorAt(0.35, QColor(r, g, b, 40))
@@ -162,8 +152,9 @@ class AssistantOrb(QWidget):
             p.restore()
 
         # Inner core orb
-        cx2, cy2 = cx - w * 0.08, cy - w * 0.08
-        gr = QRadialGradient(cx2, cy2, w * 0.42, cx, cy, w * 0.36)
+        cx2, cy2 = cx - w * 0.06, cy - w * 0.06
+        inner = min(cx, cy) * 0.60
+        gr = QRadialGradient(cx2, cy2, inner * 1.3, cx, cy, inner * 0.9)
         if is_offline:
             gr.setColorAt(0.0, QColor(110, 140, 155, 255))
             gr.setColorAt(0.6, QColor(64, 92, 106, 255))
@@ -175,7 +166,6 @@ class AssistantOrb(QWidget):
         p.setBrush(QBrush(gr))
         border_a = 180 if not is_offline else 110
         p.setPen(QColor(r, g, b, border_a))
-        inner = w * 0.28
         p.drawEllipse(QPointF(cx, cy), inner, inner)
 
         # Specular highlight
@@ -263,14 +253,14 @@ class Sidebar(QFrame):
         self._root_layout = QVBoxLayout(self)
         bp = SidebarSize.BRAND_PAD
         self._root_layout.setContentsMargins(bp - 2, bp, bp - 2, bp)
-        self._root_layout.setSpacing(Spacing.SM)
+        self._root_layout.setSpacing(Spacing.XS)
 
         # Brand / App header
-        brand_row = QHBoxLayout()
-        brand_row.setSpacing(Spacing.SM)
-        brand_row.setContentsMargins(2, 0, 0, 0)
+        self._brand_row = QHBoxLayout()
+        self._brand_row.setSpacing(Spacing.SM)
+        self._brand_row.setContentsMargins(2, 0, 0, 0)
         self._logo_orb = AssistantOrb(26)
-        brand_row.addWidget(self._logo_orb, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._brand_row.addWidget(self._logo_orb, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._brand_text_wrap = QWidget()
         brand_col = QVBoxLayout(self._brand_text_wrap)
@@ -278,14 +268,14 @@ class Sidebar(QFrame):
         brand_col.setContentsMargins(0, 0, 0, 0)
         self._app_name = QLabel("Smart Assistant")
         self._app_name.setStyleSheet(
-            f"font-weight: 800; font-size: 15px; letter-spacing: 2.0px; color: {C.TEXT};"
+            f"font-weight: 800; font-size: 13px; letter-spacing: 0.2px; color: {C.TEXT};"
         )
         self._app_sub = QLabel("Intelligent Assistant")
         self._app_sub.setProperty("class", "Caption")
         self._app_sub.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px;")
         brand_col.addWidget(self._app_name)
         brand_col.addWidget(self._app_sub)
-        brand_row.addWidget(self._brand_text_wrap, 1)
+        self._brand_row.addWidget(self._brand_text_wrap, 1)
 
         # Collapse / Expand toggle button
         self._toggle_btn = QPushButton()
@@ -295,21 +285,21 @@ class Sidebar(QFrame):
         self._toggle_btn.setIcon(icon(ICONS.CHEVRON_LEFT, C.TEXT_MED, 13))
         self._toggle_btn.setToolTip("Collapse sidebar")
         self._toggle_btn.clicked.connect(lambda: self.toggle_collapse(animate=True))
-        brand_row.addWidget(self._toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._brand_row.addWidget(self._toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self._root_layout.addLayout(brand_row)
+        self._root_layout.addLayout(self._brand_row)
 
         self._sep1 = HLine(C.DIVIDER, 1)
-        self._root_layout.addSpacing(Spacing.SM)
+        self._root_layout.addSpacing(Spacing.XS)
         self._root_layout.addWidget(self._sep1)
-        self._root_layout.addSpacing(Spacing.SM)
+        self._root_layout.addSpacing(Spacing.XS)
 
         # Identity card
         self._identity_card = QFrame()
         self._identity_card.setProperty("class", "CardInner")
-        id_layout = QHBoxLayout(self._identity_card)
-        id_layout.setContentsMargins(Spacing.SM + 2, Spacing.SM + 2, Spacing.SM + 2, Spacing.SM + 2)
-        id_layout.setSpacing(Spacing.MD)
+        self._id_layout = QHBoxLayout(self._identity_card)
+        self._id_layout.setContentsMargins(Spacing.SM, Spacing.SM, Spacing.SM, Spacing.SM)
+        self._id_layout.setSpacing(Spacing.MD)
         self._avatar = QLabel()
         self._avatar.setFixedSize(38, 38)
         self._avatar.setStyleSheet(
@@ -319,7 +309,7 @@ class Sidebar(QFrame):
         )
         self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._avatar.setText("U")
-        id_layout.addWidget(self._avatar, 0, Qt.AlignmentFlag.AlignCenter)
+        self._id_layout.addWidget(self._avatar, 0, Qt.AlignmentFlag.AlignCenter)
 
         self._id_text_wrap = QWidget()
         id_col = QVBoxLayout(self._id_text_wrap)
@@ -332,10 +322,10 @@ class Sidebar(QFrame):
         self._asst_lbl.setStyleSheet(f"font-size: 11px; color: {C.TEXT_DIM};")
         id_col.addWidget(self._user_lbl)
         id_col.addWidget(self._asst_lbl)
-        id_layout.addWidget(self._id_text_wrap, 1)
+        self._id_layout.addWidget(self._id_text_wrap, 1)
 
         self._root_layout.addWidget(self._identity_card)
-        self._root_layout.addSpacing(Spacing.MD)
+        self._root_layout.addSpacing(Spacing.SM)
 
         self._nav_header = QLabel("NAVIGATION")
         self._nav_header.setProperty("class", "Caption")
@@ -343,18 +333,20 @@ class Sidebar(QFrame):
             f"letter-spacing: 1.6px; font-size: 10px; padding: 0 {Spacing.MD}px; color: {C.TEXT_DIM};"
         )
         self._root_layout.addWidget(self._nav_header)
-        self._root_layout.addSpacing(Spacing.SM)
+        self._root_layout.addSpacing(2)
 
         # Scrollable nav list
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setContentsMargins(0, 0, 0, 0)
         scroll_contents = QWidget()
+        scroll_contents.setStyleSheet("background: transparent;")
         self._nav_layout = QVBoxLayout(scroll_contents)
         self._nav_layout.setContentsMargins(0, 0, 0, 0)
-        self._nav_layout.setSpacing(3)
+        self._nav_layout.setSpacing(2)
 
         # Section accent colors for navigation
         self._nav_accents = {
@@ -372,14 +364,15 @@ class Sidebar(QFrame):
         for pid, label, icon_name, _cls in _NAV_ITEMS:
             btn = QPushButton()
             accent = self._nav_accents.get(pid, C.SEC_SETTINGS)
-            btn.setIcon(icon(icon_name, C.TEXT_MED, 16))
+            btn.setIcon(icon(icon_name, C.TEXT_MED, 18))
             btn.setIconSize(QSize(18, 18))
             btn.setText("   " + label)
             btn.setProperty("class", "NavButton")
             btn.setProperty("active", False)
             btn.setProperty("accent", accent)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setMinimumHeight(40)
+            btn.setFixedHeight(38)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(lambda _=False, p=pid: self.nav_changed.emit(p))
             self._buttons[pid] = btn
             self._nav_layout.addWidget(btn)
@@ -388,10 +381,15 @@ class Sidebar(QFrame):
         scroll.setWidget(scroll_contents)
         self._root_layout.addWidget(scroll, 1)
 
-        self._root_layout.addSpacing(Spacing.SM)
+        # Dedicated unobstructed dock slot for 3D ambient core / FloatingLauncher
+        self._dock_container = QWidget()
+        self._dock_container.setFixedHeight(54)
+        self._dock_container.setStyleSheet("background: transparent;")
+        self._root_layout.addWidget(self._dock_container)
+
         self._sep2 = HLine(C.DIVIDER, 1)
         self._root_layout.addWidget(self._sep2)
-        self._root_layout.addSpacing(Spacing.MD - 2)
+        self._root_layout.addSpacing(Spacing.XS)
 
         # Assistant state at bottom
         self._state_row = QHBoxLayout()
@@ -401,7 +399,9 @@ class Sidebar(QFrame):
         self._state_row.addWidget(self._state_orb, 0, Qt.AlignmentFlag.AlignVCenter)
         self._state_chip = StatusChip("IDLE", "idle")
         self._state_row.addWidget(self._state_chip, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._state_row.addStretch(1)
+        self._state_spacer = QWidget()
+        self._state_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._state_row.addWidget(self._state_spacer)
         self._root_layout.addLayout(self._state_row)
 
     # --- Collapse / Expand Interaction ---------------------------------------
@@ -418,12 +418,57 @@ class Sidebar(QFrame):
     def set_collapsed(self, collapsed: bool, animate: bool = True):
         self._collapsed = collapsed
         target_w = SidebarSize.WIDTH_COLLAPSED if collapsed else SidebarSize.WIDTH_EXPANDED
+        bp = SidebarSize.BRAND_PAD
+        accent = getattr(self, '_accent', C.ACC)
 
-        # Toggle visibility of labels and panels
-        self._brand_text_wrap.setVisible(not collapsed)
-        self._id_text_wrap.setVisible(not collapsed)
-        self._nav_header.setVisible(not collapsed)
-        self._state_chip.setVisible(not collapsed)
+        if collapsed:
+            self._root_layout.setContentsMargins(6, 12, 6, 12)
+            self._brand_row.setContentsMargins(0, 0, 0, 0)
+            self._brand_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._logo_orb.setVisible(False)
+            self._brand_text_wrap.setVisible(False)
+            self._toggle_btn.setVisible(True)
+            self._toggle_btn.setFixedSize(46, 36)
+            self._toggle_btn.setIcon(icon(ICONS.CHEVRON_RIGHT, accent, 14))
+            self._toggle_btn.setToolTip("Expand sidebar")
+
+            self._id_text_wrap.setVisible(False)
+            self._id_layout.setContentsMargins(0, 0, 0, 0)
+            self._id_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._identity_card.setStyleSheet("background: transparent; border: none;")
+            self._avatar.setFixedSize(38, 38)
+            self._avatar.setToolTip(f"User: {self._username}")
+
+            self._nav_header.setVisible(False)
+            self._state_chip.setVisible(False)
+            self._state_spacer.setVisible(False)
+            self._state_row.setContentsMargins(0, 0, 0, 0)
+            self._state_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._state_orb.setToolTip(f"Assistant: {self._current_state.upper()}")
+        else:
+            self._root_layout.setContentsMargins(bp - 2, bp, bp - 2, bp)
+            self._brand_row.setContentsMargins(2, 0, 0, 0)
+            self._brand_row.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self._logo_orb.setVisible(True)
+            self._brand_text_wrap.setVisible(True)
+            self._toggle_btn.setVisible(True)
+            self._toggle_btn.setFixedSize(30, 30)
+            self._toggle_btn.setIcon(icon(ICONS.CHEVRON_LEFT, C.TEXT_MED, 13))
+            self._toggle_btn.setToolTip("Collapse sidebar")
+
+            self._id_text_wrap.setVisible(True)
+            self._id_layout.setContentsMargins(Spacing.SM, Spacing.SM, Spacing.SM, Spacing.SM)
+            self._id_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self._identity_card.setStyleSheet("")
+            self._avatar.setFixedSize(38, 38)
+            self._avatar.setToolTip("")
+
+            self._nav_header.setVisible(True)
+            self._state_chip.setVisible(True)
+            self._state_spacer.setVisible(True)
+            self._state_row.setContentsMargins(4, 0, 4, 0)
+            self._state_row.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self._state_orb.setToolTip("")
 
         # Update button texts, tooltips, and padding
         for pid, label, icon_name, _cls in _NAV_ITEMS:
@@ -433,25 +478,23 @@ class Sidebar(QFrame):
                 if collapsed:
                     btn.setText("")
                     btn.setToolTip(label)
+                    btn.setFixedSize(48, 38)
+                    btn.setIconSize(QSize(20, 20))
+                    self._nav_layout.setAlignment(btn, Qt.AlignmentFlag.AlignHCenter)
                 else:
                     btn.setText("   " + label)
                     btn.setToolTip("")
+                    btn.setMinimumHeight(38)
+                    btn.setMaximumHeight(38)
+                    btn.setMinimumWidth(0)
+                    btn.setMaximumWidth(16777215)
+                    btn.setIconSize(QSize(18, 18))
+                    self._nav_layout.setAlignment(btn, Qt.AlignmentFlag.AlignLeft)
                 btn.style().unpolish(btn)
                 btn.style().polish(btn)
 
-        # Update toggle button visual
-        if collapsed:
-            self._toggle_btn.setIcon(icon(ICONS.CHEVRON_RIGHT, C.SEC_DASHBOARD, 13))
-            self._toggle_btn.setToolTip("Expand sidebar")
-            self._avatar.setToolTip(f"User: {self._username}")
-            self._state_orb.setToolTip(f"Assistant: {self._current_state.upper()}")
-            self._identity_card.setStyleSheet("background: transparent; border: none;")
-        else:
-            self._toggle_btn.setIcon(icon(ICONS.CHEVRON_LEFT, C.TEXT_MED, 13))
-            self._toggle_btn.setToolTip("Collapse sidebar")
-            self._avatar.setToolTip("")
-            self._state_orb.setToolTip("")
-            self._identity_card.setStyleSheet("")
+        if self._current:
+            self.set_current(self._current)
 
         # Persist preference asynchronously
         try:
@@ -478,35 +521,69 @@ class Sidebar(QFrame):
     # --- Public API ----------------------------------------------------------
     def set_current(self, page_id: str):
         self._current = page_id
+        accent = getattr(self, '_accent', C.ACC)
         for pid, btn in self._buttons.items():
             active = pid == page_id
             btn.setProperty("active", active)
-            accent = self._nav_accents.get(pid, C.SEC_SETTINGS)
+            item_accent = self._nav_accents.get(pid, accent)
             icon_name = _NAV_ITEMS[[p[0] for p in _NAV_ITEMS].index(pid)][2]
+            icon_sz = 20 if self._collapsed else 18
             if active:
-                btn.setIcon(icon(icon_name, accent, 16))
+                btn.setIcon(icon(icon_name, item_accent, icon_sz))
+                pad_css = "padding: 0px; text-align: center;" if self._collapsed else "padding: 8px 12px; text-align: left;"
                 btn.setStyleSheet(f"""
                     QPushButton.NavButton {{
-                        background: {rgba_str(accent, 0.12)};
-                        color: {accent};
-                        border: 1px solid {rgba_str(accent, 0.28)};
+                        background: {rgba_str(item_accent, 0.14)};
+                        color: {item_accent};
+                        border: 1px solid {rgba_str(item_accent, 0.32)};
                         font-weight: 600;
+                        border-radius: 8px;
+                        {pad_css}
                     }}
                     QPushButton.NavButton:hover {{
-                        background: {rgba_str(accent, 0.18)};
-                        border: 1px solid {rgba_str(accent, 0.38)};
-                        color: {accent};
+                        background: {rgba_str(item_accent, 0.20)};
+                        border: 1px solid {rgba_str(item_accent, 0.45)};
+                        color: {item_accent};
                     }}
                 """)
             else:
-                btn.setStyleSheet("")
-                btn.setIcon(icon(icon_name, C.TEXT_MED, 16))
+                btn.setIcon(icon(icon_name, C.TEXT_MED, icon_sz))
+                pad_css = "padding: 0px; text-align: center;" if self._collapsed else "padding: 8px 12px; text-align: left;"
+                btn.setStyleSheet(f"""
+                    QPushButton.NavButton {{
+                        background: transparent;
+                        color: {C.TEXT_MED};
+                        border: 1px solid transparent;
+                        border-radius: 8px;
+                        {pad_css}
+                    }}
+                    QPushButton.NavButton:hover {{
+                        background: {C.SIDEBAR_HOVER};
+                        color: {C.TEXT};
+                        border: 1px solid {C.BORDER};
+                    }}
+                """)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
+    def set_accent(self, accent: str):
+        self._accent = accent
+        for k in self._nav_accents:
+            self._nav_accents[k] = accent
+        self._avatar.setStyleSheet(
+            f"border-radius: 19px; background: {rgba_str(accent, 0.14)}; "
+            f"color: {accent}; font-weight: 700; font-size: 14px;"
+            f"border: 1px solid {rgba_str(accent, 0.28)};"
+        )
+        if hasattr(self, '_toggle_btn') and self._collapsed:
+            self._toggle_btn.setIcon(icon(ICONS.CHEVRON_RIGHT, accent, 14))
+        if self._current:
+            self.set_current(self._current)
+        self.update()
+
     def update_identity(self, username: str, assistant_name: str):
         self._username = username or "User"
-        self._assistant_name = assistant_name or "Friday"
+        self._assistant_name = assistant_name or "Assistant"
         self._user_lbl.setText(self._username)
         self._asst_lbl.setText(self._assistant_name)
         letter = self._username[0:1].upper()
@@ -523,6 +600,13 @@ class Sidebar(QFrame):
         self._logo_orb.set_state(s)
         if self._collapsed:
             self._state_orb.setToolTip(f"Assistant: {s.upper()}")
+
+    def _sync_orbs(self, master_time: float):
+        """Synchronize child orbs from the master animation clock."""
+        if hasattr(self, '_logo_orb') and self._logo_orb:
+            self._logo_orb.sync_tick(master_time)
+        if hasattr(self, '_state_orb') and self._state_orb:
+            self._state_orb.sync_tick(master_time)
 
 
 class Topbar(QFrame):
@@ -669,20 +753,12 @@ class StatusStrip(QFrame):
         self._state_orb.set_state(s)
         display = s.upper()
         self._state_txt.setText(display)
-        if s == "idle":
-            color = C.STATUS_ACTIVE
-        elif s in ("listening", "speaking"):
-            color = C.STATUS_SUCCESS
-        elif s == "thinking":
-            color = C.SEC_INTELLIGENCE
-        elif s in ("executing", "working", "processing"):
-            color = C.STATUS_WARNING
-        elif s in ("error", "failed"):
+        if s in ("error", "failed"):
             color = C.STATUS_ERROR
         elif s in ("offline", "paused", "muted", "disabled"):
             color = C.STATUS_OFFLINE
         else:
-            color = C.TEXT_MED
+            color = C.ACC
         self._state_txt.setStyleSheet(
             f"font-size: 11px; font-weight: 600; letter-spacing: 0.8px; color: {color};"
         )
@@ -698,6 +774,11 @@ class StatusStrip(QFrame):
         h, rem = divmod(up, 3600)
         m, sec = divmod(rem, 60)
         self._uptime_lbl.setText(f"Uptime {h:02d}:{m:02d}:{sec:02d}")
+
+    def _sync_orbs(self, master_time: float):
+        """Synchronize status orb from the master animation clock."""
+        if hasattr(self, '_state_orb') and self._state_orb:
+            self._state_orb.sync_tick(master_time)
 
 
 # =============================================================================
@@ -717,6 +798,7 @@ class DashboardMainWindow(QWidget):
     logout_requested = pyqtSignal()
     assistant_name_changed = pyqtSignal(str)
     accent_changed = pyqtSignal(str)
+    dock_geometry_changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -738,8 +820,13 @@ class DashboardMainWindow(QWidget):
             prefs = load_user_preferences() or {}
             cfg = AmbientConfig.from_dict(prefs)
             self.ambient_engine.apply_config(cfg)
+            if bool(prefs.get("reduced_motion")):
+                self.ambient_engine.set_reduced_motion(True)
         except Exception:
             pass
+
+        # Wire Master Animation Clock to synchronized dashboard components
+        self.ambient_engine.clock_tick.connect(self._on_master_clock_tick)
 
         self._build_ui()
         self._setup_polling()
@@ -747,20 +834,66 @@ class DashboardMainWindow(QWidget):
         # Navigate to default page
         QTimer.singleShot(0, lambda: self._on_nav("home"))
 
+    def _on_master_clock_tick(self, dt: float, master_time: float):
+        """Dispatches single clock tick to sidebar, status bar, and active page."""
+        if hasattr(self, 'sidebar') and hasattr(self.sidebar, '_sync_orbs'):
+            self.sidebar._sync_orbs(master_time)
+        if hasattr(self, 'status') and hasattr(self.status, '_sync_orbs'):
+            self.status._sync_orbs(master_time)
+        curr_page = self._page_map.get(self._current_page_id) if hasattr(self, '_page_map') else None
+        if curr_page and hasattr(curr_page, "sync_tick"):
+            try:
+                curr_page.sync_tick(master_time)
+            except Exception:
+                pass
+        try:
+            from .ds import dispatch_master_clock_tick
+            dispatch_master_clock_tick(dt, master_time)
+        except Exception:
+            pass
+
     def changeEvent(self, event):
-        """Handle window state changes (minimize/restore)"""
+        """Handle window state changes (minimize/restore) — pause master clock on minimize."""
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
             if self.windowState() & Qt.WindowState.WindowMinimized:
+                if hasattr(self, 'ambient_engine') and self.ambient_engine:
+                    self.ambient_engine.pause()
                 self.minimized.emit()
-            elif not self.windowState() & Qt.WindowState.WindowMinimized:
+            elif not (self.windowState() & Qt.WindowState.WindowMinimized):
+                if hasattr(self, 'ambient_engine') and self.ambient_engine:
+                    self.ambient_engine.resume()
                 self.restored.emit()
+
+    def event(self, ev):
+        """Throttle animation frame rate when window is unfocused."""
+        if ev.type() in (QEvent.Type.WindowActivate, QEvent.Type.WindowDeactivate, QEvent.Type.ActivationChange):
+            is_active = self.isActiveWindow()
+            if hasattr(self, 'ambient_engine') and self.ambient_engine:
+                self.ambient_engine.set_focus_active(is_active)
+        return super().event(ev)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, 'ambient_engine') and self.ambient_engine:
             self.ambient_engine.setGeometry(0, 0, self.width(), self.height())
             self.ambient_engine.lower()
+            self._update_dock_target()
+
+    def _update_dock_target(self):
+        """Map the geometry of the sidebar dock container to dynamic screen ratios."""
+        try:
+            if hasattr(self, 'sidebar') and hasattr(self.sidebar, '_dock_container'):
+                dc = self.sidebar._dock_container
+                pt = dc.mapTo(self, QPoint(int(dc.width() * 0.5), int(dc.height() * 0.5)))
+                w = max(1.0, float(self.width()))
+                h = max(1.0, float(self.height()))
+                rx = pt.x() / w
+                ry = pt.y() / h
+                if hasattr(self, 'ambient_engine') and self.ambient_engine:
+                    self.ambient_engine.set_dock_ratios(rx, ry)
+        except Exception:
+            pass
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
@@ -873,8 +1006,12 @@ class DashboardMainWindow(QWidget):
                 C.SEC_DASHBOARD = self._accent
                 if hasattr(self, 'ambient_engine') and self.ambient_engine:
                     self.ambient_engine.set_accent(self._accent)
-                if hasattr(self, 'sidebar') and hasattr(self.sidebar, '_nav_accents'):
-                    self.sidebar._nav_accents["home"] = self._accent
+                if hasattr(self, 'sidebar'):
+                    if hasattr(self.sidebar, 'set_accent'):
+                        self.sidebar.set_accent(self._accent)
+                    elif hasattr(self.sidebar, '_nav_accents'):
+                        for k in self.sidebar._nav_accents:
+                            self.sidebar._nav_accents[k] = self._accent
                 app = QApplication.instance()
                 if app:
                     app.setStyleSheet(dashboard_stylesheet(self._accent))
@@ -906,6 +1043,7 @@ class DashboardMainWindow(QWidget):
             return
         self._current_page_id = page_id
         if hasattr(self, 'ambient_engine') and self.ambient_engine:
+            self._update_dock_target()
             self.ambient_engine.set_page(page_id)
         self.sidebar.set_current(page_id)
         # Find nav label and accent
@@ -1027,6 +1165,33 @@ class DashboardMainWindow(QWidget):
                 QTimer.singleShot(0, self._refresh_state)
             assistant_core.register_state_listener(_cb)
             self._state_listener_registered = True
+
+            def _on_ui_connected_world():
+                QTimer.singleShot(0, lambda: self._on_nav("connected_world"))
+
+            def _on_ui_open_live_control():
+                def _do():
+                    self._on_nav("connected_world")
+                    cw_page = self._page_map.get("connected_world")
+                    if cw_page and hasattr(cw_page, "open_live_control"):
+                        cw_page.open_live_control()
+                QTimer.singleShot(0, _do)
+
+            def _on_ui_close_live_control():
+                def _do():
+                    cw_page = self._page_map.get("connected_world")
+                    if cw_page and hasattr(cw_page, "close_live_control"):
+                        cw_page.close_live_control()
+                QTimer.singleShot(0, _do)
+
+            assistant_core.register_ui_action_handler("open_connected_world", _on_ui_connected_world)
+            assistant_core.register_ui_action_handler("open_live_control", _on_ui_open_live_control)
+            assistant_core.register_ui_action_handler("close_live_control", _on_ui_close_live_control)
+            self._ui_handlers_registered = {
+                "open_connected_world": _on_ui_connected_world,
+                "open_live_control": _on_ui_open_live_control,
+                "close_live_control": _on_ui_close_live_control,
+            }
         except Exception:
             pass
         self._state_poller = DashboardPoller(get_assistant_state, interval_ms=400, parent=self)
@@ -1047,6 +1212,14 @@ class DashboardMainWindow(QWidget):
         # Stop identity timer
         if hasattr(self, '_identity_timer') and self._identity_timer:
             self._identity_timer.stop()
+
+        if hasattr(self, '_ui_handlers_registered'):
+            try:
+                from core.assistant_core import assistant_core
+                for act, fn in self._ui_handlers_registered.items():
+                    assistant_core.unregister_ui_action_handler(act, fn)
+            except Exception:
+                pass
 
         # Clean up workers in all pages
         for page in self._page_map.values():
@@ -1069,8 +1242,10 @@ class DashboardMainWindow(QWidget):
             self.status.update_state(data)
             state_str = str(data.get("state") or "idle").lower()
             self.sidebar.update_state(state_str)
+            prog = float(data.get("progress") or 0.0)
             if hasattr(self, 'ambient_engine') and self.ambient_engine:
                 self.ambient_engine.set_assistant_state(state_str)
+                self.ambient_engine.set_progress(prog)
             # Broadcast to pages
             for page in self._page_map.values():
                 if hasattr(page, "on_assistant_state"):
@@ -1089,7 +1264,10 @@ class DashboardMainWindow(QWidget):
     # --------------------------------------------------------------- identity
     def _apply_identity(self):
         ident = get_identity()
-        self.sidebar.update_identity(ident.get("username"), ident.get("assistant_name"))
+        asst_name = ident.get("assistant_name") or "Assistant"
+        self.sidebar.update_identity(ident.get("username"), asst_name)
+        if hasattr(self, 'ambient_engine') and self.ambient_engine:
+            self.ambient_engine.set_assistant_name(asst_name)
         # Broadcast identity to pages
         for page in self._page_map.values():
             if hasattr(page, "on_identity"):
@@ -1112,7 +1290,7 @@ class DashboardMainWindow(QWidget):
 
     def set_assistant_name(self, name: str):
         """Set assistant name (compatibility with pyqt_app.py)"""
-        clean_name = str(name).strip() if name else "Trevon"
+        clean_name = str(name).strip() if name else "Assistant"
         if getattr(self, '_assistant_name', None) == clean_name:
             return
         ident = get_identity()
@@ -1140,9 +1318,16 @@ class DashboardMainWindow(QWidget):
         self._refresh_state()
 
     def set_audio_level(self, level: float):
-        """Set audio level (compatibility with pyqt_app.py)"""
-        # Audio level is handled by state polling
-        pass
+        """Forward real audio amplitude into the spatial core and active page."""
+        lvl = max(0.0, min(1.0, float(level or 0.0)))
+        if hasattr(self, 'ambient_engine') and self.ambient_engine:
+            self.ambient_engine.set_audio_level(lvl)
+        curr_page = self._page_map.get(self._current_page_id) if hasattr(self, '_page_map') else None
+        if curr_page and hasattr(curr_page, "set_audio_level"):
+            try:
+                curr_page.set_audio_level(lvl)
+            except Exception:
+                pass
 
     def show_animated(self):
         """Show window with animation (compatibility with pyqt_app.py)"""
@@ -1263,3 +1448,15 @@ class DashboardMainWindow(QWidget):
     def telemetry_page(self):
         """Access telemetry page (compatibility with pyqt_app.py) - maps to intelligence page"""
         return self._page_map.get("intelligence")
+
+    def moveEvent(self, ev):
+        super().moveEvent(ev)
+        self.dock_geometry_changed.emit()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.dock_geometry_changed.emit()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.dock_geometry_changed.emit()

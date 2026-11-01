@@ -30,6 +30,7 @@ Architecture:
 """
 
 import logging
+import os
 import random
 import re
 from dataclasses import dataclass, field
@@ -97,10 +98,9 @@ class ConversationalResponseComposer:
     ]
 
     LAUNCH_CONFIRMATIONS = [
-        "Yep, opening {target}.",
-        "Opening {target} now.",
-        "Got it, bringing up {target}.",
-        "On it, launching {target}.",
+        "{target} is open.",
+        "There you go—{target} is open.",
+        "{target} is open and ready.",
     ]
 
     # Non-action intents that must NEVER receive a blind "Done." or "All set."
@@ -360,12 +360,16 @@ class ConversationalResponseComposer:
         # 11. Application / Website Launch Commands ("open YouTube")
         # ---------------------------------------------------------------------
         if self._is_launch_command(inp_clean, intent_name):
-            if (
-                act_res.get("status") in ("error", "failed")
-                or act_res.get("execution_success") is False
-                or act_res.get("success") is False
-                or act_res.get("verified") is False
-            ):
+            is_file_target = any(k in inp_clean.lower() for k in ("ppt", "presentation", "report", "document", "docx", "doc", "pdf", "file", "spreadsheet", "excel"))
+            file_exists = bool(act_res.get("filepath") and os.path.exists(act_res.get("filepath")))
+            is_verified_success = (
+                act_res.get("status") == "success"
+                and act_res.get("execution_success") is not False
+                and act_res.get("success") is not False
+                and act_res.get("verified") is not False
+                and (not is_file_target or file_exists)
+            )
+            if not is_verified_success:
                 composed_text = self._compose_failure_response(inp_clean, raw_resp, act_res)
                 return self._create_conversational_response(
                     decision="action_failure",
@@ -617,15 +621,25 @@ class ConversationalResponseComposer:
     def _compose_launch_response(self, inp: str, raw_resp: str, act_res: Optional[Dict[str, Any]] = None) -> str:
         target = None
         if act_res:
-            target = (
-                act_res.get("display_name")
-                or act_res.get("target")
-                or act_res.get("app_name")
-                or act_res.get("application")
-            )
-        if not target or str(target).strip().lower() in ("it", "app", "application", "the app", "the application"):
-            m = re.match(r'^(?:open|launch|start|bring up)\s+(?:the\s+)?(.+?)(?:\s+app|\s+application)?[\.!\?]?$', inp.strip(), re.IGNORECASE)
-            target = m.group(1).strip().rstrip('.?!') if m else "the requested application"
+            if act_res.get("filepath"):
+                target = os.path.basename(act_res["filepath"])
+            else:
+                target = (
+                    act_res.get("display_name")
+                    or act_res.get("target")
+                    or act_res.get("app_name")
+                    or act_res.get("application")
+                )
+        if not target or str(target).strip().lower() in ("it", "app", "application", "the app", "the application", "that ppt", "the ppt", "that presentation", "the presentation", "that report", "the report"):
+            if act_res and act_res.get("filepath"):
+                target = os.path.basename(act_res["filepath"])
+            else:
+                m = re.match(r'^(?:open|launch|start|bring up)\s+(?:the\s+)?(.+?)(?:\s+app|\s+application)?[\.!\?]?$', inp.strip(), re.IGNORECASE)
+                cand = m.group(1).strip().rstrip('.?!') if m else "the requested item"
+                if cand.lower() in ("that ppt", "the ppt", "that presentation", "the presentation", "that report", "the report", "that document", "the document"):
+                    target = "the document"
+                else:
+                    target = cand or "the requested item"
 
         target_str = str(target).strip()
         target_low = target_str.lower()
@@ -641,6 +655,9 @@ class ConversationalResponseComposer:
             target_str = "Terminal"
         elif "file explorer" in target_low or "explorer" in target_low:
             target_str = "File Explorer"
+        elif "." in target_str:
+            # Preserve filename extension capitalization accurately
+            target_str = target_str
         else:
             target_str = target_str.title()
 
@@ -664,6 +681,8 @@ class ConversationalResponseComposer:
         err_low = str(err).lower()
         logger.info(f"[STRUCTURED_FAILURE] type={err_type} reason='{err}' input='{inp}'")
         if err_type == "temporal_failure" or "already passed" in err_low or "past" in err_low:
+            return str(act_res.get("message") or act_res.get("speech_response") or err)
+        if act_res.get("intent") == "DEVICE_CONTROL" or act_res.get("action") == "remote_device" or any(w in inp.lower() for w in ("phone", "mobile", "redmi")):
             return str(act_res.get("message") or act_res.get("speech_response") or err)
         if err_type == "intent_failure":
             return "I couldn't identify what action to take for that request."
@@ -724,10 +743,19 @@ class ConversationalResponseComposer:
         return clean
 
     def _compose_conversational_explanation(self, raw_resp: str) -> str:
-        s = raw_resp
-        s = re.sub(r'here are the available options:?', "You've got a few options here:", s, flags=re.IGNORECASE)
-        s = re.sub(r'here is the information:?', "Here's what I found:", s, flags=re.IGNORECASE)
-        s = re.sub(r'the following (?:steps|options|items) are available:?', "You've got a few choices here:", s, flags=re.IGNORECASE)
+        s = raw_resp or ""
+        # 1. Strip robotic prefixes and status messages ("Done.", "Here is the information", "I have gathered...", "Certainly!")
+        s = re.sub(r'^(?:Done[.!?:,\s]+)+', '', s, flags=re.IGNORECASE)
+        s = re.sub(r'^(?:(?:Certainly|Of course|Absolutely|Great question|Sure thing|Sure)[!.,]?\s*)+', '', s, flags=re.IGNORECASE)
+        s = re.sub(r'^(?:(?:I(?: have|\x27ve)? (?:found and gathered|found|gathered|collected|retrieved)(?: the)? (?:information|details)(?: about [^.:\n]+)?|Here is the information(?: you requested)?|Here\x27s what I found|Here are the details)[:.]?\s*)+', '', s, flags=re.IGNORECASE)
+        s = re.sub(r'^(?:Done[.!?:,\s]+)+', '', s, flags=re.IGNORECASE)
+        # 2. Strip promotional encyclopedia endings ("You can learn more about ... via ...")
+        s = re.sub(r'\b(?:You can learn more about [^.]* via [^.]*\.?|Learn more (?:at|on|via) [^.]*\.?|Click here to learn more\.?)', '', s, flags=re.IGNORECASE)
+        # 3. Strip trailing robotic filler offers ("Let me know if you need anything else.")
+        s = re.sub(r'\b(?:Let me know if you need (?:anything else|any other help|further assistance|more details)[.!]?)$', '', s, flags=re.IGNORECASE)
+        s = s.strip()
+        if s and s[0].islower():
+            s = s[0].upper() + s[1:]
         return s
 
     def _get_contextual_follow_up(self, ctx: Dict[str, Any], user_id: Any) -> Optional[str]:

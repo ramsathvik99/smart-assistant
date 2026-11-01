@@ -392,6 +392,7 @@ _tts_state_lock   = threading.Lock()
 _active_sp_voice  = None               # active COM SpVoice object for instant purge
 _active_tts_text  = ""                 # text currently being spoken
 _last_interrupted_speech = None        # {'text': ..., 'timestamp': ...}
+_recent_spoken_phrases: list[tuple[float, str]] = []
 
 
 def get_speech_start_time() -> float:
@@ -399,6 +400,46 @@ def get_speech_start_time() -> float:
     if _tts_active.is_set():
         return _speech_start_time
     return 0.0
+
+
+def is_echo_of_assistant_speech(transcript: str, window_s: float = 6.0) -> bool:
+    """
+    Checks if the transcribed user utterance is an acoustic echo of the assistant's
+    own recent speech, preventing self-listening and duplicate command execution.
+    """
+    if not transcript or not transcript.strip():
+        return False
+    import re
+    t_now = time.monotonic()
+    t_clean = transcript.lower().strip()
+    t_norm = re.sub(r'[^a-z0-9\s]', '', t_clean)
+    if not t_norm:
+        return False
+
+    with _tts_state_lock:
+        # Check active speech first
+        if _active_tts_text:
+            act_norm = re.sub(r'[^a-z0-9\s]', '', _active_tts_text.lower())
+            if act_norm and (t_norm in act_norm or act_norm in t_norm):
+                return True
+
+        # Check recent spoken history within window_s
+        for sp_time, sp_text in reversed(_recent_spoken_phrases):
+            if t_now - sp_time > window_s:
+                continue
+            sp_norm = re.sub(r'[^a-z0-9\s]', '', sp_text.lower())
+            if not sp_norm:
+                continue
+            if t_norm == sp_norm or t_norm in sp_norm or sp_norm in t_norm:
+                return True
+            t_words = set(t_norm.split())
+            sp_words = set(sp_norm.split())
+            if t_words and sp_words:
+                overlap = len(t_words & sp_words) / len(t_words)
+                if overlap >= 0.75 and len(t_words) >= 3:
+                    return True
+
+    return False
 
 
 def _tts_worker():
@@ -444,6 +485,9 @@ def _tts_worker():
         with _tts_state_lock:
             global _active_tts_text
             _active_tts_text = text
+            _recent_spoken_phrases.append((time.monotonic(), text))
+            cutoff = time.monotonic() - 20.0
+            _recent_spoken_phrases[:] = [p for p in _recent_spoken_phrases if p[0] >= cutoff]
 
         _start_animation()
         global _speech_start_time
@@ -530,9 +574,12 @@ def _tts_worker():
             if not success and not _tts_interrupted.is_set():
                 print(f"[TTS DIAGNOSTIC] Both synthesis engines failed for text: {text[:60]!r}")
         finally:
-            duration = max(0.001, time.monotonic() - t_start)
-            ui_text = (meta.get("ui_text") or meta.get("text") or text) if isinstance(meta, dict) else text
             was_interrupted = bool(_tts_interrupted.is_set() or (locals().get("res") and getattr(locals()["res"], "interrupted", False)))
+            if was_interrupted and locals().get("res") and getattr(locals()["res"], "frame_count", 0) > 0:
+                duration = max(0.001, locals()["res"].frame_count / 24000.0)
+            else:
+                duration = max(0.001, time.monotonic() - t_start)
+            ui_text = (meta.get("ui_text") or meta.get("text") or text) if isinstance(meta, dict) else text
             metrics = {
                 "ui_text": ui_text,
                 "speech_text": text,
@@ -566,6 +613,9 @@ def _tts_worker():
                     pass
             with _tts_state_lock:
                 _active_tts_text = ""
+                _recent_spoken_phrases.append((time.monotonic(), text))
+                cutoff = time.monotonic() - 20.0
+                _recent_spoken_phrases[:] = [p for p in _recent_spoken_phrases if p[0] >= cutoff]
             _tts_active.clear()   # mark TTS as idle
             _stop_animation()
             try:
@@ -866,22 +916,25 @@ def speak(text, lang_hint='en', block=False, user_id=None):
         except Exception:
             pass
 
-    # Log to messages table if explicit user_id is provided
-    target_uid = user_id or CONFIG.get("CURRENT_USER_ID")
-    if target_uid and user_id is not None:
-        try:
-            add_history(target_uid, "assistant", text)
-        except Exception as e:
-            print(f"[DB LOG ERROR] {e}")
-
-    # Log to conversational memory
-    if _conv_memory_ok and current_user_command.strip():
-        try:
-            _store_interaction(current_user_command, text, user_id=user_id)
-        except Exception as _cm_log_err:
-            print(f"[CONV_MEMORY LOG ERROR] {_cm_log_err}")
-
+    # Enqueue speech immediately so synthesis starts without waiting on DB I/O
     _tts_queue.put((text, lang_hint))
+
+    # Log to messages table & conversational memory asynchronously
+    def _async_db_log():
+        target_uid = user_id or CONFIG.get("CURRENT_USER_ID")
+        if target_uid and user_id is not None:
+            try:
+                add_history(target_uid, "assistant", text)
+            except Exception as e:
+                print(f"[DB LOG ERROR] {e}")
+
+        if _conv_memory_ok and current_user_command.strip():
+            try:
+                _store_interaction(current_user_command, text, user_id=user_id)
+            except Exception as _cm_log_err:
+                print(f"[CONV_MEMORY LOG ERROR] {_cm_log_err}")
+
+    threading.Thread(target=_async_db_log, daemon=True, name="tts-db-logger").start()
 
     if block:
         wait_until_spoken()
@@ -919,6 +972,11 @@ def stop_speaking(interrupted: bool = False):
                     pass
             if _active_sp_voice is not None:
                 try:
+                    try:
+                        import pythoncom
+                        pythoncom.CoInitialize()
+                    except Exception:
+                        pass
                     # SVSFlagsAsync | SVSFPurgeBeforeSpeak (3) purges active hardware buffer
                     _active_sp_voice.Speak("", 3)
                 except Exception:

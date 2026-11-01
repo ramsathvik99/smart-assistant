@@ -76,24 +76,20 @@ class ThemeAdapter:
         self._target_rgb = hex_to_rgb(hex_code)
 
     def set_page_accent(self, page_id: str):
-        pid = (page_id or "home").lower()
-        if pid in self.PAGE_COLORS:
-            self._target_rgb = self.PAGE_COLORS[pid]
-        else:
-            self._target_rgb = hex_to_rgb(self._accent_hex)
+        # Single theme color drives everything across all pages
+        self._target_rgb = hex_to_rgb(self._accent_hex)
 
     def set_assistant_state(self, state: str):
         s = (state or "idle").lower()
-        if s in self.STATE_COLORS:
-            self._state_rgb = self.STATE_COLORS[s]
-            # IDLE has low influence (accent dominates), active states have high influence
-            if s == "idle":
-                self._target_state_influence = 0.2
-            elif s in ("error", "warning", "success"):
-                self._target_state_influence = 0.85
-            else:
-                self._target_state_influence = 0.65
+        if s in ("error", "failed"):
+            self._state_rgb = (1.0, 0.28, 0.34)  # Crimson Red
+            self._target_state_influence = 1.0
+        elif s in ("offline", "paused", "muted", "disabled"):
+            self._state_rgb = (0.35, 0.44, 0.50)  # Slate Grey
+            self._target_state_influence = 1.0
         else:
+            # Idle, listening, thinking, speaking, executing ALL use the single theme color!
+            self._state_rgb = hex_to_rgb(self._accent_hex)
             self._target_state_influence = 0.0
 
     def update(self, dt: float):

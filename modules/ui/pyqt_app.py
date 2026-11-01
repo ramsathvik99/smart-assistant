@@ -24,6 +24,11 @@ import os
 import time
 import threading
 from typing import Any, Optional, Dict, List, Tuple, Callable
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+except Exception:
+    pass
+
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu
 )
@@ -63,6 +68,7 @@ class UIBridge(QObject):
     voice_state_sig = pyqtSignal(str, str)
     voice_level_sig = pyqtSignal(float)
     voice_transcript_sig = pyqtSignal(str)
+    ui_action_sig = pyqtSignal(str)
 
 
 class AssistantApp(QObject):
@@ -80,8 +86,19 @@ class AssistantApp(QObject):
         self._bridge.voice_state_sig.connect(self._handle_voice_state)
         self._bridge.voice_level_sig.connect(self._on_audio_level)
         self._bridge.voice_transcript_sig.connect(self._handle_voice_transcript)
+        self._bridge.ui_action_sig.connect(self._handle_ui_action)
 
-        # Wire canonical VoiceLifecycleManager to UIBridge safely across threads
+        # Wire UI presentation actions to AssistantCore
+        try:
+            from core.assistant_core import assistant_core
+            assistant_core.register_ui_action_handler("open_dashboard", lambda: self._bridge.ui_action_sig.emit("open_dashboard"))
+            assistant_core.register_ui_action_handler("open_wireless_pair", lambda: self._bridge.ui_action_sig.emit("open_wireless_pair"))
+            assistant_core.register_ui_action_handler("open_connected_world", lambda: self._bridge.ui_action_sig.emit("open_connected_world"))
+            from skills.device_location.desktop_map_window import get_desktop_map_controller
+            assistant_core.register_ui_action_handler("open_map", lambda: get_desktop_map_controller().show_map())
+            get_desktop_map_controller()._ensure_bridge()
+        except Exception as e:
+            print(f"[UI] UI action handler registration notice: {e}")
         try:
             from core.voice_lifecycle import get_voice_lifecycle
             _vl = get_voice_lifecycle()
@@ -484,7 +501,9 @@ class AssistantApp(QObject):
         self._win.logout_requested.connect(self.logout)
         self._win.assistant_name_changed.connect(self._on_assistant_name_updated)
         self._win.accent_changed.connect(self._on_accent_changed)
-        self._win.minimized.connect(lambda: self._launcher.set_state("idle"))
+        self._win.dock_geometry_changed.connect(lambda: self._launcher.dock_to_window(self._win) if (self._launcher and self._win.isVisible()) else None)
+        self._win.minimized.connect(lambda: (self._launcher.set_state("idle"), self._launcher.undock() if self._launcher else None))
+        self._win.restored.connect(lambda: self._launcher.dock_to_window(self._win) if self._launcher else None)
         # Load recent chat history in background
         self._load_history()
 
@@ -546,7 +565,9 @@ class AssistantApp(QObject):
         # Register UI presentation handlers with canonical AssistantCore
         try:
             from core.assistant_core import assistant_core
-            assistant_core.register_ui_action_handler("open_dashboard", self.open_dashboard)
+            assistant_core.register_ui_action_handler("open_dashboard", lambda: self._bridge.ui_action_sig.emit("open_dashboard"))
+            assistant_core.register_ui_action_handler("open_wireless_pair", lambda: self._bridge.ui_action_sig.emit("open_wireless_pair"))
+            assistant_core.register_ui_action_handler("open_connected_world", lambda: self._bridge.ui_action_sig.emit("open_connected_world"))
 
             # Register Ephemeral Visual Response Surface listener
             def _on_visual_event(vr_data):
@@ -684,20 +705,60 @@ class AssistantApp(QObject):
         if self._launcher:
             self._launcher.raise_()
 
+    def _handle_ui_action(self, action: str):
+        """Handle presentation actions routed from AssistantCore on the Qt main GUI thread."""
+        try:
+            if action == "open_wireless_pair":
+                self.open_wireless_pair_dialog()
+            elif action == "open_connected_world":
+                self.open_connected_world()
+            elif action == "open_dashboard":
+                self.open_dashboard()
+        except Exception as e:
+            print(f"[UI] Error handling ui_action '{action}': {e}")
+
+    def open_wireless_pair_dialog(self):
+        """Open the Wireless Pairing dialog safely on the Qt GUI thread."""
+        try:
+            from modules.ui.dashboard.pages.connected_world_page import WirelessPairDialog
+            parent_widget = self._win if (self._win and self._win.isVisible()) else None
+            dlg = WirelessPairDialog(parent_widget)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            self._wireless_pair_dialog = dlg
+        except Exception as e:
+            print(f"[UI] Error opening wireless pair dialog: {e}")
+
+    def open_connected_world(self):
+        """Navigate to the Connected World page on the Assistant Dashboard."""
+        if not self._win:
+            return
+        self._win._on_nav("connected_world")
+        if self._win.isMinimized():
+            self._win.showNormal()
+        self._win.show_animated()
+        self._win.raise_()
+        self._win.activateWindow()
+        if self._launcher:
+            self._launcher.raise_()
+
     def _toggle_main_window(self):
         if self._win:
             if self._win.isVisible():
                 self._win.hide()
+                if self._launcher:
+                    self._launcher.undock()
             else:
                 self._win.show_animated()
-            if self._launcher:
-                self._launcher.raise_()
+                if self._launcher:
+                    self._launcher.dock_to_window(self._win)
 
     def _show_main_window(self):
         if self._win:
             self._win.show_on_chat()
             if self._launcher:
-                self._launcher.raise_()
+                self._launcher.dock_to_window(self._win)
 
     def _on_task_cancel_requested(self):
         self._toasts.show("Task cancellation requested", "warning", 2000)
@@ -892,28 +953,54 @@ class AssistantApp(QObject):
                     self._launcher.show_visual_response(vr)
             except Exception as e:
                 self._toasts.show(f"Devices notice: {e}", "warning", 3000)
+        elif action in ("connect_mobile", "connect_phone"):
+            try:
+                from skills.device_management.device_controller import get_device_controller
+                controller = get_device_controller()
+                target_uid = self._user_id or 1
+                res = controller.connect_mobile(user_id=target_uid)
+                self._toasts.show(res.get("message", "Connecting mobile..."), "info", 3500)
+                from core.visual_response import VisualResponse
+                if res.get("success"):
+                    headers = ["Property", "Value"]
+                    rows = [
+                        ["Model", res.get("model", "Android Device")],
+                        ["Platform Mode", "GADS Platform Session" if res.get("session_type") == "gads_daemon" else "Direct ADB"],
+                        ["Android Version", str(res.get("android_version", "N/A"))],
+                        ["Battery", f"{res.get('battery')}%" if res.get('battery') is not None else "Unknown"],
+                        ["Serial", str(res.get("serial", ""))],
+                    ]
+                    vr = VisualResponse.for_table(headers, rows, title="Mobile Connected", description=res.get("message", ""))
+                else:
+                    vr = VisualResponse.for_text(res.get("message", "Failed to connect mobile phone."), title="Mobile Connection")
+                if self._launcher:
+                    self._launcher.show_visual_response(vr)
+            except Exception as e:
+                self._toasts.show(f"Mobile connection error: {e}", "warning", 3000)
         elif action == "pair_device":
             try:
                 from skills.device_management.device_controller import get_device_controller
                 controller = get_device_controller()
                 target_uid = self._user_id or 1
-                res = controller.pair_device(user_id=target_uid)
+                res = controller.connect_mobile(user_id=target_uid)
+                self._toasts.show(res.get("message", "Connecting mobile..."), "info", 3500)
+                from core.visual_response import VisualResponse
                 if res.get("success"):
-                    from core.visual_response import VisualResponse
-                    code = res.get("code")
-                    ip = res.get("gateway_host")
-                    port = res.get("gateway_port")
-                    vr = VisualResponse.for_pairing_code(
-                        code=code,
-                        description=f"Gateway: {ip}:{port} • Enter this 6-digit code in Assistant Connect on your phone (valid 5 min)."
-                    )
-                    if self._launcher:
-                        self._launcher.show_visual_response(vr)
-                    self._toasts.show(f"Pairing code: {code}", "info", 4000)
+                    headers = ["Property", "Value"]
+                    rows = [
+                        ["Model", res.get("model", "Android Device")],
+                        ["Platform Mode", "GADS Platform Session" if res.get("session_type") == "gads_daemon" else "Direct ADB"],
+                        ["Android Version", str(res.get("android_version", "N/A"))],
+                        ["Battery", f"{res.get('battery')}%" if res.get('battery') is not None else "Unknown"],
+                        ["Serial", str(res.get("serial", ""))],
+                    ]
+                    vr = VisualResponse.for_table(headers, rows, title="Mobile Connected", description=res.get("message", ""))
                 else:
-                    self._toasts.show(f"Pairing notice: {res.get('message')}", "warning", 3000)
+                    vr = VisualResponse.for_text(res.get("message", "Failed to connect mobile phone."), title="Mobile Connection")
+                if self._launcher:
+                    self._launcher.show_visual_response(vr)
             except Exception as e:
-                self._toasts.show(f"Pair device notice: {e}", "warning", 3000)
+                self._toasts.show(f"Mobile pairing error: {e}", "warning", 3000)
         elif action in ("device_status", "phone_status"):
             try:
                 from skills.device_management.device_controller import get_device_controller

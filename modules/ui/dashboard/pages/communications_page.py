@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 
 from ..ds import (
     C, F, Spacing, Radius, ICONS, icon, icon_pixmap,
-    HLine, VLine, Card, StatusChip, SectionHeader,
+    HLine, VLine, Card, StatusChip, SectionHeader, StatNumeral,
     LoadingState, EmptyState, ErrorState, get_contrast_color,
 )
 from ..service_adapters import (
@@ -137,7 +137,7 @@ class CommunicationsPage(QWidget):
         root.setSpacing(Spacing.LG)
 
         head = QHBoxLayout(); head.setSpacing(Spacing.MD)
-        sh = SectionHeader("Communications", "Inbox, sent messages, drafts, and AI-assisted composing", accent=C.SEC_COMMUNICATIONS)
+        sh = SectionHeader("Communications", "Inbox, sent messages, drafts, and AI-assisted composing", accent=C.ACC)
         head.addWidget(sh, 1); head.addStretch(1)
         self._folder_combo = QComboBox()
         self._folder_combo.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -163,7 +163,7 @@ class CommunicationsPage(QWidget):
 
         self._compose_btn = QPushButton("  Compose")
         self._compose_btn.setObjectName("PrimaryBtn")
-        self._compose_btn.setIcon(icon(ICONS.PLUS, get_contrast_color(C.SEC_COMMUNICATIONS), 14))
+        self._compose_btn.setIcon(icon(ICONS.PLUS, get_contrast_color(C.ACC), 14))
         self._compose_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._compose_btn.clicked.connect(self._open_compose)
         head.addWidget(self._compose_btn)
@@ -171,33 +171,64 @@ class CommunicationsPage(QWidget):
         head_w = QWidget(); head_w.setLayout(head)
         root.addWidget(head_w)
 
-        # Status card
-        cred_card = Card(title="Email Connection", accent=C.SEC_COMMUNICATIONS)
-        cred_row = QHBoxLayout(); cred_row.setSpacing(Spacing.MD)
+        # Open metrics & connection strip
+        strip = QFrame()
+        strip.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                border-radius: {Radius.MD}px;
+            }}
+        """)
+        sl = QHBoxLayout(strip)
+        sl.setContentsMargins(Spacing.LG, Spacing.MD, Spacing.LG, Spacing.MD)
+        sl.setSpacing(Spacing.XL)
+        
+        self._s_unread = StatNumeral("Unread Messages", "0", accent=C.ACC)
+        self._s_total = StatNumeral("Total in Folder", "0", accent=C.ACC)
+        self._s_drafts = StatNumeral("Drafts", "0", accent=C.ACC)
+        sl.addWidget(self._s_unread)
+        sl.addWidget(self._s_total)
+        sl.addWidget(self._s_drafts)
+        sl.addStretch(1)
+
+        conn_box = QVBoxLayout()
+        conn_box.setSpacing(4)
+        conn_top = QHBoxLayout()
+        conn_top.setSpacing(Spacing.SM)
         self._cred_status = StatusChip("CHECKING", "offline")
-        cred_row.addWidget(self._cred_status)
+        conn_top.addWidget(self._cred_status)
         self._cred_lbl = QLabel("Checking email credentials…")
-        self._cred_lbl.setStyleSheet(f"color: {C.TEXT_MED};")
-        cred_row.addWidget(self._cred_lbl); cred_row.addStretch(1)
+        self._cred_lbl.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 11px;")
+        conn_top.addWidget(self._cred_lbl)
+        conn_box.addLayout(conn_top)
+
         self._cred_cta = QPushButton("Set up email"); self._cred_cta.setObjectName("GhostBtn")
         self._cred_cta.setVisible(False)
         self._cred_cta.clicked.connect(self._setup_email)
-        cred_row.addWidget(self._cred_cta)
-        cred_card.body.addLayout(cred_row)
-        root.addWidget(cred_card)
+        conn_box.addWidget(self._cred_cta)
+        sl.addLayout(conn_box)
+        root.addWidget(strip)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
 
         # --- List ---
-        list_card = QFrame(); list_card.setProperty("class", "CardPanel")
+        list_card = QFrame()
+        list_card.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                border-radius: {Radius.MD}px;
+            }}
+        """)
         lv = QVBoxLayout(list_card); lv.setContentsMargins(Spacing.SM, Spacing.SM, Spacing.SM, Spacing.SM)
         lv.setSpacing(Spacing.SM)
         self._loading_l = LoadingState("Loading messages…")
         lv.addWidget(self._loading_l)
         self._empty_l = EmptyState(ICONS.COMMUNICATIONS, "No messages to display",
                                     "This folder is empty. Compose a new message to get started.",
-                                    accent=C.SEC_COMMUNICATIONS)
+                                    accent=C.ACC)
         self._empty_l.setVisible(False)
         lv.addWidget(self._empty_l)
         self._table = QTableWidget(0, 5)
@@ -219,7 +250,14 @@ class CommunicationsPage(QWidget):
         splitter.addWidget(list_card)
 
         # --- Reader ---
-        reader_card = QFrame(); reader_card.setProperty("class", "CardPanel")
+        reader_card = QFrame()
+        reader_card.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                border-radius: {Radius.MD}px;
+            }}
+        """)
         rv = QVBoxLayout(reader_card); rv.setContentsMargins(Spacing.MD, Spacing.MD, Spacing.MD, Spacing.MD)
         rv.setSpacing(Spacing.SM)
 
@@ -337,9 +375,12 @@ class CommunicationsPage(QWidget):
             self._table.setRowCount(0)
             return
         self._table.setRowCount(len(emails))
+        unread_cnt = 0
         for i, em in enumerate(emails):
             # email dicts may vary — try sensible keys
             unread = bool(em.get("unread") if "unread" in em else (i < 2))
+            if unread:
+                unread_cnt += 1
             sender = str(em.get("sender") or em.get("from") or "Unknown Sender")
             subject = str(em.get("subject") or "No Subject")
             preview = str((em.get("body") or em.get("preview") or "…")[:80])
@@ -353,10 +394,14 @@ class CommunicationsPage(QWidget):
             ]
             for j, it in enumerate(items):
                 if j == 0:
-                    it.setForeground(QColor(C.SEC_COMMUNICATIONS if unread else C.TEXT_DIM))
+                    it.setForeground(QColor(C.ACC if unread else C.TEXT_DIM))
                 if unread:
                     f = it.font(); f.setBold(True); it.setFont(f)
                 self._table.setItem(i, j, it)
+        # Update metrics
+        self._s_unread.set_value(str(unread_cnt))
+        self._s_total.set_value(str(len(emails)))
+        self._s_drafts.set_value(str(len(self._drafts)))
         # Cache raw list
         if self._current_folder == "inbox": self._inbox = emails
         if self._current_folder == "sent": self._sent = emails

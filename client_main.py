@@ -42,6 +42,10 @@ def main():
     print(f"[CLIENT] APP_ENV = {os.getenv('APP_ENV', 'development')}")
     print(f"[CLIENT] API_BASE_URL = {os.getenv('API_BASE_URL', '(default)')}")
 
+    try:
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+    except Exception:
+        pass
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import Qt
 

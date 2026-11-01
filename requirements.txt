@@ -23,7 +23,9 @@ python-dotenv
 pyaudio
 yt-dlp
 PyQt6
+PyQt6-WebEngine>=6.11.0
 qtawesome
 faster-whisper
 onnxruntime
 soundfile
+playwright

@@ -297,7 +297,19 @@ def _evaluate_context_relevance(
     ]
     has_artifact_ref = any(bool(re.search(pat, inp_low)) for pat in artifact_ref_patterns)
 
-    active_art = getattr(dialogue_mgr.current_state, "active_artifact", None) or {}
+    raw_active_art = getattr(dialogue_mgr.current_state, "active_artifact", None)
+    if isinstance(raw_active_art, str):
+        active_art = {
+            "filename": os.path.basename(raw_active_art),
+            "filepath": raw_active_art,
+            "path": raw_active_art,
+            "topic": os.path.splitext(os.path.basename(raw_active_art))[0].replace("_", " ")
+        }
+    elif isinstance(raw_active_art, dict):
+        active_art = raw_active_art
+    else:
+        active_art = {}
+
     art_fn = (active_art.get("filename") or "").lower()
     art_topic = (active_art.get("topic") or "").lower()
     mentions_art = (
@@ -316,7 +328,7 @@ def _evaluate_context_relevance(
     prev_topic = (
         dialogue_mgr.current_state.session_context.get("topic_lock")
         or (dialogue_mgr.current_state.current_goal or {}).get("topic")
-        or (dialogue_mgr.current_state.active_artifact or {}).get("topic")
+        or active_art.get("topic")
         or ""
     )
 
@@ -467,6 +479,15 @@ def _brain_process_core(
     # Check if query can be answered immediately with 0 reasoning overhead
     # (greetings, current directory, app status, editing status, simple utilities)
     # Only applies when no pending action, confirmation, or paused goal exists.
+    # Step 1.1a — Process dialogue turn & reference resolution
+    turn_data = dialogue_mgr.process_turn(user_input)
+    enriched_input = turn_data.get("enriched_input", user_input)
+    reference_resolved = turn_data.get("reference_resolved", False)
+    routing_input = turn_data.get("resolved_input", user_input) if reference_resolved else user_input
+    clean_low = user_input.strip().lower()
+
+    # ------------------------------------------------------------------
+    # Step 1.0b — DETERMINISTIC FAST PATH PRE-CHECK
     # ------------------------------------------------------------------
     _has_pending = bool(
         getattr(dialogue_mgr.current_state, "pending_action", None)
@@ -474,31 +495,56 @@ def _brain_process_core(
         or (dialogue_mgr.current_state.goal_status == "WAITING_FOR_USER")
     )
     if not _has_pending:
-        _fast_res = FastPathProcessor.try_fast_path(user_input, str(user_id), dialogue_mgr)
+        _fast_res = FastPathProcessor.try_fast_path(routing_input, str(user_id), dialogue_mgr)
         if _fast_res is not None:
+            _intent = _fast_res.get("intent", "GENERAL_CONVERSATION")
+            # If fast path executed an OS-mutating action, perform canonical outcome verification
+            if _intent in ("OPEN_APPLICATION", "DEVICE_CONTROL", "MUSIC", "OS_OPERATION") or _fast_res.get("action"):
+                target_file = None
+                categories = select_relevant_categories(_intent, routing_input, target_file)
+                if categories:
+                    after_snap = observe_environment(user_id=user_id, relevant_categories=categories, target_file=target_file)
+                    observations = after_snap.to_dict()
+                else:
+                    after_snap = EnvironmentSnapshot(observed_categories=[])
+                    observations = {}
+                _fast_res = _verify_action_result(
+                    _fast_res, _intent, observations,
+                    after_snap=after_snap, user_id=user_id, command_input=routing_input
+                )
+                _fast_res["observations"] = observations
+            _resp_text = _fast_res.get("response", "")
+            dialogue_mgr.record_response(_resp_text)
+            _target_status = "FAILED" if _fast_res.get("status") in ("failed", "error") or _fast_res.get("verified") is False else ("WAITING_FOR_USER" if _fast_res.get("status") == "waiting_for_user" else "COMPLETED")
+            try:
+                dialogue_mgr.post_turn_update(
+                    execution_result=_fast_res,
+                    intents=[_intent],
+                    goal=None,
+                    subgoals=None,
+                    plan=None,
+                    goal_status=_target_status,
+                )
+            except Exception:
+                pass
+            _is_verified = _fast_res.get("verified", True)
+            _verif_src = _fast_res.get("verification_source", "deterministic_fast_path")
             outcome = GoalOutcome(
                 goal_id=str(uuid.uuid4())[:8],
                 user_id=str(user_id),
                 user_request=user_input,
                 attempted_action=user_input,
-                actual_outcome="COMPLETED",
-                success=True,
-                summary=_fast_res.get("response", ""),
+                actual_outcome=_target_status,
+                success=_is_verified and _target_status != "FAILED",
+                summary=_resp_text,
                 timestamp=datetime.now().isoformat(),
                 results=_fast_res,
-                verified=True,
-                verification_source="deterministic_fast_path",
+                verified=_is_verified,
+                verification_source=_verif_src,
             )
             dialogue_mgr.record_goal_outcome(outcome)
             _fast_res["goal_outcome"] = outcome.to_dict()
             return _fast_res
-
-    turn_data = dialogue_mgr.process_turn(user_input)
-    enriched_input = turn_data.get("enriched_input", user_input)
-
-    reference_resolved = turn_data.get("reference_resolved", False)
-    routing_input = turn_data.get("resolved_input", user_input) if reference_resolved else user_input
-    clean_low = user_input.strip().lower()
 
     # ------------------------------------------------------------------
     # Step 1.1b — CONTINUOUS ENVIRONMENT AWARENESS
@@ -546,6 +592,64 @@ def _brain_process_core(
     tem = get_task_execution_manager()
     pending_updates = tem.notification_manager.get_and_clear_notifications(uid_int)
     pending_prefix = (" ".join(pending_updates) + "\n") if pending_updates else ""
+
+    # Check for pending content task awaiting user-supplied information (Turn B fulfillment)
+    pending_content = dialogue_mgr.current_state.session_context.get("pending_content_task")
+    if pending_content and pending_content.get("status") == "waiting_for_content":
+        is_cancellation = any(re.search(p, clean_low) for p in (
+            r'\b(?:cancel|stop|nevermind|abort|forget\s+it)\b',
+            r'\bdon\'?t\s+(?:create|make|generate)\b',
+            r'\bcancel\s+(?:that|the)\s+(?:ppt|presentation|document|doc|report)\b'
+        ))
+        if is_cancellation:
+            dialogue_mgr.current_state.session_context.pop("pending_content_task", None)
+            dialogue_mgr.current_state.goal_status = "CANCELLED"
+            cancel_msg = "Cancelled the presentation request."
+            full_resp = (pending_prefix + cancel_msg).strip()
+            dialogue_mgr.record_response(full_resp)
+            return {
+                "status": "cancelled",
+                "intent": "DOCUMENT_GENERATION",
+                "response": full_resp,
+                "goal_status": "CANCELLED",
+                "handled": True,
+            }
+
+        # Check if the user is asking an intervening conversational question, capability query, or issuing a system command
+        has_explicit_content_cue = bool(re.search(
+            r'^(?:here\s+is|here\s+are|use\s+this|content:|info:|information:|details:|slide\s+1|topic:)\b',
+            clean_low
+        )) or len(clean_low.splitlines()) > 1 or len(clean_low.split()) >= 25
+
+        is_question = bool(
+            clean_low.endswith("?")
+            or re.match(r'^(?:what|who|when|where|why|how|which|whose|is|are|am|do|does|did|can|could|would|will|should)\b', clean_low)
+        )
+        is_interjection = clean_low in ("sure", "yes", "yeah", "yep", "ok", "okay", "go ahead", "please do", "no", "nope", "hello", "hi", "hey", "thanks", "thank you")
+        is_system_cmd = bool(re.match(r'^(?:open|launch|close|quit|exit|play|pause|volume|mute|take\s+a\s+screenshot|screenshot)\b', clean_low))
+        is_cap_query = bool(re.search(r'\b(?:what\s+(?:can\s+you\s+do|are\s+your\s+capabilities)|help)\b', clean_low))
+
+        is_intervening = (is_question or is_interjection or is_system_cmd or is_cap_query) and not has_explicit_content_cue
+
+        if not is_intervening:
+            # Genuine content supplied for Turn B
+            dialogue_mgr.current_state.session_context.pop("pending_content_task", None)
+            dialogue_mgr.current_state.goal_status = "RUNNING"
+            doc_type = pending_content.get("doc_type", "pptx")
+            exec_res = unified_router._fulfill_supplied_content_document(user_input, doc_type=doc_type, user_id=uid_int, dm=dialogue_mgr)
+            resp_str = exec_res.get("response", "")
+            full_resp = (pending_prefix + resp_str).strip()
+            dialogue_mgr.record_response(full_resp)
+            dialogue_mgr.current_state.goal_status = "COMPLETED"
+            return {
+                "status": exec_res.get("status", "success"),
+                "intent": "DOCUMENT_GENERATION",
+                "response": full_resp,
+                "filepath": exec_res.get("filepath"),
+                "metadata": exec_res.get("metadata", {}),
+                "goal_status": "COMPLETED",
+                "handled": True,
+            }
 
     # ------------------------------------------------------------------
     # Step 1.1b — CANONICAL SEMANTIC INTENT UNDERSTANDING
@@ -701,7 +805,26 @@ def _brain_process_core(
             "semantic_representation": semantic_rep.to_dict(),
         }
 
-    if semantic_rep.intent == "EXPLANATION_QUERY" or semantic_rep.request_type == "EXPLANATION":
+    is_action_explanation = (
+        (semantic_rep.intent == "EXPLANATION_QUERY" or semantic_rep.request_type == "EXPLANATION")
+        and (
+            getattr(semantic_rep, "action", "") in ("explain_action", "action_explanation")
+            or getattr(semantic_rep, "historical_query_type", "") in ("explanation", "past_action")
+            or any(re.search(p, clean_low) for p in [
+                r'\bwhy\s+(?:didn\'?t|did\s+not|haven\'?t|have\s+not|won\'?t|wouldn\'?t|don\'?t|do\s+not|did)\s+you\b',
+                r'\bwhy\s+(?:is|was|are|were)\s+([a-zA-Z0-9_\-\s]+?)\s+(?:open|running|active|closed)\b',
+                r'\bwhat\s+made\s+you\b',
+                r'^why\s+(?:did\s+you|did\s+we|was\s+it|was\s+that)\??$',
+            ])
+        )
+        and not any(re.search(p, clean_low) for p in [
+            r'\bexplain\s+(?:how\s+|what\s+|why\s+the\s+)?(?:gpus?|cpus?|processors?|ram|memory|quantum|gravity|code|python|algorithm|hardware|software)\b',
+            r'\b(?:how\s+does|how\s+do|how\s+a\s+|how\s+the\s+).+?\b(?:works?|function)\b',
+            r'\b(?:what\s+is\s+the\s+use\s+of|use\s+of\s+cpu|use\s+of\s+gpu)\b',
+        ])
+    )
+
+    if is_action_explanation:
         hist_ans = semantic_understanding_engine.memory_retriever.answer_historical_query(
             uid_int, semantic_rep, dialogue_mgr.current_state
         )
@@ -1856,13 +1979,16 @@ def _brain_process_core(
         dialogue_mgr.current_state.session_context["active_artifact"] = artifact.to_dict()
         dialogue_mgr.current_state.session_context["last_content_artifact_id"] = artifact.artifact_id
 
-        if artifact.content_type == "code":
-            type_label = f"{artifact.programming_language.capitalize()} code" if artifact.programming_language else "code"
-            msg = f"Done. I found and gathered the {type_label} for {artifact.topic}."
+        if artifact.content:
+            substantive_body = artifact.content.strip()
+            full_resp = (pending_prefix + substantive_body).strip()
         else:
-            msg = f"Done. I found and gathered the information about {artifact.topic}."
-
-        full_resp = (pending_prefix + msg).strip()
+            if artifact.content_type == "code":
+                type_label = f"{artifact.programming_language.capitalize()} code" if artifact.programming_language else "code"
+                msg = f"Here is the {type_label} for {artifact.topic}."
+            else:
+                msg = f"Here is the information about {artifact.topic}."
+            full_resp = (pending_prefix + msg).strip()
         dialogue_mgr.record_response(full_resp)
         dialogue_mgr.update_state(
             execution_result={
@@ -1924,7 +2050,8 @@ def _brain_process_core(
     # ------------------------------------------------------------------
     # Step 1.1d1b — STATEFUL ARTIFACT READING, STOP, AND CONTINUE
     # ------------------------------------------------------------------
-    if semantic_rep.intent == "ARTIFACT_READING":
+    is_reading_utterance = any(w in clean_low for w in ("read", "listen to", "recite", "speak aloud", "read aloud", "read to me", "read out"))
+    if semantic_rep.intent == "ARTIFACT_READING" and (is_reading_utterance or getattr(semantic_rep, "action", "") == "read_artifact"):
         from core.artifact_resolver import get_artifact_reference_resolver
         from core.artifact_reader import get_artifact_reading_controller
 
@@ -2003,32 +2130,72 @@ def _brain_process_core(
     # ------------------------------------------------------------------
     # Step 1.1d2 — PROFESSIONAL DOCUMENT & PRESENTATION ENGINE
     # ------------------------------------------------------------------
-    is_pro_doc_cmd = (semantic_rep.intent == "PROFESSIONAL_DOCUMENT_GENERATION") or any(
-        phrase in clean_low for phrase in (
-            "create a pdf about", "make a pdf about", "create a report", "make a report",
-            "create a professional report", "make a professional report",
-            "create a presentation", "make a presentation", "create a ppt", "make a ppt",
-            "turn these into a presentation", "turn that into a presentation",
-            "turn these documents into a presentation", "turn that report into a presentation",
-            "create a study guide", "make a study guide", "create study notes", "make study notes",
-            "make a professional ppt", "make the report more detailed", "make it more detailed",
-            "make it shorter", "create a detailed document", "create a detailed report",
-            "report and presentation", "make a one-page summary", "create an executive summary",
-            "presentation about", "presentation on", "report about", "report on",
-            "pdf about", "pdf on"
+    # Turn A: Announcement of content to follow for document/presentation
+    is_announcing_content = bool(re.search(
+        r'\b(?:i\s+will|i\'ll|i\s+am\s+going\s+to|let\s+me)\s+(?:give|send|provide|share)\s+(?:you\s+)?(?:some\s+|the\s+)?(?:info|information|details|notes|text|data)\b',
+        clean_low, re.IGNORECASE
+    )) or bool(re.search(
+        r'\b(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:ppt|presentation|document|doc|report|spreadsheet)\s+(?:based\s+on\s+(?:that|it|this|the\s+info(?:rmation)?)|from\s+(?:that|it|this))\b',
+        clean_low, re.IGNORECASE
+    ))
+    has_doc_cue = any(k in clean_low for k in ("presentation", "ppt", "pptx", "slide deck", "document", "doc", "report"))
+    if is_announcing_content and has_doc_cue:
+        doc_type = "pptx" if any(k in clean_low for k in ("presentation", "ppt", "pptx", "slides", "deck")) else "docx"
+        doc_name = "presentation" if doc_type == "pptx" else "document"
+        dialogue_mgr.current_state.session_context["pending_content_task"] = {
+            "doc_type": doc_type,
+            "status": "waiting_for_content",
+            "created_at": datetime.now().isoformat()
+        }
+        dialogue_mgr.current_state.goal_status = "WAITING_FOR_USER"
+        ack_msg = f"Of course. Send me the information, and I'll create a {doc_name} based on it."
+        full_resp = (pending_prefix + ack_msg).strip()
+        dialogue_mgr.record_response(full_resp)
+        return {
+            "status": "waiting_for_user",
+            "intent": "DOCUMENT_GENERATION",
+            "response": full_resp,
+            "goal_status": "WAITING_FOR_USER",
+            "waiting_for_content": True,
+            "handled": True
+        }
+
+    is_reported_speech = bool(re.search(
+        r"^(?:(?:the|my|this|our|a)\s+)?(?:error(?:\s+message)?|log(?:s)?|console|terminal|boss|user|he|she|they|it)\s+(?:says?|said|stated?|tells?|told|reports?|reported?|shows?|outputs?|reads?)\b",
+        clean_low
+    ))
+    is_howto_doc = bool(re.match(
+        r"^(?:how\s+(?:do|can|to|would)|can\s+you\s+explain\s+how|what\s+are\s+the\s+steps)\b",
+        clean_low
+    ))
+    is_pro_doc_cmd = (not is_reported_speech and not is_howto_doc) and (
+        (semantic_rep.intent == "PROFESSIONAL_DOCUMENT_GENERATION") or any(
+            phrase in clean_low for phrase in (
+                "create a pdf about", "make a pdf about", "create a report", "make a report",
+                "create a professional report", "make a professional report",
+                "create a presentation", "make a presentation", "create a ppt", "make a ppt",
+                "turn these into a presentation", "turn that into a presentation",
+                "turn these documents into a presentation", "turn that report into a presentation",
+                "create a study guide", "make a study guide", "create study notes", "make study notes",
+                "make a professional ppt", "make the report more detailed", "make it more detailed",
+                "make it shorter", "create a detailed document", "create a detailed report",
+                "report and presentation", "make a one-page summary", "create an executive summary",
+                "presentation about", "presentation on", "report about", "report on",
+                "pdf about", "pdf on"
+            )
+        ) or (
+            any(k in clean_low for k in ("presentation", "ppt", "pptx", "slide deck"))
+            and any(w in clean_low for w in ("create", "make", "generate", "turn", "build"))
+        ) or (
+            any(k in clean_low for k in ("study guide", "study notes"))
+            and any(w in clean_low for w in ("create", "make", "generate", "build"))
+        ) or (
+            any(k in clean_low for k in ("report", "study guide"))
+            and any(w in clean_low for w in ("professional", "detailed", "executive", "one-page", "one page"))
+            and any(w in clean_low for w in ("create", "make", "generate", "produce", "turn"))
+        ) or (
+            "create a detailed document" in clean_low
         )
-    ) or (
-        any(k in clean_low for k in ("presentation", "ppt", "pptx", "slide deck"))
-        and any(w in clean_low for w in ("create", "make", "generate", "turn", "build"))
-    ) or (
-        any(k in clean_low for k in ("study guide", "study notes"))
-        and any(w in clean_low for w in ("create", "make", "generate", "build"))
-    ) or (
-        any(k in clean_low for k in ("report", "study guide"))
-        and any(w in clean_low for w in ("professional", "detailed", "executive", "one-page", "one page"))
-        and any(w in clean_low for w in ("create", "make", "generate", "produce", "turn"))
-    ) or (
-        "create a detailed document" in clean_low
     )
 
     if is_pro_doc_cmd:
@@ -2399,7 +2566,8 @@ def _brain_process_core(
             }
 
     # 2.2 Universal OS Goal Execution (Natural OS Operations)
-    if not semantic_rep.rewritten_command and not is_browser_or_visual_cmd:
+    is_plugin_cmd = bool(re.search(r"\b(?:run\s+plugin|execute\s+plugin|plugin:?)\b", clean_low))
+    if not semantic_rep.rewritten_command and not is_browser_or_visual_cmd and not is_plugin_cmd:
         try:
             from core.os_gateway import get_os_gateway
             os_gw = get_os_gateway()
@@ -3312,13 +3480,39 @@ def _brain_process_core(
     # Step 1.6 — RESUME PAUSED GOAL IF WAITING_FOR_USER (Requirement 8 & Test F)
     # ------------------------------------------------------------------
     if dialogue_mgr.current_state.goal_status == "WAITING_FOR_USER" and dialogue_mgr.current_state.pending_goal_continuation:
+        # Check if user input is an explicit discourse pivot / cancellation
+        m_pivot = re.match(
+            r'^(?:actually,?\s*)?(?:forget\s+(?:that|it|about\s+that)|never\s*mind|nevermind|scratch\s+that|cancel\s+(?:that|it|the\s+request)?|abort|stop(?:\s+that|\s+it)?|don\'t\s+do\s+that|leave\s+(?:that|it))[.,;! ]*(.*)',
+            routing_input.strip().lower()
+        )
+        if m_pivot:
+            remainder = m_pivot.group(1).strip()
+            dialogue_mgr.current_state.pending_goal_continuation = None
+            dialogue_mgr.current_state.goal_status = "IDLE"
+            if not remainder or re.match(r'^(?:please|now)?$', remainder):
+                resp_cancel = "Understood, I've canceled that. Let me know what you'd like to do next."
+                dialogue_mgr.record_response(resp_cancel)
+                return {"status": "success", "intent": "GENERAL_CONVERSATION", "response": resp_cancel, "handled": True}
+            clean_remainder = re.sub(r'^(?:can\s+you\s+|could\s+you\s+|please\s+|just\s+)+', '', remainder).strip()
+            routing_input = clean_remainder
+            enriched_input = clean_remainder
+
         # Check if user input is an unrelated intent (like TIME_QUERY, CALCULATOR, etc.)
         analyzed_pending = _multi_intent_analyzer.analyze(routing_input)
         is_clarification_response = bool(
-            re.search(r'([a-zA-Z0-9_\-\\]+\.(?:txt|pdf|docx|pptx|xlsx|csv|py))', routing_input)
+            (isinstance(dialogue_mgr.current_state.pending_goal_continuation, dict) and (
+                dialogue_mgr.current_state.pending_goal_continuation.get("type") in ("document_generation_clarification", "reminder_clarification")
+                or "plan" in dialogue_mgr.current_state.pending_goal_continuation
+            ))
+            or re.search(r'([a-zA-Z0-9_\-\\]+\.(?:txt|pdf|docx|pptx|xlsx|csv|py))', routing_input)
             or any(w in routing_input.lower() for w in ["first", "second", "third", "other", "1st", "2nd", "3rd", "one", "this", "that", "the "])
+            or any(w in user_input.lower() for w in ["first", "second", "third", "other", "1st", "2nd", "3rd", "one", "this", "that", "the "])
+            or reference_resolved
         )
-        if not is_clarification_response and analyzed_pending.primary_intent.name in ("TIME_QUERY", "WEATHER_QUERY", "CALCULATOR", "DATE_QUERY", "MUSIC"):
+        is_new_command = not is_clarification_response and bool(
+            re.match(r'^(?:set\s+a\s+reminder|remind\s+me|create\s+a\s+document|open\s+(?!file\b)|close\s+|play\s+|check\s+|what\s+is|what\s+time|cancel|stop|help\s+me)\b', routing_input.lower())
+        )
+        if is_new_command or (not is_clarification_response and analyzed_pending.primary_intent.name in ("TIME_QUERY", "WEATHER_QUERY", "CALCULATOR", "DATE_QUERY", "MUSIC", "REMINDERS", "OPEN_APPLICATION", "CLOSE_APPLICATION")):
             # Unrelated new request interrupts the waiting goal
             dialogue_mgr.current_state.pending_goal_continuation = None
             dialogue_mgr.current_state.goal_status = "IDLE"
@@ -3327,17 +3521,30 @@ def _brain_process_core(
             continuation = dialogue_mgr.current_state.pending_goal_continuation
             dialogue_mgr.current_state.pending_goal_continuation = None
             dialogue_mgr.current_state.goal_status = "RUNNING"
-            
+
+            if isinstance(continuation, dict):
+                c_type = continuation.get("type")
+                if c_type == "document_generation_clarification":
+                    if not re.match(r'^(?:create|make|write|generate)\b', routing_input, re.I):
+                        routing_input = f"create a document about {routing_input}"
+                elif c_type == "reminder_clarification":
+                    if not re.match(r'^(?:remind\s+me|set\s+a\s+reminder)\b', routing_input, re.I):
+                        routing_input = f"remind me to {routing_input}"
+
             target_file = None
             m_file = re.search(r'([a-zA-Z0-9_\-\\]+\.(?:txt|pdf|docx|pptx|xlsx|csv|py))', routing_input)
             if m_file:
                 target_file = m_file.group(1)
-            categories = select_relevant_categories("FILE_OPERATIONS", routing_input, target_file)
+            target_intent = "DOCUMENT_GENERATION" if ("create a document" in routing_input or "document" in routing_input) else "FILE_OPERATIONS"
+            categories = select_relevant_categories(target_intent, routing_input, target_file)
             before_snap = observe_environment(user_id=user_id, relevant_categories=categories, target_file=target_file)
 
             # Execute the user's choice/resolution
-            result = _single_route(routing_input, user_id=user_id)
-            intent_name = result.get("intent", "FILE_OPERATIONS")
+            m_cand_file = re.search(r'([a-zA-Z0-9_\-\\]+\.(?:txt|pdf|docx|pptx|xlsx|csv|py))', routing_input)
+            cand_fp = m_cand_file.group(1) if m_cand_file else None
+            p_override = {"action": "open_file", "target": cand_fp, "filepath": cand_fp} if cand_fp else None
+            result = _single_route(routing_input, user_id=user_id, params_override=p_override)
+            intent_name = result.get("intent", target_intent)
 
             after_snap = observe_environment(user_id=user_id, relevant_categories=categories, target_file=target_file)
             state_diff = compare_snapshots(before_snap, after_snap)
@@ -3349,6 +3556,45 @@ def _brain_process_core(
             )
             result["observations"] = obs
             result["state_difference"] = state_diff.to_dict()
+
+            # Check if this clarification turn was part of a paused multi-step plan
+            if isinstance(continuation, dict) and "plan" in continuation:
+                paused_plan = continuation["plan"]
+                step_idx = continuation.get("step_index", 1)
+                
+                # Check resolved filepath from candidate choice or result
+                resolved_file = result.get("filepath") or result.get("path")
+                if not resolved_file and dialogue_mgr.current_state.active_artifact:
+                    resolved_file = dialogue_mgr.current_state.active_artifact
+                
+                # Mark completed steps up to step_idx as completed and populate results
+                for st in paused_plan.steps:
+                    if st.sequence < step_idx:
+                        st.status = "COMPLETED"
+                        if resolved_file:
+                            st.result = {"status": "success", "filepath": resolved_file, "path": resolved_file, "response": result.get("response", "")}
+                    else:
+                        if resolved_file:
+                            st.parameters["filepath"] = resolved_file
+                            st.parameters["path"] = resolved_file
+                            st.parameters["target"] = resolved_file
+                
+                # Resume execution of the remaining plan steps
+                subsequent_results = _execute_plan_stateful(
+                    paused_plan, paused_plan.original_input, user_id=str(user_id), dialogue_mgr=dialogue_mgr
+                )
+                combined_res = [result] + subsequent_results
+                is_all_ok = all(r.get("status") in ("success", "completed", "handled") for r in combined_res)
+                final_msg = " ".join([r.get("response", "") for r in combined_res if r.get("response")])
+                dialogue_mgr.record_response(final_msg)
+                dialogue_mgr.current_state.goal_status = "COMPLETED" if is_all_ok else "PARTIALLY_COMPLETED"
+                return {
+                    "status": "success" if is_all_ok else "partial",
+                    "intent": intent_name,
+                    "response": final_msg,
+                    "results": combined_res,
+                    "handled": True,
+                }
 
             # PHASE 8: Determine verified outcome
             is_success = result.get("status") == "success" or not result.get("error")
@@ -3845,6 +4091,24 @@ def brain_process(
     """
     res = _brain_process_core(user_input, user_id=user_id, on_progress=on_progress)
     try:
+        raw_resp = (res.get("response") or res.get("summary") or "").strip()
+        if raw_resp:
+            from extensions.system.conversational_response import compose_conversational_response
+            conv_resp = compose_conversational_response(
+                user_input=user_input,
+                raw_response=raw_resp,
+                intent=res.get("intent"),
+                action_result=res,
+                context={"user_id": user_id},
+                user_id=user_id,
+                is_proactive=False,
+            )
+            res["response"] = conv_resp.text or raw_resp
+            res["spoken_response"] = conv_resp.speech_text or conv_resp.text or raw_resp
+            res["conversational_response"] = conv_resp.to_dict()
+    except Exception:
+        pass
+    try:
         resp_text = (res.get("response") or res.get("summary") or "").strip()
         if user_input and user_input.strip() and resp_text:
             uid = int(user_id) if (user_id and str(user_id).isdigit()) else 1
@@ -4089,6 +4353,10 @@ def _execute_plan_stateful(
             candidate_input = _build_step_input(step.intent.name, step.parameters, original_input)
 
         params_override: Dict[str, Any] = {}
+        for k, v in step.parameters.items():
+            if k not in ("raw_input", "original_input"):
+                params_override[k] = v
+        params_override["intent"] = step.intent
         if getattr(step, "semantic_command", None):
             params_override["semantic_command"] = step.semantic_command
             params_override["step_sequence"] = step.sequence
@@ -4584,7 +4852,7 @@ def _verify_action_result(
     """
     result = dict(step_result)  # shallow copy — do not mutate caller's dict
 
-    if result.get("status") == "waiting_for_user":
+    if result.get("status") in ("waiting_for_user", "wireless_pair_guided", "ios_companion_required") or (result.get("status") == "no_device_found" and result.get("ui_action")):
         return result
 
     if state_diff:

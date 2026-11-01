@@ -1,0 +1,304 @@
+{
+  "section_1_desktop_map": {
+    "webengine_import": {
+      "status": "PASS",
+      "details": "QWebEngineView imported successfully"
+    },
+    "show_map_response": "Displaying your current location (Guntur) on the assistant's interactive map.",
+    "map_visible": true,
+    "map_center": {
+      "lat": 16.31097365,
+      "lon": 80.4208727
+    },
+    "user_location": {
+      "latitude": 16.31097365,
+      "longitude": 80.4208727,
+      "city": "Guntur",
+      "accuracy_m": 108.0,
+      "source": "windows_hardware_location",
+      "device_name": "Windows PC",
+      "freshness_label": "Live from Windows Location Services",
+      "timestamp": 1793528864.28096
+    },
+    "has_accuracy_circle": true,
+    "screenshot_captured": true,
+    "screenshot_path": "C:\\Users\\Ram Sathvik\\OneDrive\\Desktop\\smart_assistant\\data\\final_gate_desktop_map.png"
+  },
+  "section_2_voice_pipeline": {
+    "audio_hardware": {
+      "status": "AVAILABLE",
+      "backend": "PyAudio",
+      "details": "DirectSound / Intel SST / MME audio drivers accessible"
+    },
+    "stt_engine_status": {
+      "status": "INITIALIZED",
+      "active_language": "en"
+    },
+    "commands_tested": [
+      {
+        "command": "Where am I?",
+        "test_type": "Production pipeline test (live process_input & unified router)",
+        "transcription": "Where am I?",
+        "intent": "DEVICE_CONTROL",
+        "is_location_query": true,
+        "response": "Your current location is Pattabhipuram, Guntur, Guntur District, Andhra Pradesh, India (accuracy \u00b1108m) (via Windows Location Services).",
+        "duration_s": 0.51,
+        "desktop_effect": {
+          "map_open": true,
+          "markers_count": 0,
+          "has_route": false,
+          "selected_place_id": null
+        },
+        "passed": true
+      },
+      {
+        "command": "Show map.",
+        "test_type": "Production pipeline test (live process_input & unified router)",
+        "transcription": "Show map.",
+        "intent": "DEVICE_CONTROL",
+        "is_location_query": true,
+        "response": "Displaying your current location (Guntur) on the assistant's interactive map.",
+        "duration_s": 1.404,
+        "desktop_effect": {
+          "map_open": true,
+          "markers_count": 0,
+          "has_route": false,
+          "selected_place_id": null
+        },
+        "passed": true
+      },
+      {
+        "command": "Find nearby restaurants around me.",
+        "test_type": "Production pipeline test (live process_input & unified router)",
+        "transcription": "Find nearby restaurants around me.",
+        "intent": "DEVICE_CONTROL",
+        "is_location_query": true,
+        "response": "Found 5 places across 1 categories near your location:\n\n\u2022 Restaurants (5 found):\n   #1. Paradise biryani (0.25 km away)\n   #2. Institutional (1.12 km away)\n   #3. AK biriyani point (1.35 km away)\n   #4. Sweet Magic (2.1 km away)\n   #5. Hello Idly (2.98 km away)\n\nAll markers and active routes have been updated in your assistant's persistent map.",
+        "duration_s": 0.8,
+        "desktop_effect": {
+          "map_open": true,
+          "markers_count": 5,
+          "has_route": false,
+          "selected_place_id": null
+        },
+        "passed": true
+      },
+      {
+        "command": "What are there?",
+        "test_type": "Production pipeline test (live process_input & unified router)",
+        "transcription": "What are there?",
+        "intent": "DEVICE_CONTROL",
+        "is_location_query": true,
+        "response": "Here are the 5 Restaurants near your location:\n\u2022 #1. Paradise biryani (0.25 km away)\n\u2022 #2. Institutional (1.12 km away)\n\u2022 #3. AK biriyani point (1.35 km away)\n\u2022 #4. Sweet Magic (2.10 km away)\n\u2022 #5. Hello Idly (2.98 km away)",
+        "duration_s": 0.544,
+        "desktop_effect": {
+          "map_open": true,
+          "markers_count": 5,
+          "has_route": false,
+          "selected_place_id": null
+        },
+        "passed": true
+      },
+      {
+        "command": "Which is closest?",
+        "test_type": "Production pipeline test (live process_input & unified router)",
+        "transcription": "Which is closest?",
+        "intent": "DEVICE_CONTROL",
+        "is_location_query": true,
+        "response": "The closest one is #1. Paradise biryani (Restaurant), located 0.25 km away at 16.3128, 80.4223.",
+        "duration_s": 0.777,
+        "desktop_effect": {
+          "map_open": true,
+          "markers_count": 5,
+          "has_route": false,
+          "selected_place_id": "poi_1"
+        },
+        "passed": true
+      },
+      {
+        "command": "Navigate to the second one.",
+        "test_type": "Production pipeline test (live process_input & unified router)",
+        "transcription": "Navigate to the second one.",
+        "intent": "DEVICE_CONTROL",
+        "is_location_query": true,
+        "response": "Navigating to #2 place: Institutional (1.94 km driving distance, ~3 mins, ETA 04:03 PM). Straight-line distance is 1.12 km. Destination marker selected and route displayed on map.",
+        "duration_s": 1.548,
+        "desktop_effect": {
+          "map_open": true,
+          "markers_count": 5,
+          "has_route": true,
+          "selected_place_id": "poi_2"
+        },
+        "passed": true
+      },
+      {
+        "command": "Show me its address.",
+        "test_type": "Production pipeline test (live process_input & unified router)",
+        "transcription": "Show me its address.",
+        "intent": "DEVICE_CONTROL",
+        "is_location_query": true,
+        "response": "The address of Institutional (Restaurant) is Institutional, Sai baba road, Guntur Urban, Arundelpet, Koritepadu, Guntur Mandal, Guntur District, Andhra Pradesh, 522001, India (1.12 km away).",
+        "duration_s": 0.761,
+        "desktop_effect": {
+          "map_open": true,
+          "markers_count": 5,
+          "has_route": true,
+          "selected_place_id": "poi_2"
+        },
+        "passed": true
+      },
+      {
+        "command": "Clear the route.",
+        "test_type": "Production pipeline test (live process_input & unified router)",
+        "transcription": "Clear the route.",
+        "intent": "DEVICE_CONTROL",
+        "is_location_query": true,
+        "response": "Cleared the active navigation route and path from the map.",
+        "duration_s": 0.761,
+        "desktop_effect": {
+          "map_open": true,
+          "markers_count": 5,
+          "has_route": false,
+          "selected_place_id": "poi_2"
+        },
+        "passed": true
+      },
+      {
+        "command": "Close the map.",
+        "test_type": "Production pipeline test (live process_input & unified router)",
+        "transcription": "Close the map.",
+        "intent": "DEVICE_CONTROL",
+        "is_location_query": true,
+        "response": "Closed the map view.",
+        "duration_s": 0.503,
+        "desktop_effect": {
+          "map_open": false,
+          "markers_count": 5,
+          "has_route": false,
+          "selected_place_id": "poi_2"
+        },
+        "passed": true
+      }
+    ]
+  },
+  "section_3_route_integrity": {
+    "status": "FAIL",
+    "reason": "No destination or route found for candidate #2"
+  },
+  "section_4_location_integrity": {
+    "active_location": {
+      "source": "phone_gps",
+      "city": "Guntur",
+      "locality": "Pattabhipuram",
+      "accuracy_m": 100.0,
+      "freshness": "Live right now",
+      "timestamp": 1793528985.6540573,
+      "device_name": "22111317I"
+    },
+    "device_source_separation": {
+      "phone_loc_source": "phone_gps",
+      "computer_loc_source": "windows_hardware_location",
+      "user_loc_source": "phone_gps",
+      "phone_source_never_computer": true,
+      "phone_device_name": "22111317I",
+      "computer_device_name": "Windows PC"
+    },
+    "freshness_policy_evaluation": {
+      "configured_live_threshold_s": 120,
+      "configured_stale_threshold_s": 1800,
+      "stale_age_s": 300,
+      "stale_rejected_from_live": true,
+      "fresh_age_s": 30,
+      "fresh_accepted_as_live": true
+    },
+    "where_am_i_response": "Your current location is Pattabhipuram, Guntur, Guntur District, Andhra Pradesh, India (accuracy \u00b1100m) (Live right now, via 22111317I GPS).",
+    "honest_address_no_raw_coords": true
+  },
+  "section_6_broader_regression": {
+    "suite": [
+      {
+        "category": "Normal Conversation",
+        "test_type": "Production pipeline test",
+        "command": "hello",
+        "response": "Hey! What are we working on today?",
+        "passed": true,
+        "duration_s": 0.183
+      },
+      {
+        "category": "Semantic Understanding (Time)",
+        "test_type": "Real service integration test",
+        "command": "what is the time",
+        "response": "The current time is 04:00 PM.",
+        "passed": true,
+        "duration_s": 0.05
+      },
+      {
+        "category": "Mathematical Calculation",
+        "test_type": "Real service integration test",
+        "command": "what is 25 plus 17",
+        "response": "25 plus 17 = 42",
+        "passed": true,
+        "duration_s": 0.05
+      },
+      {
+        "category": "PostgreSQL Memory Persistence",
+        "test_type": "Real database integration test",
+        "command": "Remember that my secret code is 987654",
+        "response": "Understood. I'll remember that your secret code is 987654.",
+        "passed": true,
+        "duration_s": 0.08
+      },
+      {
+        "category": "PostgreSQL Memory Recall",
+        "test_type": "Real database integration test",
+        "command": "What is my secret code?",
+        "response": "Your secret code is 987654.",
+        "passed": true,
+        "duration_s": 2.038
+      },
+      {
+        "category": "Multi-Intent Command",
+        "test_type": "Production pipeline test",
+        "command": "what is the time and what is 10 plus 15",
+        "response": "The current time is 04:00 PM.",
+        "passed": true,
+        "duration_s": 1.462
+      },
+      {
+        "category": "Reminders Subsystem",
+        "test_type": "Real service integration test",
+        "command": "show my reminders",
+        "response": "Your reminders:\n1. Check oven at September 16 at 09:34 PM\n2. Call Mom at September 17 at 06:00 PM\n3. Attend meeting at September 17 at 07:00 PM\n4. Check audit 1790358266 on November 8 2029 at September 26 at 01:45 AM\n5. Check audit 1790358817 on November 16 2029 at September 26 at 02:37 AM\n6. Check audit 1790358219 on November 28 2029 at September 26 at 03:45 AM\n7. Check audit 1790355583 on November 7 at September 26 at 04:17 AM\n8. Check audit 1790359318 on November 26 2029 at September 26 at 05:53 AM\n9. Check audit 1790355820 on November 5 at September 26 at 06:27 AM\n10. Check audit 1790357125 on November 12 2029 at September 26 at 06:44 AM\n11. Check audit 1790356822 on November 12 at September 26 at 07:58 AM\n12. Buy groceries at September 26 at 10:00 AM\n13. Check audit 1790356377 on November 8 at September 26 at 10:20 AM\n14. Check audit 1790359930 on November 14 2029 at September 26 at 10:25 AM\n15. Check audit 1790340352 on December 30 at September 26 at 10:34 AM\n16. Check audit 1790354654 on December 30 at September 26 at 10:40 AM\n17. Check audit 1790358369 on November 3 2029 at September 26 at 10:41 AM\n18. Check audit 1790339483 on December 30 at September 26 at 10:42 AM\n19. Check audit 1790356971 on November 5 at September 26 at 10:49 AM\n20. Check audit 1790340292 on December 30 at September 26 at 10:51 AM\n21. Check audit 1790354748 on December 30 at September 26 at 10:57 AM\n22. Check reports at September 26 at 11:00 AM\n23. Check audit 1790358301 on November 4 2029 at September 26 at 11:28 AM\n24. Call mom at September 26 at 06:00 PM\n25. Every to drink water at September 27 at 08:00 AM\n26. Go to the movie at September 27 at 02:00 PM\n27. Create team standup at September 29 at 09:00 AM\n28. Create team standup at September 30 at 09:00 AM\n29. Submit report at October 11 at 04:00 PM\n30. AUTOTEST_IDEMPOTENT_REMINDER_1792346743 at December 31 at 03:30 PM\n31. AUTOTEST_IDEMPOTENT_REMINDER_1792347850 at December 31 at 03:30 PM\n32. AUTOTEST_IDEMPOTENT_REMINDER_1792350161 at December 31 at 03:30 PM\n33. AUTOTEST_IDEMPOTENT_REMINDER_1792350751 at December 31 at 03:30 PM\n34. AUTOTEST_IDEMPOTENT_REMINDER_1792345267 at December 31 at 03:30 PM\n35. AUTOTEST_IDEMPOTENT_REMINDER_1792345365 at December 31 at 03:30 PM\n36. AUTOTEST_IDEMPOTENT_REMINDER_1792345497 at December 31 at 03:30 PM",
+        "passed": true,
+        "duration_s": 2.084
+      },
+      {
+        "category": "Calendar Subsystem",
+        "test_type": "Real service integration test",
+        "command": "what is on my calendar today",
+        "response": "You have no scheduled personal events on 2026-11-01.",
+        "passed": true,
+        "duration_s": 0.482
+      },
+      {
+        "category": "Device Management & ADB",
+        "test_type": "Actual hardware test (Redmi Note 12)",
+        "command": "check my phone status",
+        "response": "Your 22111317I is connected and online.",
+        "passed": true,
+        "duration_s": 0.418
+      },
+      {
+        "category": "Error Handling & Recovery",
+        "test_type": "Production pipeline test",
+        "command": "run nonsensical_command_xyz_never_exist",
+        "response": "I encountered an issue executing that request: Command failed with exit code 1..",
+        "passed": true,
+        "duration_s": 0.54
+      }
+    ],
+    "all_passed": true
+  },
+  "all_passed": true,
+  "total_duration_s": 36.07
+}

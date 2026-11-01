@@ -102,7 +102,7 @@ class MultiIntentAnalyzer:
         (r'\bafter\b', 0.9),           # "after playing music, set reminder"
         (r'\bbefore\b', 0.9),          # "before playing music, set reminder"
         (r'\bwhile\b', 0.85),          # "while playing music, set reminder"
-        (r'(?<!\d\s)\bplus\b(?!\s*\d)', 0.75),           # "play music plus set reminder"
+        (r'(?<!\d\s)\bplus\b(?!\s*\d)(?=\s+(?:open|launch|start|run|close|quit|create|make|delete|remove|play|set|send|tell|show|check|what|is|how|calculate|compute)\b)', 0.75),           # "play music plus set reminder"
         (r'[,;]\s*(?!(?:not\s+(?:the\s+)?(?:other|one|that|this)|instead\s+of|rather\s+than)\b)(?!\d{4}\b)(?!at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b)(?=\w)', 0.6),       # "play music, set reminder" or "play music; set reminder"
     ]
     
@@ -136,13 +136,22 @@ class MultiIntentAnalyzer:
         (Intent.CALCULATOR, Intent.OPEN_APPLICATION): r'(?:open|launch|start).*?(?:calc|calculate|compute)',
 
         # FILE_OPERATIONS sequential dependencies
-        (Intent.FILE_OPERATIONS, Intent.FILE_OPERATIONS): r'create.*(?:folder|directory).*create.*file|create.*file.*inside|create.*rename|create.*open',
+        (Intent.FILE_OPERATIONS, Intent.FILE_OPERATIONS): r'create.*(?:folder|directory).*create.*file|create.*file.*inside|create.*rename|create.*open|(?:find|search|locate).*?(?:inspect|open|read|check|examine)|(?:inspect|check|examine).*?(?:missing|tell\s+me|report|analyze)|inspect\s+it|what\s+is\s+missing',
+
+        # RAG_SEARCH sequential dependencies (search -> collect/summarize)
+        (Intent.RAG_SEARCH, Intent.RAG_SEARCH): r'(?:search|find|look\s+up).*?(?:collect|summarize|aggregate|digest)|(?:collect|summarize|digest|extract)\s+(?:them|the\s+results|it|useful\s+results|findings)',
+
+        # CALENDAR & REMINDERS sequential dependencies (events/reminders -> conflicts -> preparation)
+        (Intent.REMINDERS, Intent.REMINDERS): r'(?:calendar|events?|schedule).*?(?:conflicts?|prepare|plan)|(?:conflicts?).*?(?:prepare|plan)',
+        (Intent.REMINDERS, Intent.REMINDERS): r'(?:reminders?).*?(?:conflicts?|prepare|calendar)',
 
         # TASK_MANAGEMENT status query depends on task creation
         (Intent.TASK_MANAGEMENT, Intent.TASK_MANAGEMENT): r'create.*status|task.*status|clean.*status|logs.*status|create.*running|task.*running|status.*running|clean.*running',
 
-        # DEVICE_CONTROL check depends on device control action
-        (Intent.DEVICE_CONTROL, Intent.DEVICE_CONTROL): r'turn.*(?:on|off).*whether|toggle.*whether|set.*is\s+it|turn.*is\s+it',
+        # DEVICE_CONTROL check & sequential verification dependencies
+        (Intent.DEVICE_CONTROL, Intent.DEVICE_CONTROL): r'turn.*(?:on|off).*whether|toggle.*whether|set.*is\s+it|turn.*is\s+it|(?:perform|change|modify).*?(?:verify|check)|(?:verify|check).*?(?:report|result)',
+        (Intent.DEVICE_CONTROL, Intent.OPEN_APPLICATION): r'(?:open|launch|start).*?(?:perform|change|apply|modify|edit)|(?:open|launch).*?(?:type|write)',
+
 
         # DOCUMENT_GENERATION sequential dependencies (e.g., export/save copy depends on creation)
         (Intent.DOCUMENT_GENERATION, Intent.DOCUMENT_GENERATION): r'(?:create|generate|write|make).*?(?:save|export|convert)|(?:save|export|make)\s+(?:a\s+|an\s+)?(?:pdf|docx|excel|presentation|ppt|pptx)\s+copy',
@@ -193,6 +202,13 @@ class MultiIntentAnalyzer:
             ("inspect" in low_in and "electron" in low_in)
         ):
             return self._analyze_single_intent(effective_input)
+
+        try:
+            from core.semantic_understanding import SemanticUnderstandingEngine
+            if SemanticUnderstandingEngine.is_location_intelligence_query(effective_input):
+                return self._analyze_single_intent(effective_input)
+        except Exception:
+            pass
 
         # Normalize natural conversational preambles
         # e.g. "I need a quick note, open Notepad and write hello" -> "open Notepad and write hello"
@@ -250,7 +266,7 @@ class MultiIntentAnalyzer:
         if m_open_compound:
             verb = m_open_compound.group(1).lower()
             remainder = m_open_compound.group(2).strip()
-            if not re.search(r'\b(close|quit|exit|terminate|kill|shut|open|launch|start|run|search|type|write|look up|find|google|calculate|calc|play|set)\b', remainder, re.IGNORECASE):
+            if not re.search(r'\b(close|quit|exit|terminate|kill|shut|open|launch|start|run|search|type|write|look up|find|google|calculate|calc|play|set|retreve|retrieve|scroll|read|extract|inspect|get|check|tell|show|navigate|click)\b', remainder, re.IGNORECASE):
                 raw_apps = re.split(r'[,;]|\band\b', remainder)
                 apps = [a.strip() for a in raw_apps if a.strip() and a.lower() not in ("called", "named", "and", "the", "app", "apps", "both", "both of them", "them")]
                 if len(apps) > 1:
@@ -286,8 +302,8 @@ class MultiIntentAnalyzer:
         """Detect if input contains multi-intent connectors"""
         input_lower = user_input.lower()
         
-        # Guard: Web page inspection, browser automation scenarios, and visual diff commands
-        if re.search(r'\b(?:open|inspect|check|load)\s+(?:https?://|javascript(?:\(|:)|[a-zA-Z0-9_\-\.]+\.(?:com|org|net|gov|edu|io))\S*\s+and\s+(?:tell\s+me|show\s+me|report|check|verify|what\s+is|identify|attempt)\b', input_lower):
+        # Guard: Web page inspection, browser automation scenarios, and compound browser actions (e.g. "open youtube and retreve the title and scroll down")
+        if re.search(r'\b(?:open|inspect|check|load|browse|visit|go\s+to)\s+(?:https?://|javascript(?:\(|:)|[a-zA-Z0-9_\-\.]+\.(?:com|org|net|gov|edu|io)|youtube|google|wikipedia|gmail|github|reddit|twitter|x|linkedin|facebook|instagram|amazon|netflix)\S*\s+(?:and|then)\s+(?:retreve|retrieve|scroll|get|tell(?:\s+me)?|show(?:\s+me)?|report|check|verify|what\s+is|identify|attempt|extract|read)\b', input_lower):
             return False
         if any(k in input_lower for k in ["browser automation", "browser scenario", "visual change occurred", "visually identical", "dummy password", "nonexistent element"]):
             return False
@@ -306,8 +322,8 @@ class MultiIntentAnalyzer:
             if not any(k in input_lower for k in ["then", "and open", "and play", "and create", "and launch"]):
                 return False
 
-        # Guard: Arithmetic calculation expressions (e.g. "what is 45 plus 55", "10 + 20")
-        if re.search(r'\b(?:what\s+is\s+)?[\d.]+\s*(?:plus|minus|times|multiplied\s+by|divided\s+by|\+|\-|\*|\/)\s*[\d.]+', input_lower):
+        # Guard: Standalone arithmetic calculation expressions (e.g. "what is 45 plus 55", "10 + 20", "100 divided by 5")
+        if re.match(r'^(?:(?:calculate|compute|what\s+is|whats|tell\s+me|find|evaluate|add|sum\s+of)\s+)?(?:the\s+)?(?:sum|difference|product|quotient)?\s*(?:of\s+)?(?:[\d\.]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million)\s*(?:(?:plus|minus|times|multiplied\s+by|divided\s+by|and|\+|\-|\*|\/|x|%)\s*(?:[\d\.]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million)\s*)+[.?!]*$', input_lower):
             return False
 
         # Guard: Natural goal creation statements (e.g. "I need to prepare another presentation for next week")
@@ -327,6 +343,14 @@ class MultiIntentAnalyzer:
            re.search(r'\b(?:plan\s+my\s+week)\b', input_lower):
             if not any(k in input_lower for k in ["then", "and then", "after that", "and open", "and play", "and send", "and create file"]):
                 return False
+
+        # Guard: Negation with affirmative alternative (e.g. "Don't open Chrome, open Calculator", "Instead of creating a doc, open notepad")
+        if re.match(
+            r"^(?:do\s+not|don['’]?t|never)\s+(?:open|launch|run|start|create|make|delete|remove|send|search|play|set)\b.+?(?:[,;]|\s+(?:instead|but)\b)\s*(?:instead\s*,?\s*|please\s+|just\s+)?[a-zA-Z]",
+            input_lower,
+            re.IGNORECASE
+        ) or re.match(r"^instead\s+of\s+.+?(?:[,;]|\s+(?:please|just)\b)\s*(?:please\s+|just\s+)?[a-zA-Z]", input_lower, re.IGNORECASE):
+            return False
 
         for pattern, _ in self.INTENT_CONNECTORS:
             if re.search(pattern, input_lower):
@@ -430,8 +454,9 @@ class MultiIntentAnalyzer:
             if upstream_match and upstream_intent == Intent.OPEN_APPLICATION:
                 up_params = upstream_match.context.get("parameters", {})
                 up_action = up_params.get("action")
-                has_verb = bool(re.match(r'^(?:open|launch|start|run|close|quit|exit|terminate|kill|shut|create|make|delete|remove|save|type|write|search|check|get|tell|show|what|is|how|set|pair|connect)\b', seg_lower))
-                if not has_verb:
+                is_up_website = bool(up_params.get("is_website") or up_params.get("url") or up_action == "open_website")
+                has_verb = bool(re.match(r'^(?:open|launch|start|run|close|quit|exit|terminate|kill|shut|create|make|delete|remove|save|type|write|search|check|get|tell|show|what|is|how|set|pair|connect|retreve|retrieve|scroll|read|extract)\b', seg_lower))
+                if not has_verb and not is_up_website:
                     if up_action == "close" or "close" in upstream_match.matched_text.lower():
                         effective_seg = f"close {effective_seg}"
                         seg_lower = effective_seg.lower()
@@ -519,6 +544,46 @@ class MultiIntentAnalyzer:
             elif is_open_anaphora and (upstream_intent in (Intent.FILE_OPERATIONS, Intent.DOCUMENT_GENERATION, Intent.MEMORY_STORE) or any(m.intent in (Intent.FILE_OPERATIONS, Intent.DOCUMENT_GENERATION) for m in intent_matches)):
                 intent = Intent.OPEN_APPLICATION
                 params = {"action": "open_file", "raw_input": segment_text}
+                confidence = 0.95
+            # 1. Search Result Processing / Synthesis (e.g. "collect the useful results", "summarize them")
+            elif any(k in seg_lower for k in ["collect the useful results", "collect useful results", "summarize them", "summarize the results", "summarize it", "synthesize them"]) and (upstream_intent == Intent.RAG_SEARCH or any(m.intent == Intent.RAG_SEARCH for m in intent_matches)):
+                intent = Intent.RAG_SEARCH
+                params = {"action": "summarize_results", "raw_input": segment_text, "query": upstream_target or "research query"}
+                confidence = 0.95
+            # 2. File Inspection & Content Gap Analysis (e.g. "inspect it", "tell me what is missing")
+            elif any(k in seg_lower for k in ["inspect it", "examine it", "check it", "read it"]) and (upstream_intent == Intent.FILE_OPERATIONS or any(m.intent == Intent.FILE_OPERATIONS for m in intent_matches)):
+                intent = Intent.FILE_OPERATIONS
+                params = {"action": "inspect_file", "raw_input": segment_text, "target": upstream_target or "project report"}
+                confidence = 0.95
+            elif any(k in seg_lower for k in ["tell me what is missing", "what is missing", "check for gaps", "check what is missing", "what is left"]) and (upstream_intent == Intent.FILE_OPERATIONS or any(m.intent == Intent.FILE_OPERATIONS for m in intent_matches)):
+                intent = Intent.FILE_OPERATIONS
+                params = {"action": "analyze_missing", "raw_input": segment_text, "target": upstream_target or "project report"}
+                confidence = 0.95
+            # 3. Calendar & Reminder Scheduling Analysis (e.g. "reminders", "identify conflicts", "tell me what I need to prepare")
+            elif seg_lower in ("reminders", "my reminders", "check reminders", "check my reminders"):
+                intent = Intent.REMINDERS
+                params = {"action": "list_reminders", "raw_input": segment_text}
+                confidence = 0.95
+            elif any(k in seg_lower for k in ["identify conflicts", "check for conflicts", "find conflicts", "any conflicts", "schedule conflicts"]):
+                intent = Intent.REMINDERS
+                params = {"action": "identify_conflicts", "raw_input": segment_text}
+                confidence = 0.95
+            elif any(k in seg_lower for k in ["what i need to prepare", "what do i need to prepare", "tell me what to prepare", "how to prepare", "what to prepare"]):
+                intent = Intent.REMINDERS
+                params = {"action": "prepare_schedule", "raw_input": segment_text}
+                confidence = 0.95
+            # 4. Application Verification & Result Reporting (e.g. "perform the requested change", "verify it", "report the result")
+            elif re.search(r'\b(?:perform|apply|make)\s+(?:the\s+)?(?:requested\s+)?change\b', seg_lower):
+                intent = Intent.DEVICE_CONTROL
+                params = {"action": "perform_change", "raw_input": segment_text}
+                confidence = 0.95
+            elif re.search(r'\b(?:verify\s+(?:it|the\s+change|the\s+result)|check\s+(?:that\s+it\s+worked|if\s+it\s+worked))\b', seg_lower):
+                intent = Intent.DEVICE_CONTROL
+                params = {"action": "verify_action", "raw_input": segment_text}
+                confidence = 0.95
+            elif re.search(r'\b(?:report\s+(?:the\s+)?result|tell\s+me\s+the\s+result|confirm\s+the\s+result)\b', seg_lower):
+                intent = Intent.DEVICE_CONTROL
+                params = {"action": "report_result", "raw_input": segment_text}
                 confidence = 0.95
             else:
                 intent, params = self.router.route_command(effective_seg)

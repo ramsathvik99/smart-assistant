@@ -94,7 +94,15 @@ class SmartOpener:
             self._resolution_cache[name_clean] = detailed
             return detailed
 
-        # 3. System PATH fallback
+        # 3. System PATH fallback (reject CLI console utilities & conversational words)
+        CLI_BLACKLIST = {
+            "help", "your", "ur", "my", "you", "u", "me", "where", "find", "sort",
+            "fc", "comp", "replace", "more", "type", "mode", "tree", "timeout",
+            "doskey", "format", "cleanmgr", "taskkill", "tasklist", "assistance"
+        }
+        if name_clean in CLI_BLACKLIST:
+            return None
+
         which_path = shutil.which(name_clean) or shutil.which(f"{name_clean}.exe")
         if which_path and os.path.exists(which_path):
             dname = os.path.splitext(os.path.basename(which_path))[0].title()

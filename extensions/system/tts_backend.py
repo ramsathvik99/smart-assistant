@@ -492,6 +492,7 @@ class NeuralTTSBackend(TTSBackend):
         producer_error: Optional[str] = None
 
         def _producer_worker():
+            import sys as _sys  # local import: available during interpreter teardown
             nonlocal producer_error
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -544,7 +545,17 @@ class NeuralTTSBackend(TTSBackend):
                             except Exception:
                                 pass
 
-                    loop.run_until_complete(_stream())
+                    # During interpreter teardown, run_in_executor may fail.
+                    # Check before starting network I/O for TTS synthesis.
+                    if _sys.is_finalizing():
+                        break
+                    try:
+                        loop.run_until_complete(_stream())
+                    except RuntimeError as _rte:
+                        if "cannot schedule new futures after shutdown" in str(_rte) \
+                                or "Event loop is closed" in str(_rte):
+                            break  # interpreter is shutting down — exit cleanly
+                        raise
                     if self._interrupted.is_set():
                         break
 
@@ -571,17 +582,26 @@ class NeuralTTSBackend(TTSBackend):
                 logger.error("[NEURAL TTS] Producer worker error: %s", e)
             finally:
                 audio_queue.put(("SENTINEL", producer_error))
+                # Guard: skip asyncio cleanup if the interpreter is already finalizing.
+                # During shutdown, the default thread-pool executor is already shut down,
+                # causing "cannot schedule new futures after shutdown" from asyncio internals.
+                if not _sys.is_finalizing():
+                    try:
+                        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                        for t in pending:
+                            t.cancel()
+                        if pending:
+                            loop.run_until_complete(
+                                asyncio.gather(*pending, return_exceptions=True))
+                        loop.run_until_complete(loop.shutdown_asyncgens())
+                        # asyncio.sleep(0.05) removed: unnecessary drain that
+                        # fires run_in_executor on a potentially dead executor.
+                    except Exception:
+                        pass
                 try:
-                    pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                    for t in pending:
-                        t.cancel()
-                    if pending:
-                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                    loop.run_until_complete(loop.shutdown_asyncgens())
-                    loop.run_until_complete(asyncio.sleep(0.05))
+                    loop.close()
                 except Exception:
                     pass
-                loop.close()
 
         producer_thread = threading.Thread(target=_producer_worker, daemon=True)
         producer_thread.start()
@@ -722,7 +742,14 @@ class NeuralTTSBackend(TTSBackend):
                 if self._interrupted.is_set():
                     break
 
-                current_sentence_item = audio_queue.get()
+                current_sentence_item = None
+                while not self._interrupted.is_set():
+                    try:
+                        current_sentence_item = audio_queue.get(timeout=0.1)
+                        break
+                    except Exception:
+                        if self._interrupted.is_set() or not self._is_playing:
+                            break
 
         except Exception as e:
             if not (self._interrupted.is_set() or "stream is stopped" in str(e).lower() or "-9983" in str(e)):
@@ -749,12 +776,18 @@ class NeuralTTSBackend(TTSBackend):
                 except Exception:
                     break
 
-        total_duration_ms = (time.time() - t_start) * 1000.0
+        wall_clock_ms = (time.time() - t_start) * 1000.0
+        result.interrupted = self._interrupted.is_set()
+        if result.interrupted and result.frame_count > 0:
+            actual_audio_ms = (result.frame_count / 24000.0) * 1000.0
+            total_duration_ms = actual_audio_ms
+        else:
+            total_duration_ms = wall_clock_ms
+
         result.duration_ms = total_duration_ms
         result.playback_ms = total_duration_ms
         result.backend_used = "neural"
         result.voice_used = chosen_voice
-        result.interrupted = self._interrupted.is_set()
         if result.sentences_played == 0 and not result.interrupted and not result.error:
             result.error = "No audio sentences were played"
 
@@ -1144,9 +1177,18 @@ class TTSBackendManager:
             "neural": NeuralTTSBackend(),
             "sapi": SAPIBackend(),
         }
+        try:
+            from modules.voice_studio.voice_studio_bridge import VoiceStudioTTSBackend
+            self._backends["voicestudio"] = VoiceStudioTTSBackend()
+            self._backends["omnivoice"] = self._backends["voicestudio"]
+        except Exception as _vs_err:
+            logger.debug("[TTS BACKEND MANAGER] VoiceStudio backend registration: %s", _vs_err)
+
         prov = os.getenv("TTS_PROVIDER") or os.getenv("VOICE_ENGINE") or "neural"
         if "sapi" in prov.lower() or "windows" in prov.lower():
             self._active_backend_name = "sapi"
+        elif "voicestudio" in prov.lower() or "omnivoice" in prov.lower():
+            self._active_backend_name = "voicestudio"
         else:
             self._active_backend_name = "neural"
         self._lock = threading.Lock()
@@ -1166,6 +1208,8 @@ class TTSBackendManager:
             low = name.lower()
             if "sapi" in low or "windows" in low:
                 self._active_backend_name = "sapi"
+            elif "voicestudio" in low or "omnivoice" in low:
+                self._active_backend_name = "voicestudio"
             elif "neural" in low or "edge" in low:
                 self._active_backend_name = "neural"
             else:

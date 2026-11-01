@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 
 from ..ds import (
     C, F, Spacing, Radius, ICONS, icon, icon_pixmap,
-    HLine, VLine, Card, StatusChip, SectionHeader,
+    HLine, VLine, Card, StatusChip, SectionHeader, StatNumeral,
     LoadingState, EmptyState, ErrorState,
     rgba_str, get_contrast_color,
 )
@@ -80,7 +80,7 @@ class IntelligencePage(QWidget):
         head = QHBoxLayout(); head.setSpacing(Spacing.MD)
         sh = SectionHeader("Intelligence",
                           "What the assistant knows, remembers, and has learned about you.",
-                          accent=C.SEC_INTELLIGENCE)
+                          accent=C.ACC)
         head.addWidget(sh, 1); head.addStretch(1)
         self._search = QLineEdit(); self._search.setPlaceholderText("Search memory, rules, and history…")
         self._search.addAction(icon(ICONS.SEARCH, C.TEXT_DIM, 14), QLineEdit.ActionPosition.LeadingPosition)
@@ -95,33 +95,43 @@ class IntelligencePage(QWidget):
         refresh.clicked.connect(self._reload)
         head.addWidget(refresh)
         self._new_btn = QPushButton("  New Preference")
-        self._new_btn.setObjectName("PrimaryBtn"); self._new_btn.setIcon(icon(ICONS.LIGHTBULB, get_contrast_color(C.ACCENT), 14))
+        self._new_btn.setObjectName("PrimaryBtn"); self._new_btn.setIcon(icon(ICONS.LIGHTBULB, get_contrast_color(C.ACC), 14))
         self._new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._new_btn.clicked.connect(self._new_rule)
         head.addWidget(self._new_btn)
         hw = QWidget(); hw.setLayout(head)
         root.addWidget(hw)
 
-        # Stats: Purple primary, green for learned/saved, cyan for active context
-        sr = QHBoxLayout(); sr.setSpacing(Spacing.MD)
-        self._s_rules = self._stat("Learned Rules",   "0", ICONS.LIGHTBULB,   C.SEC_INTELLIGENCE)
-        self._s_hist  = self._stat("Recent Interactions", "0", ICONS.ASSISTANT, C.SEC_INTELLIGENCE)
-        self._s_prefs = self._stat("Saved Preferences", "0", ICONS.STAR,       C.STATUS_SUCCESS)
-        self._s_ctx   = self._stat("Active Context",  "—", ICONS.BRAIN,       C.STATUS_ACTIVE)
+        # Open metrics strip
+        strip = QFrame()
+        strip.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                border-radius: {Radius.MD}px;
+            }}
+        """)
+        sr = QHBoxLayout(strip)
+        sr.setContentsMargins(Spacing.LG, Spacing.MD, Spacing.LG, Spacing.MD)
+        sr.setSpacing(Spacing.XL)
+        self._s_rules = StatNumeral("Learned Rules", "0", accent=C.ACC)
+        self._s_hist  = StatNumeral("Recent Interactions", "0", accent=C.ACC)
+        self._s_prefs = StatNumeral("Saved Preferences", "0", accent=C.STATUS_SUCCESS)
+        self._s_ctx   = StatNumeral("Active Context", "—", accent=C.ACC)
         for s in (self._s_rules, self._s_hist, self._s_prefs, self._s_ctx):
-            sr.addWidget(s, 1)
-        sw = QWidget(); sw.setLayout(sr)
-        root.addWidget(sw)
+            sr.addWidget(s)
+        sr.addStretch(1)
+        root.addWidget(strip)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # --- Rules + learned preferences ---
-        rules_card = Card(title="Learned Rules / Preferences", accent=C.SEC_INTELLIGENCE)
+        rules_card = Card(title="Learned Rules / Preferences", accent=C.ACC)
         self._loading_rules = LoadingState("Loading rules…")
         rules_card.body.addWidget(self._loading_rules)
         self._rules_empty = EmptyState(ICONS.LIGHTBULB, "No learned rules yet",
                                        "The assistant will build preferences as it learns about you.",
-                                       accent=C.SEC_INTELLIGENCE)
+                                       accent=C.ACC)
         rules_card.body.addWidget(self._rules_empty)
         self._rules_empty.setVisible(False)
         rules_scroller = QScrollArea()
@@ -140,12 +150,12 @@ class IntelligencePage(QWidget):
         # --- Right: Preferences + Conversation memory ---
         right = QSplitter(Qt.Orientation.Vertical)
 
-        prefs_card = Card(title="Stored Preferences (user_preferences)", accent=C.SEC_INTELLIGENCE)
+        prefs_card = Card(title="Stored Preferences", accent=C.ACC)
         self._loading_prefs = LoadingState("Loading preferences…")
         prefs_card.body.addWidget(self._loading_prefs)
         self._prefs_empty = EmptyState(ICONS.STAR, "No saved preferences",
                                        "Customize assistant behavior through the Settings page.",
-                                       accent=C.SEC_INTELLIGENCE)
+                                       accent=C.ACC)
         self._prefs_empty.setVisible(False)
         prefs_card.body.addWidget(self._prefs_empty)
         self._prefs_table = QTableWidget(0, 2)
@@ -161,12 +171,12 @@ class IntelligencePage(QWidget):
         prefs_card.body.addWidget(self._prefs_table, 1)
         right.addWidget(prefs_card)
 
-        hist_card = Card(title="Recent Interactions", accent=C.SEC_INTELLIGENCE)
+        hist_card = Card(title="Recent Interactions", accent=C.ACC)
         self._loading_hist = LoadingState("Loading recent interactions…")
         hist_card.body.addWidget(self._loading_hist)
         self._hist_empty = EmptyState(ICONS.ASSISTANT, "No conversation history",
                                       "Recent interactions will appear here as you use the assistant.",
-                                      accent=C.SEC_INTELLIGENCE)
+                                      accent=C.ACC)
         self._hist_empty.setVisible(False)
         hist_card.body.addWidget(self._hist_empty)
         self._hist_table = QTableWidget(0, 3)
@@ -238,7 +248,14 @@ class IntelligencePage(QWidget):
         else:
             self._rules_empty.setVisible(False)
         for r in self._rules:
-            w = QFrame(); w.setProperty("class", "CardInner")
+            w = QFrame()
+            w.setStyleSheet(f"""
+                QFrame {{
+                    background: rgba(255, 255, 255, 0.02);
+                    border: 1px solid rgba(255, 255, 255, 0.06);
+                    border-radius: {Radius.MD}px;
+                }}
+            """)
             l = QHBoxLayout(w); l.setContentsMargins(Spacing.MD, 8, Spacing.MD, 8)
             l.setSpacing(Spacing.MD)
             chip = StatusChip("ACTIVE", "active"); l.addWidget(chip)
@@ -283,7 +300,7 @@ class IntelligencePage(QWidget):
                      if q in (str(k) + " " + str(v)).lower()]
         self._prefs_table.setRowCount(len(items))
         for i, (k, v) in enumerate(items):
-            ki = QTableWidgetItem(str(k)); ki.setForeground(QColor(C.SEC_INTELLIGENCE))
+            ki = QTableWidgetItem(str(k)); ki.setForeground(QColor(C.ACC))
             vi = QTableWidgetItem(str(v)[:200])
             vi.setFlags(vi.flags() | Qt.ItemFlag.ItemIsEditable)
             vi.setData(Qt.ItemDataRole.UserRole, k)  # store key for save
@@ -316,7 +333,7 @@ class IntelligencePage(QWidget):
             content = (m.get("content") or "")[:200]
             when = str(m.get("created_at") or "")[:19]
             ri = QTableWidgetItem(role.upper())
-            ri.setForeground(QColor(C.SEC_INTELLIGENCE if role == "user" else C.STATUS_ACTIVE))
+            ri.setForeground(QColor(C.ACC if role == "user" else C.STATUS_SUCCESS))
             self._hist_table.setItem(i, 0, ri)
             self._hist_table.setItem(i, 1, QTableWidgetItem(content))
             self._hist_table.setItem(i, 2, QTableWidgetItem(when))

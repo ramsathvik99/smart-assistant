@@ -2014,6 +2014,63 @@ def initiate_system_power(action: str, delay_seconds: int = 0, confirmed_by_user
         return {"success": False, "status": "error", "message": f"System power action failed: {e}"}
 
 
+def lock_workstation(dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Lock the Windows workstation and verify lock state.
+    """
+    try:
+        from core.os_gateway.system_ops import lock_workstation as _native_lock, get_lock_state
+        res = _native_lock(dry_run=dry_run)
+        state = get_lock_state()
+        is_locked = state.get("is_locked", False) if state.get("success") else res.get("success", False)
+        return {
+            "success": res.get("success", False),
+            "target": "windows",
+            "action": "lock_workstation",
+            "is_locked": is_locked,
+            "message": "Locked your Windows computer." if res.get("success") else res.get("message", "Failed to lock workstation."),
+            "data": res,
+        }
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to lock workstation: {e}")
+        return {"success": False, "target": "windows", "status": "error", "message": f"Lock failed: {e}"}
+
+
+def get_windows_lock_state() -> Dict[str, Any]:
+    """
+    Check if the Windows workstation is currently locked without exposing credentials.
+    """
+    try:
+        from core.os_gateway.system_ops import get_lock_state
+        return get_lock_state()
+    except Exception as e:
+        logger.error(f"[SYSTEM] Failed to check Windows lock state: {e}")
+        return {"success": False, "target": "windows", "status": "error", "message": f"Check lock failed: {e}"}
+
+
+def unlock_workstation() -> Dict[str, Any]:
+    """
+    Direct user to legitimate Windows authentication screen; never bypass credentials.
+    """
+    try:
+        state = get_windows_lock_state()
+        is_locked = state.get("is_locked", False)
+        if is_locked:
+            msg = "The Windows workstation is currently locked. For security reasons, please authenticate directly with your PIN, password, or Windows Hello on the Windows sign-in screen."
+        else:
+            msg = "The Windows workstation is already unlocked and active."
+        return {
+            "success": True,
+            "target": "windows",
+            "action": "unlock_workstation",
+            "is_locked": is_locked,
+            "status": "manual_authentication_required" if is_locked else "already_unlocked",
+            "message": msg,
+        }
+    except Exception as e:
+        return {"success": False, "target": "windows", "status": "error", "message": str(e)}
+
+
 def list_installed_software(query: Optional[str] = None) -> Dict[str, Any]:
     """
     Query installed applications via Windows Registry (HKLM & HKCU, 32-bit & 64-bit).

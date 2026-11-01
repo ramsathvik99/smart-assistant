@@ -228,7 +228,34 @@ class MultilingualEngine:
                 self._detection_cache[norm_lower] = res
             return res
 
-        # 5. External model detection via deep_translator
+        # 5. Fast heuristic for standard English vocabulary (avoids ~940ms external network call)
+        if all(ord(c) < 128 for c in clean):
+            words = set(re.findall(r"\b[a-zA-Z]{2,}\b", norm_lower))
+            COMMON_EN = {
+                "the", "be", "to", "of", "and", "a", "in", "that", "have", "i", "it", "for", "not", "on", "with",
+                "he", "as", "you", "do", "at", "this", "but", "his", "by", "from", "they", "we", "say", "her", "she",
+                "or", "an", "will", "my", "one", "all", "would", "there", "their", "what", "so", "up", "out", "if",
+                "about", "who", "get", "which", "go", "me", "when", "make", "can", "like", "time", "no", "just", "him",
+                "know", "take", "people", "into", "year", "your", "good", "some", "could", "them", "see", "other",
+                "than", "then", "now", "look", "only", "come", "its", "over", "think", "also", "back", "after", "use",
+                "two", "how", "our", "work", "first", "well", "way", "even", "new", "want", "because", "any", "these",
+                "give", "day", "most", "us", "open", "close", "launch", "start", "stop", "calculator", "chrome",
+                "notepad", "document", "word", "excel", "presentation", "powerpoint", "pdf", "file", "folder",
+                "reminder", "alarm", "calendar", "event", "meeting", "weather", "music", "play", "pause", "volume",
+                "mute", "unmute", "search", "google", "youtube", "browser", "window", "screen", "screenshot",
+                "hello", "hi", "hey", "thanks", "thank", "please", "yes", "ok", "okay", "cancel", "delete", "clear",
+                "help", "error", "code", "run", "write", "type", "today", "tomorrow", "yesterday", "now", "later",
+                "tell", "show", "read", "speak", "voice", "assistant", "friday", "nova", "why", "where", "how", "is",
+                "are", "was", "were", "feel", "joke", "about", "don't", "dont", "instead", "of", "terminate", "process",
+                "sky", "blue", "divide", "plus", "minus", "times", "calculate", "find"
+            }
+            if words and words.intersection(COMMON_EN):
+                res = LanguageDetectionResult("en", "en-US", 0.99, "latin", False)
+                with self._state_lock:
+                    self._detection_cache[norm_lower] = res
+                return res
+
+        # 6. External model detection via deep_translator (fallback for uncommon foreign Latin scripts)
         detected_code = "en"
         confidence = 0.8
         try:

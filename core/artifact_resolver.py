@@ -198,16 +198,17 @@ class ArtifactReferenceResolver:
 
             # Signal 6: Contextual / Session Active Artifact
             if dialogue_state and hasattr(dialogue_state, "session_context"):
-                last_id = dialogue_state.session_context.get("last_content_artifact_id")
-                if last_id == art.artifact_id:
-                    score += 2.0
-                    signals.append("active_session_focus")
+                if has_pronoun or self._is_pure_pronoun(low_text):
+                    last_id = dialogue_state.session_context.get("last_content_artifact_id")
+                    if last_id == art.artifact_id:
+                        score += 2.0
+                        signals.append("active_session_focus")
 
-                # If dialogue mentions a topic lock
-                topic_lock = dialogue_state.session_context.get("last_artifact_topic")
-                if topic_lock and topic_lock.lower() in topic_low:
-                    score += 3.0
-                    signals.append("dialogue_topic_lock")
+                    # If dialogue mentions a topic lock
+                    topic_lock = dialogue_state.session_context.get("last_artifact_topic")
+                    if topic_lock and topic_lock.lower() in topic_low:
+                        score += 3.0
+                        signals.append("dialogue_topic_lock")
 
             # Signal 7: Recency (Micro tie-breaker only if at least one semantic signal matched)
             if signals:

@@ -63,29 +63,30 @@ C.ACC_AMBER = "#F59E0B"
 C.ACC_ROSE = "#F43F5E"
 C.ACCENT_GREEN = getattr(C, "GREEN", C.ACC_EMERALD)
 
-# Section-specific semantic accents
-C.SEC_DASHBOARD = "#00D4FF"      # Cyan for dashboard
-C.SEC_ASSISTANT = "#00D4FF"     # Cyan/blue for assistant
-C.SEC_COMMUNICATIONS = "#3B82F6" # Blue for email
-C.SEC_WORKSPACE = "#6366F1"     # Indigo for files
-C.SEC_SCHEDULE = "#8B5CF6"       # Violet for calendar
-C.SEC_AUTOMATION = "#F59E0B"     # Amber for automation
-C.SEC_CONNECTED = "#14B8A6"       # Teal for devices
-C.SEC_INTELLIGENCE = "#A855F7"   # Purple for memory
-C.SEC_SETTINGS = "#0EA5E9"        # Calm cyan/blue for settings
-C.SEC_SETTINGS_GREEN = "#10B981"  # Status success green for settings diagnostics
-C.SEC_SETTINGS_VIOLET = "#8B5CF6" # Violet accent for settings options
+# Unified Theme Accent: All sections use the Settings theme color (C.ACC)
+C.SEC_DASHBOARD = C.ACC
+C.SEC_ASSISTANT = C.ACC
+C.SEC_COMMUNICATIONS = C.ACC
+C.SEC_WORKSPACE = C.ACC
+C.SEC_SCHEDULE = C.ACC
+C.SEC_AUTOMATION = C.ACC
+C.SEC_CONNECTED = C.ACC
+C.SEC_INTELLIGENCE = C.ACC
+C.SEC_SETTINGS = C.ACC
+C.SEC_SETTINGS_GREEN = "#10B981"  # Success green
+C.SEC_SETTINGS_VIOLET = C.ACC
 
-# Semantic status colors (consistent across all pages)
+# Semantic status colors: Only success green, warning amber, error red, and offline grey differ.
+# CONNECTED and ACTIVE are success, so they MUST be green.
 C.STATUS_SUCCESS = "#10B981"      # Green
 C.STATUS_CONNECTED = "#10B981"    # Green
-C.STATUS_ACTIVE = "#00D4FF"       # Cyan
-C.STATUS_INFO = "#3B82F6"         # Blue
+C.STATUS_ACTIVE = "#10B981"       # Green
+C.STATUS_INFO = C.ACC             # Theme accent
 C.STATUS_WARNING = "#F59E0B"      # Amber
 C.STATUS_PENDING = "#F59E0B"      # Amber
 C.STATUS_ERROR = "#F43F5E"        # Red
 C.STATUS_OFFLINE = "#6B7280"      # Muted gray
-C.STATUS_DISABLED = "#4B5563"    # Neutral gray
+C.STATUS_DISABLED = "#6B7280"     # Neutral gray
 
 # Semantic fallbacks (base C class is source of truth if populated)
 for src, alias in [
@@ -174,7 +175,7 @@ class Elevation:
 
 
 class SidebarSize:
-    WIDTH_EXPANDED = 260
+    WIDTH_EXPANDED = 272
     WIDTH_COLLAPSED = 70
     TOPBAR_HEIGHT = 64
     STATUS_HEIGHT = 36
@@ -332,6 +333,7 @@ class ICONS:
     BATTERY = "fa5s.battery-half"
     FOLDER_OPEN = "fa5s.folder-open"
     BOLT = "fa5s.bolt"
+    LINK = "fa5s.link"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -525,30 +527,39 @@ def make_elevation(widget: QWidget, y_off: int = 3, blur: int = 18,
 def clear_layout(layout):
     if layout is None:
         return
-    while layout.count():
-        item = layout.takeAt(0)
-        if item is None:
-            continue
-        try:
-            w = item.widget()
-            if w is not None:
-                try:
-                    import sip
-                    if not sip.isdeleted(w):
-                        w.setParent(None)
-                        w.deleteLater()
-                except Exception:
+    try:
+        import sip
+        if sip.isdeleted(layout):
+            return
+    except Exception:
+        pass
+    try:
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is None:
+                continue
+            try:
+                w = item.widget()
+                if w is not None:
                     try:
-                        w.setParent(None)
-                        w.deleteLater()
+                        import sip
+                        if not sip.isdeleted(w):
+                            w.setParent(None)
+                            w.deleteLater()
                     except Exception:
-                        pass
-            else:
-                sub = item.layout()
-                if sub is not None:
-                    clear_layout(sub)
-        except Exception:
-            pass
+                        try:
+                            w.setParent(None)
+                            w.deleteLater()
+                        except Exception:
+                            pass
+                else:
+                    sub = item.layout()
+                    if sub is not None:
+                        clear_layout(sub)
+            except Exception:
+                pass
+    except (RuntimeError, Exception):
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -870,12 +881,12 @@ def dashboard_stylesheet(accent_hex: str = C.ACCENT_CYAN) -> str:
         background: transparent;
         color: {C.TEXT_MED};
         border: 1px solid transparent;
-        border-radius: 9px;
-        padding: 11px 14px 11px 14px;
+        border-radius: 8px;
+        padding: 8px 12px;
         text-align: left;
         font-weight: 500;
         font-size: 13px;
-        margin: 1px {SidebarSize.NAV_PAD_H}px;
+        margin: 1px 4px;
     }}
     .NavButton:hover {{
         background: {C.SIDEBAR_HOVER};
@@ -886,12 +897,13 @@ def dashboard_stylesheet(accent_hex: str = C.ACCENT_CYAN) -> str:
         background: {acc_dim};
         color: {accent};
         border: 1px solid {acc_border_a};
+        font-weight: 600;
     }}
     .NavButton[active="true"]:hover {{ background: {acc_dim2}; }}
     .NavButton[collapsed="true"] {{
         text-align: center;
-        padding: 10px 0px 10px 0px;
-        margin: 2px 8px;
+        padding: 0px;
+        margin: 1px 0px;
     }}
 
     /* ---------- Buttons — standard ---------- */
@@ -1205,17 +1217,17 @@ def dashboard_stylesheet(accent_hex: str = C.ACCENT_CYAN) -> str:
         font-weight: 600;
         letter-spacing: 0.3px;
     }}
-    .StatusChip[state="online"]    {{ background: {rgba_str(C.STATUS_SUCCESS, 0.10)};  color: {C.STATUS_SUCCESS};    border-color: {rgba_str(C.STATUS_SUCCESS, 0.24)}; }}
-    .StatusChip[state="connected"] {{ background: {rgba_str(C.STATUS_CONNECTED, 0.10)};  color: {C.STATUS_CONNECTED};    border-color: {rgba_str(C.STATUS_CONNECTED, 0.24)}; }}
-    .StatusChip[state="idle"]      {{ background: {rgba_str(C.STATUS_ACTIVE, 0.10)}; color: {C.STATUS_ACTIVE}; border-color: {rgba_str(C.STATUS_ACTIVE, 0.20)}; }}
-    .StatusChip[state="listening"] {{ background: {rgba_str(C.STATUS_ACTIVE, 0.14)}; color: {C.STATUS_ACTIVE}; border-color: {rgba_str(C.STATUS_ACTIVE, 0.32)}; }}
-    .StatusChip[state="active"]    {{ background: {rgba_str(C.STATUS_ACTIVE, 0.10)}; color: {C.STATUS_ACTIVE}; border-color: {rgba_str(C.STATUS_ACTIVE, 0.22)}; }}
-    .StatusChip[state="thinking"]  {{ background: {C.ACC_VIOLET_DIM};      color: {C.ACC_VIOLET}; border-color: {rgba_str(C.ACC_VIOLET, 0.26)}; }}
-    .StatusChip[state="speaking"]  {{ background: {rgba_str(C.STATUS_SUCCESS, 0.12)};  color: {C.STATUS_SUCCESS};    border-color: {rgba_str(C.STATUS_SUCCESS, 0.28)}; }}
-    .StatusChip[state="executing"] {{ background: {rgba_str(C.STATUS_WARNING, 0.12)}; color: {C.STATUS_WARNING};   border-color: {rgba_str(C.STATUS_WARNING, 0.28)}; }}
-    .StatusChip[state="warning"]   {{ background: {rgba_str(C.STATUS_WARNING, 0.12)}; color: {C.STATUS_WARNING};   border-color: {rgba_str(C.STATUS_WARNING, 0.28)}; }}
-    .StatusChip[state="pending"]   {{ background: {rgba_str(C.STATUS_PENDING, 0.12)}; color: {C.STATUS_PENDING};   border-color: {rgba_str(C.STATUS_PENDING, 0.28)}; }}
-    .StatusChip[state="info"]      {{ background: {rgba_str(C.STATUS_INFO, 0.12)}; color: {C.STATUS_INFO};         border-color: {rgba_str(C.STATUS_INFO, 0.28)}; }}
+    .StatusChip[state="online"]    {{ background: {rgba_str(C.STATUS_SUCCESS, 0.12)};  color: {C.STATUS_SUCCESS};    border-color: {rgba_str(C.STATUS_SUCCESS, 0.28)}; }}
+    .StatusChip[state="connected"] {{ background: {rgba_str(C.STATUS_SUCCESS, 0.12)};  color: {C.STATUS_SUCCESS};    border-color: {rgba_str(C.STATUS_SUCCESS, 0.28)}; }}
+    .StatusChip[state="active"]    {{ background: {rgba_str(C.STATUS_SUCCESS, 0.12)};  color: {C.STATUS_SUCCESS};    border-color: {rgba_str(C.STATUS_SUCCESS, 0.28)}; }}
+    .StatusChip[state="idle"]      {{ background: {rgba_str(C.ACC, 0.10)}; color: {C.ACC}; border-color: {rgba_str(C.ACC, 0.20)}; }}
+    .StatusChip[state="listening"] {{ background: {rgba_str(C.ACC, 0.14)}; color: {C.ACC}; border-color: {rgba_str(C.ACC, 0.32)}; }}
+    .StatusChip[state="thinking"]  {{ background: {rgba_str(C.ACC, 0.14)}; color: {C.ACC}; border-color: {rgba_str(C.ACC, 0.30)}; }}
+    .StatusChip[state="speaking"]  {{ background: {rgba_str(C.ACC, 0.16)}; color: {C.ACC}; border-color: {rgba_str(C.ACC, 0.34)}; }}
+    .StatusChip[state="executing"] {{ background: {rgba_str(C.ACC, 0.14)}; color: {C.ACC}; border-color: {rgba_str(C.ACC, 0.30)}; }}
+    .StatusChip[state="warning"]   {{ background: {rgba_str(C.STATUS_WARNING, 0.12)}; color: {C.STATUS_WARNING}; border-color: {rgba_str(C.STATUS_WARNING, 0.28)}; }}
+    .StatusChip[state="pending"]   {{ background: {rgba_str(C.STATUS_WARNING, 0.12)}; color: {C.STATUS_WARNING}; border-color: {rgba_str(C.STATUS_WARNING, 0.28)}; }}
+    .StatusChip[state="info"]      {{ background: {rgba_str(C.ACC, 0.12)}; color: {C.ACC}; border-color: {rgba_str(C.ACC, 0.28)}; }}
     .StatusChip[state="error"]     {{ background: {rgba_str(C.STATUS_ERROR, 0.12)};    color: {C.STATUS_ERROR};      border-color: {rgba_str(C.STATUS_ERROR, 0.28)}; }}
     .StatusChip[state="offline"]   {{ background: {rgba_str(C.STATUS_OFFLINE, 0.08)}; color: {C.STATUS_OFFLINE}; border-color: {rgba_str(C.STATUS_OFFLINE, 0.22)}; }}
     .StatusChip[state="disabled"]  {{ background: {rgba_str(C.STATUS_DISABLED, 0.08)}; color: {C.STATUS_DISABLED}; border-color: {rgba_str(C.STATUS_DISABLED, 0.20)}; }}
@@ -1295,6 +1307,28 @@ def dashboard_stylesheet(accent_hex: str = C.ACCENT_CYAN) -> str:
         background: transparent;
         border-top: 1px solid {C.DIVIDER};
         min-height: 1px; max-height: 1px;
+    }}
+
+    /* Translucent Glass Panels with Thin Accent Edges and HUD Corner Ticks */
+    .CardPanel, QFrame[class="CardPanel"] {{
+        background: rgba(10, 16, 26, 0.65);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-top: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: {Radius.MD2}px;
+    }}
+    .CardPanel[accented="true"], QFrame[class="CardPanel"][accented="true"] {{
+        background: rgba(12, 20, 32, 0.75);
+        border: 1px solid {acc_border_a};
+        border-top: 1px solid {accent};
+    }}
+    .CardInner, QFrame[class="CardInner"] {{
+        background: rgba(8, 14, 24, 0.55);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: {Radius.MD}px;
+    }}
+    .CardInner:hover, QFrame[class="CardInner"]:hover {{
+        background: rgba(12, 20, 34, 0.70);
+        border-color: {acc_border_a};
     }}
     """
 
@@ -1407,6 +1441,60 @@ class Card(QFrame):
     def add(self, w: QWidget):
         self.body.addWidget(w)
 
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = float(self.width()), float(self.height())
+        tick_len = 8.0
+        is_acc = self.property("accented") == "true"
+        r, g, b = hex_to_rgb(self._acc if is_acc else C.BORDER_HARD)
+        alpha = 190 if is_acc else 80
+        pen = QPen(QColor(r, g, b, alpha))
+        pen.setWidthF(1.0)
+        p.setPen(pen)
+        # Top-left corner tick
+        p.drawLine(QPointF(4.0, 4.0), QPointF(4.0 + tick_len, 4.0))
+        p.drawLine(QPointF(4.0, 4.0), QPointF(4.0, 4.0 + tick_len))
+        # Top-right corner tick
+        p.drawLine(QPointF(w - 4.0, 4.0), QPointF(w - 4.0 - tick_len, 4.0))
+        p.drawLine(QPointF(w - 4.0, 4.0), QPointF(w - 4.0, 4.0 + tick_len))
+        # Bottom-left corner tick
+        p.drawLine(QPointF(4.0, h - 4.0), QPointF(4.0 + tick_len, h - 4.0))
+        p.drawLine(QPointF(4.0, h - 4.0), QPointF(4.0, h - 4.0 - tick_len))
+        # Bottom-right corner tick
+        p.drawLine(QPointF(w - 4.0, h - 4.0), QPointF(w - 4.0 - tick_len, h - 4.0))
+        p.drawLine(QPointF(w - 4.0, h - 4.0), QPointF(w - 4.0, h - 4.0 - tick_len))
+        p.end()
+
+
+
+import weakref
+
+_ANIMATED_WIDGETS: weakref.WeakSet = weakref.WeakSet()
+
+def register_animated_widget(widget: QWidget):
+    """Register widget to receive master clock animation frames without its own QTimer."""
+    try:
+        _ANIMATED_WIDGETS.add(widget)
+    except Exception:
+        pass
+
+def unregister_animated_widget(widget: QWidget):
+    try:
+        _ANIMATED_WIDGETS.discard(widget)
+    except Exception:
+        pass
+
+def dispatch_master_clock_tick(dt: float, master_time: float):
+    """Single master clock dispatcher that drives visible widgets synchronously."""
+    for w in list(_ANIMATED_WIDGETS):
+        try:
+            if w.isVisible() and hasattr(w, "on_clock_tick"):
+                w.on_clock_tick(dt, master_time)
+        except Exception:
+            pass
+
 
 class StatusChip(QLabel):
     """Small colored pill with built-in state map and dynamic repolish.
@@ -1437,25 +1525,26 @@ class StatusChip(QLabel):
         self.setText(text)
         self._state_val = "offline"
         self.set_state(state)
+        self._t = None
+        register_animated_widget(self)
 
-        # Gentle LED pulse timer
-        self._t = QTimer(self)
-        self._t.timeout.connect(self._tick)
-        self._t.start(80)
+    def on_clock_tick(self, dt: float, master_time: float):
+        if self._show_led and self._state_val in ("listening", "thinking", "speaking", "executing"):
+            self._led_anim = master_time * 4.0
+            self.update()
 
     def set_state(self, state: str):
         s = self._STATE_MAP.get((state or "").lower(), "offline")
         self._state_val = s
         self.setProperty("state", s)
         self.style().unpolish(self); self.style().polish(self)
+        self.update()
 
     def state(self) -> str:
         return self._state_val
 
     def _tick(self):
-        self._led_anim = (self._led_anim + 0.13) % (2 * math.pi)
-        if self._show_led:
-            self.update()
+        pass
 
     def paintEvent(self, ev):
         super().paintEvent(ev)
@@ -1464,17 +1553,16 @@ class StatusChip(QLabel):
         # Draw a tiny pulsing LED dot on the left of the text.
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        state_colors = {
-            "online": C.STATUS_SUCCESS, "connected": C.STATUS_CONNECTED,
-            "idle": C.STATUS_ACTIVE, "active": C.STATUS_ACTIVE,
-            "listening": C.STATUS_ACTIVE, "thinking": C.ACC_VIOLET,
-            "speaking": C.STATUS_SUCCESS, "executing": C.STATUS_WARNING,
-            "warning": C.STATUS_WARNING, "pending": C.STATUS_PENDING,
-            "info": C.STATUS_INFO,
-            "error": C.STATUS_ERROR, "offline": C.STATUS_OFFLINE,
-            "disabled": C.STATUS_DISABLED,
-        }
-        accent = state_colors.get(self._state_val, C.STATUS_OFFLINE)
+        if self._state_val in ("error", "failed"):
+            accent = C.STATUS_ERROR
+        elif self._state_val in ("offline", "disabled"):
+            accent = C.STATUS_OFFLINE
+        elif self._state_val in ("online", "connected", "active", "ok"):
+            accent = C.STATUS_SUCCESS
+        elif self._state_val in ("warning", "pending", "waiting"):
+            accent = C.STATUS_WARNING
+        else:
+            accent = C.ACC
         r, g, b = hex_to_rgb(accent)
         pulse = 0.5 + 0.5 * math.sin(self._led_anim) if self._state_val in (
             "listening", "thinking", "speaking", "executing") else 0.0
@@ -1522,6 +1610,7 @@ class SectionHeader(QWidget):
         if subtitle:
             self.sub_lbl = QLabel(subtitle)
             self.sub_lbl.setObjectName("PageSubtitle")
+            self.sub_lbl.setWordWrap(True)
             text_col.addWidget(self.sub_lbl)
         self._root.addLayout(text_col, 1)
 
@@ -1544,6 +1633,38 @@ class SectionHeader(QWidget):
         self.actions.addWidget(widget)
 
     def set_title(self, text: str): self.title_lbl.setText(text)
+
+
+class StatNumeral(QWidget):
+    """Clean open spatial telemetry: large light-weight numeral with small label."""
+    def __init__(self, label: str, value: str = "0", parent=None, accent: str = None):
+        super().__init__(parent)
+        self._accent = accent
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(2)
+        val_color = accent if accent else C.TEXT
+        self._val_lbl = QLabel(str(value))
+        self._val_lbl.setStyleSheet(f"""
+            font-size: 28px;
+            font-weight: 300;
+            letter-spacing: -0.5px;
+            color: {val_color};
+            background: transparent;
+        """)
+        self._cap_lbl = QLabel(label.upper())
+        self._cap_lbl.setStyleSheet(f"""
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.2px;
+            color: {rgba_str(C.TEXT_DIM, 0.75)};
+            background: transparent;
+        """)
+        lay.addWidget(self._val_lbl)
+        lay.addWidget(self._cap_lbl)
+
+    def set_value(self, val: str):
+        self._val_lbl.setText(str(val))
 
     def set_subtitle(self, text: str):
         if self.sub_lbl is None:
@@ -1582,13 +1703,15 @@ class LoadingState(QWidget):
             self._sublabel.setWordWrap(True)
             root.addWidget(self._sublabel)
         root.addStretch(3)
-        self._tmr = QTimer(self)
-        self._tmr.timeout.connect(self._tick)
-        self._tmr.start(55)
+        self._tmr = None
+        register_animated_widget(self)
+
+    def on_clock_tick(self, dt: float, master_time: float):
+        self._t = master_time
+        self.update()
 
     def _tick(self):
-        self._t += 0.085
-        self.update()
+        pass
 
     def paintEvent(self, ev):
         QWidget.paintEvent(self, ev)

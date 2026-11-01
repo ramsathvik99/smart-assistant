@@ -40,13 +40,27 @@ class PluginMetadata:
 
 class PluginManager:
     """
-    Central plugin manager supporting isolated execution and database logging.
+    Central plugin manager supporting isolated execution and database logging (Singleton).
     """
+    _instance = None
+    _singleton_lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        with cls._singleton_lock:
+            if cls._instance is None:
+                cls._instance = super(PluginManager, cls).__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
 
     def __init__(self, db_manager=None):
+        if getattr(self, "_initialized", False):
+            if db_manager and not self.db_manager:
+                self.db_manager = db_manager
+            return
         self.db_manager = db_manager
         self._lock = threading.RLock()
         self._plugins: Dict[str, PluginMetadata] = {}
+        self._initialized = True
 
     def register_plugin(
         self,
@@ -138,6 +152,25 @@ class PluginManager:
                     loaded += 1
         return loaded
 
+    @property
+    def plugins(self) -> Dict[str, PluginMetadata]:
+        """Expose registered plugins mapping."""
+        with self._lock:
+            return dict(self._plugins)
+
+    def load_plugins(self, directory: Optional[Path | str] = None) -> int:
+        """
+        Scan directory and load all valid plugins. If directory is None,
+        checks default plugin directories or returns current count.
+        """
+        if directory is not None:
+            return self.discover_plugins(directory)
+        default_dir = Path(__file__).resolve().parent / "plugins"
+        if default_dir.is_dir():
+            return self.discover_plugins(default_dir)
+        with self._lock:
+            return len(self._plugins)
+
     def set_enabled(self, name: str, enabled: bool) -> bool:
         with self._lock:
             if name in self._plugins:
@@ -174,7 +207,7 @@ class PluginManager:
         Execute plugin handler with parameter validation, error containment,
         and database activity logging.
         """
-        params = dict(parameters or {})
+        params = dict(parameters) if isinstance(parameters, dict) else ({"input": parameters, "raw_input": str(parameters)} if parameters is not None else {})
         with self._lock:
             meta = self._plugins.get(name)
 

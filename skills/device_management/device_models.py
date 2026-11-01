@@ -1,6 +1,7 @@
 """
 Device Models and Protocol Definitions
 Defines standardized data models for remote device records, pairing offers, and protocol messages.
+Extended with enrollment code, stable identity, auth token, location, and remote connection fields.
 """
 
 from __future__ import annotations
@@ -74,6 +75,7 @@ class PairingOffer:
     created_at: str = field(default_factory=now_iso)
     approved: bool = False
     device_id: Optional[str] = None
+    enrollment_code: str = ""   # 16-char Crockford code for remote enrollment
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,6 +89,7 @@ class PairingOffer:
             "created_at": self.created_at,
             "approved": self.approved,
             "device_id": self.device_id,
+            "enrollment_code": self.enrollment_code,
         }
 
     def to_qr_payload(self) -> dict[str, Any]:
@@ -97,6 +100,7 @@ class PairingOffer:
             "code": self.code,
             "token": self.token,
             "user_id": self.user_id,
+            "enrollment_code": self.enrollment_code,
             "gateway": {
                 "host": self.gateway_host,
                 "port": self.gateway_port,
@@ -125,6 +129,20 @@ class DeviceRecord:
     revoked: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # --- New fields for persistent enrollment and remote connectivity ---
+    enrollment_code: str = ""           # 16-char Crockford code (XXXX-XXXX-XXXX-XXXX)
+    stable_identity: str = ""           # SHA-256 of platform+name+hardware_seed
+    auth_token_hash: str = ""           # SHA-256 of bearer token for remote sessions
+    connection_mode: str = "local"      # "local" | "remote" | "offline"
+    enrollment_state: str = "pending"   # "pending" | "enrolled" | "revoked"
+
+    # Location data
+    location: dict[str, Any] = field(default_factory=dict)
+    location_history: list[dict[str, Any]] = field(default_factory=list)
+
+    # Network / heartbeat info
+    network_info: dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "device_id": self.device_id,
@@ -144,6 +162,15 @@ class DeviceRecord:
             "secret_hash": self.secret_hash,
             "revoked": self.revoked,
             "metadata": dict(self.metadata),
+            # New fields
+            "enrollment_code": self.enrollment_code,
+            "stable_identity": self.stable_identity,
+            "auth_token_hash": self.auth_token_hash,
+            "connection_mode": self.connection_mode,
+            "enrollment_state": self.enrollment_state,
+            "location": dict(self.location),
+            "location_history": list(self.location_history),
+            "network_info": dict(self.network_info),
         }
 
     @classmethod
@@ -166,4 +193,13 @@ class DeviceRecord:
             secret_hash=str(data.get("secret_hash", "")),
             revoked=bool(data.get("revoked", False)),
             metadata=dict(data.get("metadata", {})),
+            # New fields
+            enrollment_code=str(data.get("enrollment_code", "")),
+            stable_identity=str(data.get("stable_identity", "")),
+            auth_token_hash=str(data.get("auth_token_hash", "")),
+            connection_mode=str(data.get("connection_mode", "local")),
+            enrollment_state=str(data.get("enrollment_state", "pending")),
+            location=dict(data.get("location") or {}),
+            location_history=list(data.get("location_history") or []),
+            network_info=dict(data.get("network_info") or {}),
         )

@@ -769,7 +769,7 @@ class OSGateway:
 
         # 9. Direct command execution: "Run `python app.py`", "execute command..."
         # Guard: questions, game queries, and phrases where 'run' is part of a question are NOT shell execution commands
-        if not re.search(r'\b(?:what|which|games?|can\s+i|compatible|download\s+and|hernia|area\s+of)\b', low):
+        if not re.search(r'\b(?:what|which|games?|can\s+i|compatible|download\s+and|hernia|area\s+of|plugins?)\b', low):
             m_run_cmd = re.search(r'^(?:please\s+)?(?:run|execute)\s+[`"\']?([^`"\']+)[\'"`]?(?:\s+in\s+(.+))?', raw, re.IGNORECASE)
             if not m_run_cmd and ("`" in raw or "'" in raw or '"' in raw):
                 m_run_cmd = re.search(r'\b(?:run|execute)\s+[`"\']([^`"\']+)[\'"`](?:\s+in\s+(.+))?', raw, re.IGNORECASE)

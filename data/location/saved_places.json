@@ -1,0 +1,34 @@
+{
+  "1": {
+    "test_home": {
+      "name": "test_home",
+      "latitude": 16.3109,
+      "longitude": 80.4208,
+      "address": "Test Address",
+      "saved_at": "2026-10-31T18:09:36.710250+00:00"
+    },
+    "home": {
+      "name": "home",
+      "latitude": 16.310976,
+      "longitude": 80.420872,
+      "address": "Pattabhipuram, Guntur, Guntur Mandal, Guntur District, Andhra Pradesh, 522001, India",
+      "saved_at": "2026-10-31T18:18:19.067403+00:00"
+    },
+    "office": {
+      "name": "office",
+      "latitude": 16.3109791815506,
+      "longitude": 80.4208673575262,
+      "address": "16.3110, 80.4209",
+      "saved_at": "2026-10-31T18:40:21.041378+00:00"
+    }
+  },
+  "8": {
+    "office": {
+      "name": "office",
+      "latitude": 16.3109817941717,
+      "longitude": 80.4208640628597,
+      "address": "Pattabhipuram, Guntur, Guntur Mandal, Guntur District, Andhra Pradesh, 522001, India",
+      "saved_at": "2026-11-01T05:51:45.341583+00:00"
+    }
+  }
+}

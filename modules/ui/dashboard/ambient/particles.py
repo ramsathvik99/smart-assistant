@@ -131,46 +131,48 @@ class ParticleSystem3D:
 
         # 1. Draw proximity connection lines between nearby 'node' particles
         if max_connections > 0 and self.node_connection_opacity > 0.02:
-            conn_count = 0
-            pen = QPen()
+            from PyQt6.QtCore import QLineF
+            conn_lines = []
             nodes = [item for item in projected if item[0].kind == "node"]
             dist_sq_limit = self.connection_distance * self.connection_distance
 
             for i in range(len(nodes)):
-                if conn_count >= max_connections:
+                if len(conn_lines) >= max_connections:
                     break
                 p1, proj1 = nodes[i]
-                for j in range(i + 1, min(i + 6, len(nodes))):
+                for j in range(i + 1, min(i + 5, len(nodes))):
                     p2, proj2 = nodes[j]
                     dx = p1.x - p2.x
                     dy = p1.y - p2.y
                     dz = p1.z - p2.z
                     d_sq = dx * dx + dy * dy + dz * dz
                     if d_sq < dist_sq_limit:
-                        d = math.sqrt(d_sq)
-                        alpha_fade = (1.0 - (d / self.connection_distance))
-                        depth_fade = max(0.1, min(1.0, 700.0 / proj1[3]))
-                        line_alpha = int(48 * alpha_fade * depth_fade * self.node_connection_opacity * opacity)
-                        if line_alpha > 2:
-                            col = QColor(base_color.red(), base_color.green(), base_color.blue(), line_alpha)
-                            pen.setColor(col)
-                            pen.setWidthF(max(0.6, 1.2 * depth_fade))
-                            painter.setPen(pen)
-                            painter.drawLine(QPointF(proj1[0], proj1[1]), QPointF(proj2[0], proj2[1]))
-                            conn_count += 1
-                            if conn_count >= max_connections:
-                                break
+                        conn_lines.append(QLineF(proj1[0], proj1[1], proj2[0], proj2[1]))
+                        if len(conn_lines) >= max_connections:
+                            break
+
+            if conn_lines:
+                col = QColor(base_color.red(), base_color.green(), base_color.blue(),
+                             int(36 * self.node_connection_opacity * opacity))
+                pen = QPen(col)
+                pen.setWidthF(0.8)
+                painter.setPen(pen)
+                painter.drawLines(conn_lines)
 
         # 2. Draw particle points / glows
         painter.setPen(Qt.PenStyle.NoPen)
+        r_base, g_base, b_base = base_color.red(), base_color.green(), base_color.blue()
+        base_a = base_color.alpha() * opacity
+        brush = QBrush(Qt.BrushStyle.SolidPattern)
+
         for p, proj in projected:
             sx, sy, scale, z = proj
             depth_factor = max(0.12, min(1.0, 750.0 / z))
-            alpha = int(base_color.alpha() * depth_factor * p.alpha_factor * opacity)
+            alpha = int(base_a * depth_factor * p.alpha_factor)
             if alpha <= 3:
                 continue
 
             pt_radius = max(0.8, p.base_size * scale * 0.9)
-            col = QColor(base_color.red(), base_color.green(), base_color.blue(), alpha)
-            painter.setBrush(col)
+            brush.setColor(QColor(r_base, g_base, b_base, alpha))
+            painter.setBrush(brush)
             painter.drawEllipse(QPointF(sx, sy), pt_radius, pt_radius)

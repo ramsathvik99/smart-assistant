@@ -1,0 +1,244 @@
+[
+  {
+    "num": 1,
+    "command": "Find hospitals, pharmacies and restaurants near me and show them on the map",
+    "intent": "DEVICE_CONTROL",
+    "action": "multi_intent_spatial_discovery",
+    "success": true,
+    "response_preview": "Found 15 places across 3 categories near your location:\n\n\u2022 Hospitals (5 found):\n   #1. Sri Sruthi Hospital (0.59 km away)\n   #2. MGR Multi Speciality Hospital (0.83 km away)\n   #3. Vijaya hospital (1.73 km away)\n   #4. Sri Sai Krishna Neuro Surgical ",
+    "map_state_snapshot": {
+      "version": 4,
+      "is_open": true,
+      "zoom": 14,
+      "markers_count": 15,
+      "visible_categories": [
+        "hospital",
+        "pharmacy",
+        "restaurant"
+      ],
+      "has_active_route": false,
+      "selected_place_id": null
+    }
+  },
+  {
+    "num": 2,
+    "command": "Find the nearest hospital, show its route, and tell me how long it takes",
+    "intent": "DEVICE_CONTROL",
+    "action": "multi_intent_spatial_discovery",
+    "success": true,
+    "response_preview": "Found 5 places across 1 categories near your location:\n\n\u2022 Hospitals (5 found):\n   #1. Sri Sruthi Hospital (0.59 km away)\n   #2. MGR Multi Speciality Hospital (0.83 km away)\n   #3. Vijaya hospital (1.73 km away)\n   #4. Sri Sai Krishna Neuro Surgical S",
+    "map_state_snapshot": {
+      "version": 9,
+      "is_open": true,
+      "zoom": 14,
+      "markers_count": 5,
+      "visible_categories": [
+        "hospital",
+        "pharmacy",
+        "restaurant"
+      ],
+      "has_active_route": true,
+      "selected_place_id": "poi_1"
+    }
+  },
+  {
+    "num": 3,
+    "command": "Show hospitals and petrol stations near me, filter out anything more than 5 km away, and show the closest hospital's route",
+    "intent": "DEVICE_CONTROL",
+    "action": "multi_intent_spatial_discovery",
+    "success": true,
+    "response_preview": "Found 10 places across 2 categories near your location:\n\n\u2022 Hospitals (5 found):\n   #1. Hi Tech Trauma And Critical Care Hospital Ltd (1.71 km away)\n   #2. Prasanthi Multi Speciality Hospital - Guntur (1.74 km away)\n   #3. Sri Venkateswara Ayurvedic H",
+    "map_state_snapshot": {
+      "version": 14,
+      "is_open": true,
+      "zoom": 14,
+      "markers_count": 10,
+      "visible_categories": [
+        "hospital",
+        "pharmacy",
+        "restaurant"
+      ],
+      "has_active_route": true,
+      "selected_place_id": "poi_1"
+    }
+  },
+  {
+    "num": 4,
+    "command": "Show only hospitals",
+    "intent": "DEVICE_CONTROL",
+    "action": "filter_map_category",
+    "success": true,
+    "response_preview": "Filtered the map to show only hospitals (5 places visible on the map).",
+    "map_state_snapshot": {
+      "version": 15,
+      "is_open": true,
+      "zoom": 14,
+      "markers_count": 10,
+      "visible_categories": [
+        "hospital"
+      ],
+      "has_active_route": true,
+      "selected_place_id": "poi_1"
+    }
+  },
+  {
+    "num": 5,
+    "command": "Add pharmacies",
+    "intent": "DEVICE_CONTROL",
+    "action": "add_map_category",
+    "success": true,
+    "response_preview": "Added pharmacies to the map (5 places displayed).",
+    "map_state_snapshot": {
+      "version": 17,
+      "is_open": true,
+      "zoom": 14,
+      "markers_count": 15,
+      "visible_categories": [
+        "hospital",
+        "pharmacies"
+      ],
+      "has_active_route": true,
+      "selected_place_id": "poi_1"
+    }
+  },
+  {
+    "num": 6,
+    "command": "Remove restaurants",
+    "intent": "DEVICE_CONTROL",
+    "action": "remove_map_category",
+    "success": true,
+    "response_preview": "Removed restaurants from the map display.",
+    "map_state_snapshot": {
+      "version": 18,
+      "is_open": true,
+      "zoom": 14,
+      "markers_count": 15,
+      "visible_categories": [
+        "hospital",
+        "pharmacies"
+      ],
+      "has_active_route": true,
+      "selected_place_id": "poi_1"
+    }
+  },
+  {
+    "num": 7,
+    "command": "Go to the second one",
+    "intent": "DEVICE_CONTROL",
+    "action": "navigate_to_ordinal",
+    "success": true,
+    "response_preview": "Navigating to #2: Prasanthi Multi Speciality Hospital - Guntur (2.7 km away). Estimated travel time is ~4 minutes (ETA 11:46 AM). Route displayed on map.",
+    "map_state_snapshot": {
+      "version": 20,
+      "is_open": true,
+      "zoom": 14,
+      "markers_count": 15,
+      "visible_categories": [
+        "hospital",
+        "pharmacies"
+      ],
+      "has_active_route": true,
+      "selected_place_id": "poi_2"
+    }
+  },
+  {
+    "num": 8,
+    "command": "Zoom in",
+    "intent": "DEVICE_CONTROL",
+    "action": "map_zoom_in",
+    "success": true,
+    "response_preview": "Zoomed in on the map (zoom level 16).",
+    "map_state_snapshot": {
+      "version": 21,
+      "is_open": true,
+      "zoom": 16,
+      "markers_count": 15,
+      "visible_categories": [
+        "hospital",
+        "pharmacies"
+      ],
+      "has_active_route": true,
+      "selected_place_id": "poi_2"
+    }
+  },
+  {
+    "num": 9,
+    "command": "Clear the route",
+    "intent": "DEVICE_CONTROL",
+    "action": "clear_route",
+    "success": true,
+    "response_preview": "Cleared the active navigation route and path from the map.",
+    "map_state_snapshot": {
+      "version": 22,
+      "is_open": true,
+      "zoom": 16,
+      "markers_count": 15,
+      "visible_categories": [
+        "hospital",
+        "pharmacies"
+      ],
+      "has_active_route": false,
+      "selected_place_id": "poi_2"
+    }
+  },
+  {
+    "num": 10,
+    "command": "Keep the map open",
+    "intent": "DEVICE_CONTROL",
+    "action": "map_keep_open",
+    "success": true,
+    "response_preview": "The assistant's interactive map will remain open persistently in your dashboard.",
+    "map_state_snapshot": {
+      "version": 23,
+      "is_open": true,
+      "zoom": 16,
+      "markers_count": 15,
+      "visible_categories": [
+        "hospital",
+        "pharmacies"
+      ],
+      "has_active_route": false,
+      "selected_place_id": "poi_2"
+    }
+  },
+  {
+    "num": 11,
+    "command": "show my location on the map",
+    "intent": "DEVICE_CONTROL",
+    "action": "map_view",
+    "success": true,
+    "response_preview": "Displaying your current location (Guntur) on the assistant's interactive map.",
+    "map_state_snapshot": {
+      "version": 25,
+      "is_open": true,
+      "zoom": 16,
+      "markers_count": 15,
+      "visible_categories": [
+        "hospital",
+        "pharmacies"
+      ],
+      "has_active_route": false,
+      "selected_place_id": "poi_2"
+    }
+  },
+  {
+    "num": 12,
+    "command": "show my location on the map",
+    "intent": "DEVICE_CONTROL",
+    "action": "map_view",
+    "success": true,
+    "response_preview": "Displaying your current location (Guntur) on the assistant's interactive map.",
+    "map_state_snapshot": {
+      "version": 27,
+      "is_open": true,
+      "zoom": 16,
+      "markers_count": 15,
+      "visible_categories": [
+        "hospital",
+        "pharmacies"
+      ],
+      "has_active_route": false,
+      "selected_place_id": "poi_2"
+    }
+  }
+]

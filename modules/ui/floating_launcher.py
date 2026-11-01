@@ -648,16 +648,46 @@ class FloatingLauncher(QWidget):
         self._visual_panel = VisualResponsePanel()
 
         # Initial placement: Bottom-Right screen
+        self._dock_target_win = None
         primary = QApplication.primaryScreen()
         if primary:
             try:
-                primary.availableGeometryChanged.connect(lambda _: self._constrain_to_screen())
+                primary.availableGeometryChanged.connect(lambda _: self._constrain_to_screen() if not self._dock_target_win else self._update_dock_pos())
             except Exception:
                 pass
             screen = primary.availableGeometry()
             self.move(screen.width() - 148, screen.height() - 158)
         else:
             self.move(100, 100)
+
+    def dock_to_window(self, win):
+        """Dock the floating launcher into the dashboard window's reserved sidebar slot."""
+        self._dock_target_win = win
+        if win and win.isVisible() and not win.isMinimized():
+            self._update_dock_pos()
+        else:
+            self._constrain_to_screen()
+
+    def undock(self):
+        """Undock and return to screen corner."""
+        self._dock_target_win = None
+        self._constrain_to_screen()
+
+    def _update_dock_pos(self):
+        if not self._dock_target_win or not self._dock_target_win.isVisible() or self._dock_target_win.isMinimized():
+            return
+        win = self._dock_target_win
+        if hasattr(win, "sidebar") and hasattr(win.sidebar, "_dock_container"):
+            dc = win.sidebar._dock_container
+            global_dc = dc.mapToGlobal(QPoint(0, 0))
+            target_x = global_dc.x() + (dc.width() - self.width()) // 2
+            target_y = global_dc.y() + (dc.height() - self.height()) // 2
+            self.move(target_x, target_y)
+        else:
+            target_x = win.x() + 20
+            target_y = win.y() + win.height() - self.height() - 20
+            self.move(target_x, target_y)
+        self.raise_()
 
     def set_assistant_name(self, name: str):
         """Update assistant identity while maintaining the centered initial."""
