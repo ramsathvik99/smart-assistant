@@ -773,7 +773,8 @@ def generate_document(doc_type: str, topic: str, extra: Optional[Dict[str, Any]]
             create_presentation,
         )
         dt = (doc_type or "pdf").lower()
-        output_dir = os.path.join(os.path.expanduser("~"), "Documents", "Trevon Assistant")
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        output_dir = get_semantic_file_naming_service().get_default_output_dir()
         os.makedirs(output_dir, exist_ok=True)
         safe_topic = "".join(c for c in topic if c.isalnum() or c in " _-").strip() or "document"
         if dt in ("pdf", "docx"):

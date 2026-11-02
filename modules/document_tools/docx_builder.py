@@ -14,16 +14,19 @@ logger = logging.getLogger(__name__)
 
 def get_default_output_dir() -> str:
     """
-    Get user Desktop directory, checking OneDrive Desktop first then standard Desktop.
+    Get user Desktop directory using centralized SemanticFileNamingService.
     """
-    home = os.path.expanduser("~")
-    onedrive_desktop = os.path.join(home, "OneDrive", "Desktop")
-    if os.path.exists(onedrive_desktop) and os.path.isdir(onedrive_desktop):
-        return onedrive_desktop
-    standard_desktop = os.path.join(home, "Desktop")
-    if os.path.exists(standard_desktop) and os.path.isdir(standard_desktop):
+    try:
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        return get_semantic_file_naming_service().get_default_output_dir()
+    except Exception:
+        home = os.path.expanduser("~")
+        onedrive_desktop = os.path.join(home, "OneDrive", "Desktop")
+        if os.path.exists(onedrive_desktop) and os.path.isdir(onedrive_desktop):
+            return onedrive_desktop
+        standard_desktop = os.path.join(home, "Desktop")
+        os.makedirs(standard_desktop, exist_ok=True)
         return standard_desktop
-    return home
 
 
 def _add_styled_runs(paragraph, text: str) -> None:

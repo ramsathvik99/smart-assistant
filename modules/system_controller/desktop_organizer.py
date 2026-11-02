@@ -29,12 +29,12 @@ PROTECTED_FILENAMES = {"desktop.ini", "thumbs.db"}
 
 def get_target_directory(location: str = "desktop") -> str:
     """Resolve directory path for desktop or downloads."""
-    home = os.path.expanduser("~")
-    if location.lower() == "downloads":
-        path = os.path.join(home, "Downloads")
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    namer = get_semantic_file_naming_service()
+    if (location or "").lower() == "downloads":
+        return namer.get_downloads_dir()
     else:
-        path = os.path.join(home, "Desktop")
-    return path if os.path.exists(path) else home
+        return namer.get_default_output_dir()
 
 
 def scan_unorganized_files(target_dir: str) -> List[Dict[str, Any]]:

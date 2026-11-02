@@ -11,19 +11,21 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 def get_desktop_path():
-    """Get the user's Desktop path with OneDrive support"""
-    # First check OneDrive Desktop
-    onedrive_desktop = os.path.join(
-        os.environ.get("USERPROFILE", ""),
-        "OneDrive",
-        "Desktop"
-    )
-    
-    if os.path.exists(onedrive_desktop):
-        return onedrive_desktop
-    
-    # Fallback to standard Desktop
-    return os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+    """Get the user's Desktop path with OneDrive support and safe directory creation."""
+    try:
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        return get_semantic_file_naming_service().get_default_output_dir()
+    except Exception:
+        onedrive_desktop = os.path.join(
+            os.environ.get("USERPROFILE", ""),
+            "OneDrive",
+            "Desktop"
+        )
+        if os.path.exists(onedrive_desktop):
+            return onedrive_desktop
+        std_desktop = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+        os.makedirs(std_desktop, exist_ok=True)
+        return std_desktop
 
 def get_user_home():
     """Get the user's home directory"""

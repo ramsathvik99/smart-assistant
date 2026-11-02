@@ -27,22 +27,22 @@ except ImportError:
 
 
 def get_desktop_path() -> str:
-    """Get the user's Desktop path with OneDrive support"""
-    onedrive_desktop = os.path.join(
-        os.environ.get("USERPROFILE", ""),
-        "OneDrive",
-        "Desktop"
-    )
-    if os.path.exists(onedrive_desktop):
-        return onedrive_desktop
-    return os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+    """Get the user's Desktop path with OneDrive support and safe directory creation."""
+    try:
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        return get_semantic_file_naming_service().get_default_output_dir()
+    except Exception:
+        user_prof = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+        onedrive_desktop = os.path.join(user_prof, "OneDrive", "Desktop")
+        if os.path.exists(onedrive_desktop) and os.path.isdir(onedrive_desktop):
+            return onedrive_desktop
+        std_desktop = os.path.join(user_prof, "Desktop")
+        os.makedirs(std_desktop, exist_ok=True)
+        return std_desktop
 
 
 def get_default_workspace() -> str:
-    """Get default safe user workspace directory (Documents, Desktop, or Home)."""
-    docs = os.path.join(os.path.expanduser("~"), "Documents")
-    if os.path.exists(docs):
-        return docs
+    """Get default safe user workspace directory (Desktop)."""
     return get_desktop_path()
 
 

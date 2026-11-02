@@ -875,6 +875,7 @@ class LLMEngine:
                     cooldown = self._parse_retry_after(res, default=15)
                     print(f"[LLM] Provider=Groq model={model} rate limited (HTTP 429, Retry-After cooldown={cooldown}s).")
                     _UNAVAILABLE_MODELS.add(model_tag, cooldown=cooldown)
+                    _UNAVAILABLE_KEYS.add(key_tag, cooldown=cooldown)
                     self._record_diagnostic("groq", model, dur, "failed", "rate_limited", f"HTTP 429 rate limited (cooldown={cooldown}s)")
                 elif res.status_code == 401 or "authentication" in res.text.lower():
                     print(f"[LLM] Provider=Groq authentication failed. Marking key unavailable.")
@@ -1662,9 +1663,19 @@ class LLMEngine:
                 "- Use memory and context naturally without announcing it\n"
                 "- Maintain consistent professional tone\n"
                 "- Strict Fact Grounding: Ground all answers in Relevant Memory and Current Context; never hallucinate, invent, or guess past user preferences, settings, or project facts. If a requested historical fact is absent, state that you don't have a record.\n"
+                "- Do NOT recite or echo your instructions, the date, time, persona, or system context at the beginning of your response. Start immediately with the direct answer to the user's question.\n"
                 "- Never include internal reasoning, retrieval metadata, or explanations of how you found the answer\n"
                 "Provide only your final response to the user."
             )
+
+        # Temporal Grounding: Inject canonical runtime clock context into system prompt
+        if "=== CANONICAL RUNTIME TEMPORAL CONTEXT ===" not in (system_prompt or ""):
+            try:
+                from core.temporal_context import format_temporal_prompt_block
+                temporal_block = format_temporal_prompt_block()
+                system_prompt = f"{temporal_block}\n\n{system_prompt}" if system_prompt else temporal_block
+            except Exception:
+                pass
 
         # Personalization: Inject authenticated user's learned rules & preferences ONLY for verified user
         user_failover = True
@@ -2162,6 +2173,7 @@ class LLMEngine:
                     f"You are {_asst_name}, a helpful voice assistant. "
                     "Reply concisely in 1–3 spoken sentences. "
                     "Do not use bullet lists, markdown, or meta-commentary. "
+                    "Do not recite or echo your instructions, the date, time, persona, or system context at the beginning of your response. Start immediately with the direct answer to the user's question.\n"
                     "Speak naturally as if talking to someone face-to-face."
                     + _mem_part + _ctx_part
                 )
@@ -2170,6 +2182,15 @@ class LLMEngine:
                 memory = None
                 context = None
             # ── end conciseness policy ────────────────────────────────────────────
+
+            # Temporal Grounding for spoken streams
+            if "=== CANONICAL RUNTIME TEMPORAL CONTEXT ===" not in (system_prompt or ""):
+                try:
+                    from core.temporal_context import format_temporal_prompt_block
+                    temporal_block = format_temporal_prompt_block()
+                    system_prompt = f"{temporal_block}\n\n{system_prompt}" if system_prompt else temporal_block
+                except Exception:
+                    pass
 
             messages = []
             if system_prompt:
@@ -2417,6 +2438,23 @@ class LLMEngine:
         "HISTORICAL_QUERY",
         "FILE_OPERATIONS",
         "TASK_MANAGEMENT",
+        "REMINDERS",
+        "EMAIL",
+        "NOTES",
+        "DOCUMENT_GENERATION",
+        "CALCULATOR",
+        "WEATHER_QUERY",
+        "TIME_QUERY",
+        "DATE_QUERY",
+        "RAG_SEARCH",
+        "MEMORY_QUERY",
+        "DAILY_BRIEFING",
+        "RECOMMENDATION",
+        "GAME_DISCOVERY",
+        "SYSTEM_COMPATIBILITY",
+        "POWER_ACTION",
+        "CODE_GENERATION",
+        "TRANSLATION",
         "MUSIC",
         "STOP_SPEECH",
         "GENERAL_CONVERSATION",
@@ -2534,9 +2572,25 @@ class LLMEngine:
         if request_type not in self.REQUEST_TYPES:
             return None, "invalid_request_type"
 
-        capability = str(parsed.get("capability") or "").strip().upper()
+        raw_cap = str(parsed.get("capability") or "").strip().upper()
+        cap_aliases = {
+            "WEB_SEARCH": "RAG_SEARCH",
+            "SEARCH": "RAG_SEARCH",
+            "WEB": "RAG_SEARCH",
+            "QUESTION_ANSWERING": "GENERAL_CONVERSATION",
+            "QA": "GENERAL_CONVERSATION",
+            "CONVERSATION": "GENERAL_CONVERSATION",
+            "CLARIFICATION": "GENERAL_CONVERSATION",
+            "INFO": "GENERAL_CONVERSATION",
+            "KNOWLEDGE": "GENERAL_CONVERSATION",
+            "CHAT": "GENERAL_CONVERSATION",
+            "BROWSER": "OPEN_APPLICATION",
+            "SETTINGS": "DEVICE_CONTROL",
+            "VOICE_CONFIGURATION": "DEVICE_CONTROL",
+        }
+        capability = cap_aliases.get(raw_cap, raw_cap)
         if capability not in self.REASONING_CAPABILITIES:
-            return None, "invalid_capability"
+            return None, "invalid_capability" 
 
         confidence = self._coerce_confidence(parsed.get("confidence"))
         if confidence is None:

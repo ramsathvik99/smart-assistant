@@ -143,7 +143,10 @@ try:
             db_manager=db_manager,
             user_id=user_id
         )
-    print(f"[REMINDER ENGINE] Initialized successfully with database persistence for user {user_id}")
+    if user_id is not None:
+        print(f"[REMINDER ENGINE] Initialized successfully with database persistence for user {user_id}")
+    else:
+        print("[REMINDER ENGINE] Background scheduler started in standby mode (awaiting user authentication)")
 except ImportError as e:
     print(f"[REMINDER ENGINE] Import failed: {e}")
     reminder_scheduler = None
@@ -169,14 +172,18 @@ from legacy.skills import (
 # Removed direct AI code generation bypass
 # ----------------------------------------
 
-# Initialize RAG System (Global Architectural Upgrade)
-try:
-    from extensions.rag_system import RAGSystem
-    rag_system = RAGSystem()
-    print("[RAG SYSTEM] Global module initialized")
-except ImportError as e:
-    print(f"[RAG SYSTEM] Import failed: {e}")
-    rag_system = None
+# Initialize RAG System (Global Architectural Upgrade - Lazy initialization to prevent circular imports)
+rag_system = None
+
+def get_rag_system():
+    global rag_system
+    if rag_system is None:
+        try:
+            from extensions.rag_system import RAGSystem
+            rag_system = RAGSystem()
+        except Exception as e:
+            print(f"[RAG SYSTEM] Lazy init failed: {e}")
+    return rag_system
 
 # Global Orchestrator Placeholder
 orchestrator = None
@@ -403,26 +410,15 @@ def process_input(text, user_id=None):
 
         effective_uid = user_id or current_uid
 
-        # ── Immediate Contextual Acknowledgement (< 5ms) ────────────────────────
-        fast_ack = None
+        # ── Execution State & Visual Status (No pre-action spoken acknowledgement) ──
         try:
-            from core.fast_acknowledgement import get_fast_acknowledgement
-            fast_ack = get_fast_acknowledgement(clean_text)
-            if fast_ack:
-                try:
-                    from core.voice_lifecycle import get_voice_lifecycle
-                    get_voice_lifecycle().on_assistant_executing(fast_ack)
-                except Exception:
-                    pass
-                try:
-                    from core.assistant_core import get_assistant_core
-                    get_assistant_core().set_state("executing")
-                except Exception:
-                    pass
-                try:
-                    speak(fast_ack, priority=TTSPriority.COMMAND)
-                except Exception:
-                    pass
+            from core.voice_lifecycle import get_voice_lifecycle
+            get_voice_lifecycle().on_assistant_executing(clean_text)
+        except Exception:
+            pass
+        try:
+            from core.assistant_core import get_assistant_core
+            get_assistant_core().set_state("executing")
         except Exception:
             pass
 
@@ -450,18 +446,14 @@ def process_input(text, user_id=None):
             else:
                 routing_text = clean_text
 
-        # ── Execution: Deterministic Fast-Path vs Complex Goal Planner ─────────
-        from core.unified_command_router import UnifiedCommandRouter, unified_router
-        if UnifiedCommandRouter._is_mobile_phone_command(routing_text):
+        # ── Execution: One Coordinated Intelligence (Authoritative Brain Pipeline) ──
+        try:
+            from core.brain import brain_route_and_execute
+            result = brain_route_and_execute(routing_text, user_id=effective_uid)
+        except Exception as brain_err:
+            print(f"[BRAIN FALLBACK] {brain_err}")
+            from core.unified_command_router import unified_router
             result = unified_router.execute_single_action(routing_text, user_id=effective_uid)
-        else:
-            try:
-                from core.brain import brain_route_and_execute
-                result = brain_route_and_execute(routing_text, user_id=effective_uid)
-            except Exception as brain_err:
-                # If Brain fails for any reason, fall back to direct single-intent router
-                print(f"[BRAIN FALLBACK] {brain_err}")
-                result = unified_router.execute_single_action(routing_text, user_id=effective_uid)
 
         if tracker:
             tracker.record("routing_complete_timestamp", time.monotonic())

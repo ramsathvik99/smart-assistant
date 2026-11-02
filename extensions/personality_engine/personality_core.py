@@ -245,7 +245,8 @@ class PersonalityCore:
         eff_uid = self._resolve_user_id(user_id)
 
         # Retrieve per-user preferences from Centralized Configuration Service
-        asst_name = "Friday"
+        from instance.config import settings as _default_cfg
+        asst_name = getattr(_default_cfg, "CURRENT_ASSISTANT_NAME", None) or _default_cfg.get_assistant_name()
         raw_preset = "friendly"
         formality = 50
         warmth = 60
@@ -294,9 +295,9 @@ class PersonalityCore:
         if not asst_name or not str(asst_name).strip():
             try:
                 from instance.config import settings as _cfg
-                asst_name = _cfg.get_assistant_name() or "Friday"
+                asst_name = _cfg.get_assistant_name() or "Trevon"
             except Exception:
-                asst_name = "Friday"
+                asst_name = _default_cfg.get_assistant_name() or "Trevon"
 
         canonical_key = normalize_preset_name(raw_preset)
         preset_info = CANONICAL_PRESETS.get(canonical_key, CANONICAL_PRESETS["friendly"])

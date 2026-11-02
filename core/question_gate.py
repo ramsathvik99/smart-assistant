@@ -97,6 +97,17 @@ def is_plain_question(text: str, context: Optional[Dict[str, Any]] = None) -> bo
         if not re.match(r'^(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:explain|tell\s+me\s+about|describe)\b', low):
             return False
 
+    # 2b. Specialized information queries (clock, user memory, documents, live facts, historical queries)
+    # Must NOT be fast-tracked to plain conversational chat — allow canonical router evaluation
+    if re.search(r'\b(?:time|clock|date|today\'?s?\s+date|day\s+is\s+it)\b', low):
+        return False
+    if re.search(r'\b(?:my\s+(?:name|university|college|degree|major|school|role|email|phone|placement|notes?|doc|document|report|artifact)|who\s+am\s+i|about\s+me)\b', low):
+        return False
+    if re.search(r'\b(?:president|prime\s+minister|ceo|stock\s+price|latest|current\s+price|weather)\b', low):
+        return False
+    if re.search(r'\b\d{4}\b', low):
+        return False
+
     # 3. Positive match on question starter / interrogative?
     if QUESTION_STARTERS.match(low):
         logger.debug(f"[QUESTION GATE] Fast-tracked as plain question: '{raw[:50]}'")

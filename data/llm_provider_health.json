@@ -1,33 +1,35 @@
 {
   "providers": {
     "gemini": {
-      "expiry": 1793545178.0534377,
+      "expiry": 1793645283.4129064,
       "reason": "Gemini quota exhausted",
       "user_action": "Check Gemini quota",
-      "timestamp": 1793543379.0045583
+      "timestamp": 1793643483.2626507
     },
     "openai": {
-      "expiry": 1793545179.0573947,
+      "expiry": 1793645284.415516,
       "reason": "Quota/credits exhausted",
       "user_action": "OpenAI quota exhausted",
-      "timestamp": 1793543380.064113
+      "timestamp": 1793643484.5664558
     },
     "deepseek": {
-      "expiry": 1793545180.074065,
+      "expiry": 1793645285.425931,
       "reason": "HTTP 402 insufficient balance",
       "user_action": "DeepSeek balance is empty",
-      "timestamp": 1793543381.0685613
+      "timestamp": 1793643485.335001
     },
     "anthropic": {
-      "expiry": 1793545180.1017761,
-      "reason": "No module named 'anthropic'",
-      "user_action": "pip install anthropic",
-      "timestamp": 1793543381.1090598
+      "expiry": 1793645296.6452267,
+      "reason": "No API key configured",
+      "user_action": "Add Anthropic API key",
+      "timestamp": 1793643496.6452267
     }
   },
-  "keys": {},
+  "keys": {
+    "huggingface_key_94a77d042f27": 1793644358.2552783,
+    "groq_key_8de358378e17": 1793640791.172924
+  },
   "models": {
-    "groq:openai/gpt-oss-120b": 1793539238.3903506,
-    "groq:qwen/qwen3.8-27b": 1793539238.5247157
+    "groq:qwen/qwen3.8-27b": 1793640791.1519377
   }
 }

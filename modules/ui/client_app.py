@@ -332,12 +332,24 @@ class ClientApp(QObject):
     # ── Greeting ─────────────────────────────────────────────────────────────
 
     def _greet_user(self):
-        """Show greeting after login."""
-        greeting = (
-            f"Welcome back, {self._username}! "
-            f"I'm {self._assistant_name}. How can I help you today?"
-        )
-        QTimer.singleShot(600, lambda: self._on_cmd_finished("", greeting))
+        """Show dynamic greeting after login."""
+        def _fetch_and_show():
+            try:
+                from extensions.personality_engine.login_greeting import get_login_greeting_service
+                greeting = get_login_greeting_service().generate_greeting(
+                    user_id=getattr(self, "_user_id", None),
+                    username=self._username,
+                    assistant_name=self._assistant_name
+                )
+            except Exception:
+                greeting = (
+                    f"Welcome back, {self._username}! "
+                    f"I'm {self._assistant_name}. How can I help you today?"
+                )
+            QTimer.singleShot(600, lambda: self._on_cmd_finished("", greeting))
+
+        import threading
+        threading.Thread(target=_fetch_and_show, daemon=True).start()
 
     # ── Assistant name update ────────────────────────────────────────────────
 

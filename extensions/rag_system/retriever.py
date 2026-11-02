@@ -176,7 +176,6 @@ class RAGRetriever:
         clean_q = query.strip().strip('"\'')
         _lead_patterns = [
             r'^(?:please\s+)?(?:do\s+(?:you|u)\s+know\s+(?:anything\s+)?(?:about|on)|tell\s+me\s+(?:what\s+(?:you|u)\s+know\s+about|all\s+about|about)|what\s+do\s+(?:you|u)\s+know\s+about|what\s+can\s+(?:you|u)\s+tell\s+me\s+about|can\s+(?:you|u)\s+tell\s+me\s+about|search\s+(?:the\s+web\s+for|for|google\s+for)?|look\s+up|find\s+(?:out\s+about|me)?)\s+',
-            r'^(?:what\s+is|whats|who\s+is|who\s+are)\s+(?:the\s+)?',
         ]
         for _pat in _lead_patterns:
             _m = _re.match(_pat, clean_q, _re.IGNORECASE)

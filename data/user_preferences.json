@@ -1,15 +1,21 @@
 {
   "ui_preferences": {
     "8": {
-      "ambient_3d_parallax": "True",
       "ambient_3d_state_reactive": "True",
-      "voice_rate": "135",
-      "voice_pitch": "100",
+      "assistant_voice_rate": "190",
+      "voice_rate": "190",
+      "voice_pitch": "147",
       "voice_volume": "1.0",
       "assistant_voice_volume": "1.0",
-      "hotword_threshold": "0.35",
+      "hotword_threshold": "0.46",
       "wake_word_enabled": "True",
-      "voice_activation_enabled": "True"
+      "voice_activation_enabled": "True",
+      "sidebar_collapsed": "True",
+      "recent_login_greetings": "[\"Good evening, Ram. Welcome back. In this cozy evening, let's dive into your beloved Marvel films or assist you with your Python projects. I'm ready to help you explore your interests in English movies and programming.\", \"Good evening, Ram! It's delightful to see you again. In this cozy evening, please allow me to assist you in exploring your passion for English movies, particularly the Marvel Cinematic Universe, and support your Python-based programming endeavors. If there's anything specific you\", \"Good evening, Ram! Welcome back. I'm excited to assist you with your favorite Marvel movies and explore your Python projects in a methodical and objective manner, considering your expressed preferences for English films and Python. If there's a specific movie or programming topic you'd like to discuss,\", \"Late night session, Ram? Let me know how I can help. You have 1 reminder scheduled today: 'call John'.\", \"Hello Ram. Trevon is ready whenever you need me tonight. You have 1 reminder scheduled today: 'call John'.\", \"Afternoon, Ram! How can I help you right now?\", \"Hope you had a productive day, Ram. What can I do for you tonight?\", \"Good evening, Ram. Ready when you are.\", \"Good evening, Ram. Standing by for your commands.\", \"Good evening, Ram. Working late tonight? I'm here to assist.\"]"
+    },
+    "1": {
+      "assistant_language": "english",
+      "language": "english"
     }
   }
 }

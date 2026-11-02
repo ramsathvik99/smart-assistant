@@ -12,6 +12,7 @@ Connects LLMEngine.stream_completion with NeuralTTSBackend.stream_and_play:
 - Halts cleanly on barge-in / cancellation
 """
 
+import re
 import time
 import logging
 import threading
@@ -122,6 +123,13 @@ def stream_and_speak(
                     logger.info("[STREAM_SPEAKER] Stream cancelled by barge-in.")
                     break
                 
+                raw_low = raw_sentence.lower().strip()
+                if re.match(r'^today\s+is\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|[a-z]+\s+\d+).*', raw_low):
+                    continue
+                if re.match(r'^i\s+am\s+[a-z0-9_\s]+?(?:assistant|companion).*', raw_low):
+                    continue
+                if re.match(r'^today,?\s+i(?:\'ll| will)\s+be\s+explaining.*', raw_low):
+                    continue
                 clean = make_speakable(raw_sentence)
                 if clean:
                     spoken_sentences.append(clean)

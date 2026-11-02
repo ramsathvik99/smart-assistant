@@ -91,9 +91,6 @@ def capture_active_window_screenshot(output_path: Optional[str] = None) -> Optio
         from PIL import ImageGrab
         if not output_path:
             from core.semantic_file_naming import get_semantic_file_naming_service
-            project_root = Path(__file__).resolve().parent.parent.parent
-            out_dir = project_root / "data" / "screenshots"
-            out_dir.mkdir(parents=True, exist_ok=True)
             win_title = info.get("title", "")
             desc = f"screenshot {win_title}" if win_title and win_title not in ("Desktop", "Untitled Window", "Desktop Environment") else "active_window_screenshot"
             namer = get_semantic_file_naming_service()
@@ -101,7 +98,7 @@ def capture_active_window_screenshot(output_path: Optional[str] = None) -> Optio
                 task_description=desc,
                 artifact_type="image",
                 extension=".jpg",
-                output_directory=out_dir,
+                output_directory=namer.get_default_output_dir(),
             )
 
         rect = info.get("rect", (0, 0, 0, 0))

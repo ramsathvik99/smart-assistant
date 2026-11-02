@@ -34,6 +34,12 @@ def sanitize_user_response(text: str, user_input: str = "") -> str:
         return "I encountered an internal error processing your request. Please try again."
 
     s = re.sub(r'\[(?:VOICE|TTS|ERROR|DEBUG|INFO|CONFIG|LLM|BRAIN FALLBACK)\]\s*', '', s).strip()
+    s = re.sub(
+        r'^(?:you\s+are\s+an?\s+(?:intelligent|helpful|ai|voice|smart|desktop|personal)\s+assistant[^.\n]*[.\n]+|the\s+current\s+(?:time|date|year)\s+is[^.\n]*[.\n]+)',
+        '',
+        s,
+        flags=re.IGNORECASE
+    ).strip()
     debug_sentences = [
         r"(?:I(?:\'ve|\s+have)?\s+(?:queried|checked|searched|accessed|retrieved)\s+(?:the\s+|your\s+)?(?:database|memory|history|context|historical\s+records|records|previous\s+conversations?)[^.\n]*[.\?!]\s*)",
         r"(?:I(?:\'ve|\s+have)?\s+(?:used|executed|called)\s+(?:the\s+)?(?:tool|subsystem|function)[^.\n]*[.\?!]\s*)",

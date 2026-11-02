@@ -1517,14 +1517,29 @@ class DeviceController:
     def lock(self, user_id, target=''):
         serial = self._resolve_serial(user_id, target)
         if not serial:
-            return {'success': False, 'status': 'device_offline', 'message': 'No active mobile phone connected. Please reconnect your phone.'}
+            return {
+                'success': False,
+                'status': 'device_offline',
+                'requested_target_device': 'android_phone',
+                'resolved_device': 'unknown_offline',
+                'action_selected': 'phone_lock',
+                'actual_execution_result': 'device_offline',
+                'verification_result': False,
+                'failure_reason': 'No active mobile phone connected. Please reconnect your phone.',
+                'message': 'No active mobile phone connected. Please reconnect your phone.'
+            }
         res = self.platform.lock(serial)
         if not res.get('success') and ('offline' in str(res.get('message')).lower() or 'not found' in str(res.get('message')).lower()):
             res['status'] = 'device_offline'
-            return res
         if res.get('success'):
             dev_name = target or 'phone'
             res['message'] = f"Locked your {dev_name} screen."
+        res['requested_target_device'] = 'android_phone'
+        res['resolved_device'] = serial
+        res['action_selected'] = 'phone_lock'
+        res['actual_execution_result'] = res.get('status', 'success' if res.get('success') else 'failed')
+        res['verification_result'] = bool(res.get('success', False))
+        res['failure_reason'] = None if res.get('success') else (res.get('message') or res.get('error'))
         return res
 
     def wake(self, user_id, target=''):
@@ -1539,10 +1554,26 @@ class DeviceController:
     def unlock_screen(self, user_id, target=''):
         serial = self._resolve_serial(user_id, target)
         if not serial:
-            return {'success': False, 'status': 'device_offline', 'message': 'No active mobile phone connected. Please reconnect your phone.'}
+            return {
+                'success': False,
+                'status': 'device_offline',
+                'requested_target_device': 'android_phone',
+                'resolved_device': 'unknown_offline',
+                'action_selected': 'phone_unlock',
+                'actual_execution_result': 'device_offline',
+                'verification_result': False,
+                'failure_reason': 'No active mobile phone connected. Please reconnect your phone.',
+                'message': 'No active mobile phone connected. Please reconnect your phone.'
+            }
         res = self.platform.unlock_screen(serial)
         if not res.get('success') and ('offline' in str(res.get('message')).lower() or 'not found' in str(res.get('message')).lower()):
             res['status'] = 'device_offline'
+        res['requested_target_device'] = 'android_phone'
+        res['resolved_device'] = serial
+        res['action_selected'] = 'phone_unlock'
+        res['actual_execution_result'] = res.get('status', 'success' if res.get('success') else 'failed')
+        res['verification_result'] = bool(res.get('success', False))
+        res['failure_reason'] = None if res.get('success') else (res.get('message') or res.get('error'))
         return res
 
     def get_lock_state(self, user_id, target=''):
@@ -1779,13 +1810,15 @@ class DeviceController:
         clean_target = (target or '').strip().lower()
         if clean_target in ('phone', 'device', 'mobile', 'my phone', 'the phone', 'a phone', 'my mobile', 'the mobile', 'my device', 'the device', 'handset', 'connected device', 'android', 'mobile phone', 'my mobile phone', 'redmi phone'):
             target = ''
-        devices = (self.registry.resolve_device(user_id, target) or self.registry.resolve_device(None, target))
+        devices = self.registry.resolve_device(user_id, target)
         if not devices and not target:
-            devices = (self.registry.list_devices(user_id) or self.registry.list_devices(None))
+            devices = self.registry.list_devices(user_id)
+        if not devices and user_id is None:
+            devices = self.registry.resolve_device(None, target) or self.registry.list_devices(None)
         adb_devs = self.adb.list_devices()
         adb_avail, _ = self.adb.is_available()
         if not devices:
-            if adb_devs:
+            if adb_devs and user_id is None:
                 active = [d for d in adb_devs if d.get('online')]
                 if active:
                     dev = active[0]
@@ -2220,6 +2253,39 @@ class DeviceController:
             if isinstance(res, dict): res.setdefault('action', 'remote_device')
             return res
 
+        # Cellular call / normal phone call (e.g. 'call mom on my phone', 'call john')
+        m_call = (
+            re.search(r'\b(?:make\s+a\s+)?(?:phone\s+)?call\s+(?:to\s+)?([a-zA-Z0-9_\s]+?)(?:\s+(?:on|using|via|through)\s+(?:(?:my|the)\s+)?(?:phone|mobile))?$', text)
+            or re.search(r'\bdial\s+([a-zA-Z0-9_\s]+?)(?:\s+on\s+(?:(?:my|the)\s+)?(?:phone|mobile))?$', text)
+        )
+        if m_call and not any(w in text for w in ('whatsapp', "what's app", 'whats app', 'video', 'battery', 'screen', 'volume', 'wifi', 'bluetooth', 'lock')):
+            contact_cand = _clean_contact_query(m_call.group(1).strip())
+            if contact_cand and contact_cand.lower() not in ('someone', 'him', 'her', 'them', 'phone', 'mobile', 'a call', 'the call'):
+                res = self.make_call(user_id, contact_cand)
+                if isinstance(res, dict):
+                    res.setdefault('action', 'remote_device')
+                    res.setdefault('requested_target_device', 'android_phone')
+                    res.setdefault('action_selected', 'call')
+                    serial = res.get('serial') or self._resolve_serial(user_id)
+                    res.setdefault('resolved_device', serial or 'enrolled_phone')
+                    res.setdefault('actual_execution_result', res.get('status', 'success' if res.get('success') else 'failed'))
+                    res.setdefault('verification_result', bool(res.get('success', False)))
+                    res.setdefault('failure_reason', None if res.get('success') else (res.get('message') or res.get('error')))
+                return res
+
+        # Contacts query
+        if re.search(r'\b(?:show|get|list|find|search)\s+(?:my\s+)?(?:phone\s+)?contacts?\b', text) or any(k in text for k in ('phone contacts', 'contacts on my phone', 'contacts on phone', 'my contacts')):
+            m_cq = re.search(r'\b(?:contact|contacts)\s+(?:for|named|called)\s+([a-zA-Z0-9_\s]+)', text)
+            q = m_cq.group(1).strip() if m_cq else ''
+            matches = self.get_contacts(user_id, q)
+            return {
+                'success': True,
+                'status': 'success',
+                'contacts': matches,
+                'count': len(matches),
+                'message': f"Found {len(matches)} contact(s) on your phone." if matches else "No matching contacts found on your phone."
+            }
+
         # 5. Live Screen Mirroring (scrcpy)
         if any(k in text for k in ('show me the phone live screen', 'show phone live screen', 'live screen mirror', 'screen mirror', 'mirror my phone', 'mirror phone', 'mirror my screen', 'start mirroring', 'start live mirroring', 'live mirroring', 'cast my phone', 'cast phone screen', 'launch scrcpy', 'start scrcpy', 'show phone screen mirror', 'mirror phone screen', 'show my phone screen', 'show phone screen', 'view phone screen', 'display phone screen')):
             return self.launch_scrcpy_mirror(user_id)
@@ -2259,7 +2325,16 @@ class DeviceController:
             m = re.search(r"(?:on|for)\s+(?:my\s+)?([a-z0-9\s]+?)(?:'s)?\s*(?:battery)?$", text)
             if m and m.group(1).strip() not in ('phone', 'my phone', 'mobile', 'my mobile'):
                 target = m.group(1).strip()
-            return self.get_battery(user_id, target)
+            res = self.get_battery(user_id, target)
+            if isinstance(res, dict):
+                res.setdefault('requested_target_device', 'android_phone')
+                res.setdefault('action_selected', 'battery_status')
+                serial = res.get('serial') or self._resolve_serial(user_id)
+                res.setdefault('resolved_device', serial or 'enrolled_phone')
+                res.setdefault('actual_execution_result', res.get('status', 'success' if res.get('success') else 'failed'))
+                res.setdefault('verification_result', bool(res.get('success', False)))
+                res.setdefault('failure_reason', None if res.get('success') else (res.get('message') or res.get('error')))
+            return res
 
         # 12. Flashlight / Torch
         if 'flashlight' in text or 'torch' in text:
@@ -2295,14 +2370,33 @@ class DeviceController:
         if any(k in text for k in ('check volume', 'what is the volume', 'get volume', 'phone volume status')):
             return self.get_volume(user_id)
 
+        # Brightness
+        m_set_bri = re.search(r'\b(?:set|change)\s+(?:phone\s+)?brightness\s+(?:to\s+)?(\d+)\s*%?\b', text)
+        if m_set_bri:
+            return self.set_brightness(user_id, int(m_set_bri.group(1)))
+        if 'brightness' in text and any(w in text for w in ('phone', 'mobile', 'android', 'screen')):
+            if any(k in text for k in ('check', 'what is', 'get', 'status', 'level')):
+                return self.get_brightness(user_id)
+
         # 16. Wake / Lock / Unlock
         if any(k in text for k in ('wake phone', 'wake up phone', 'wake my phone', 'wake up my phone', 'turn on phone screen')):
             return self.wake(user_id)
-        if any(k in text for k in ('unlock phone', 'unlock my phone', 'unlock mobile', 'unlock the phone')):
+        if (
+            re.search(r'\b(?:unlock)\s+(?:(?:my|the)\s+)?(?:phone|mobile|android|device)\b', text)
+            or any(k in text for k in ('unlock phone', 'unlock my phone', 'unlock mobile', 'unlock the phone', 'unlock android', 'unlock the mobile'))
+        ):
             return self.unlock_screen(user_id)
-        if any(k in text for k in ('lock phone', 'lock my phone', 'lock mobile', 'lock the phone')):
+        if (
+            re.search(r'\b(?:lock|secure)\s+(?:(?:my|the)\s+)?(?:phone|mobile|android|device)\b', text)
+            or re.search(r'\b(?:want|need|have)\s+(?:(?:my|the)\s+)?(?:phone|mobile|android|device)\s+locked\b', text)
+            or any(k in text for k in ('lock phone', 'lock my phone', 'lock mobile', 'lock the phone', 'lock android', 'lock the mobile'))
+        ):
             return self.lock(user_id)
-        if any(k in text for k in ('is my phone locked', 'is phone locked', 'phone lock status')):
+        if (
+            re.search(r'\b(?:is\s+(?:(?:my|the)\s+)?(?:phone|mobile|android)\s+locked)\b', text)
+            or re.search(r'\b(?:phone|mobile|android)\s+(?:lock\s+status|lock\s+state|locked\s+or\s+unlocked)\b', text)
+            or any(k in text for k in ('is my phone locked', 'is phone locked', 'phone lock status'))
+        ):
             return self.get_lock_state(user_id)
 
         # 17. Camera / Photo

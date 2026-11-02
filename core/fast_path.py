@@ -80,6 +80,15 @@ class FastPathProcessor:
             except Exception:
                 pass
 
+        # Architectural boundary: Phone commands, negations, or corrections must pass through authoritative semantic understanding
+        try:
+            from core.target_resolver import resolve_device_target, TargetDeviceType
+            dev_target = resolve_device_target(user_input, user_id=user_id)
+            if dev_target.target_device == TargetDeviceType.ANDROID_PHONE or bool(dev_target.negated_targets):
+                return None
+        except Exception:
+            pass
+
         clean_text = user_input.strip()
         low = clean_text.lower().rstrip('.?!,').strip()
 
@@ -143,7 +152,7 @@ class FastPathProcessor:
                 resp = "Understood! Whenever you're ready to organize your desktop, just say 'clean up my desktop' and I'll sort your files."
                 return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
             elif "memo" in norm_low or "note" in norm_low or "letter" in norm_low or "document" in norm_low:
-                resp = "Got it! Whenever you're ready to draft that, just let me know the topic and I'll prepare it for you."
+                resp = "Whenever you're ready to draft that, just let me know the topic and I'll prepare it for you."
                 return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
             elif "weather" in norm_low:
                 resp = "Sure thing! Whenever you want to check the weather, just ask and I'll get the latest forecast."
@@ -225,6 +234,32 @@ class FastPathProcessor:
             except Exception:
                 pass
             resp = f"I'm {asst_name}, your desktop assistant."
+            return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
+
+        # ---------------------------------------------------------------------
+        # 1.05 User Identity Queries (Deterministic, Zero Latency)
+        # ---------------------------------------------------------------------
+        user_identity_queries = (
+            "what is my name", "what's my name", "whats my name", "who am i",
+            "do you know my name", "tell me my name", "what do you call me",
+            "what is my username", "whats my username"
+        )
+        if low in user_identity_queries or norm_low in user_identity_queries:
+            user_name = None
+            try:
+                from instance.config import settings as _cfg
+                user_name = getattr(_cfg, "CURRENT_USERNAME", None)
+                uid = int(user_id) if str(user_id).isdigit() else getattr(_cfg, "CURRENT_USER_ID", None)
+                if not user_name and uid:
+                    from legacy.memory_manager import get_username_by_id, load_user_memory
+                    mem = load_user_memory(uid) or {}
+                    user_name = mem.get("name") or get_username_by_id(uid)
+            except Exception:
+                pass
+            if user_name:
+                resp = f"You are {user_name.capitalize()}."
+            else:
+                resp = "I don't have your name recorded yet."
             return cls._build_result("GENERAL_CONVERSATION", resp, dialogue_mgr)
 
         # ---------------------------------------------------------------------

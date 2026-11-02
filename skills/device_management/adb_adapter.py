@@ -1341,10 +1341,20 @@ class AdbAdapter:
         """
         if output_path and not output_path.endswith(".png") and not any(sep in output_path for sep in ("/", "\\")):
             target_serial = output_path
-            out_file = str(PROJECT_ROOT / "data" / "device_screenshot.png")
+            out_file = None
         else:
             target_serial = serial
-            out_file = output_path or str(PROJECT_ROOT / "data" / "device_screenshot.png")
+            out_file = output_path
+
+        if not out_file:
+            from core.semantic_file_naming import get_semantic_file_naming_service
+            namer = get_semantic_file_naming_service()
+            out_file, _ = namer.resolve_output_path(
+                task_description="phone_screenshot",
+                artifact_type="image",
+                extension=".png",
+                output_directory=namer.get_default_output_dir(),
+            )
 
         if not target_serial:
             devs = self.list_devices()
@@ -4070,7 +4080,10 @@ class AdbAdapter:
         """Pulls a file from the Android device to the local machine."""
         import os as _os
         if local_path is None:
-            local_path = str(PROJECT_ROOT / "data" / "downloads" / _os.path.basename(remote_path))
+            from core.semantic_file_naming import get_semantic_file_naming_service
+            namer = get_semantic_file_naming_service()
+            downloads_dir = namer.get_downloads_dir()
+            local_path = _os.path.join(downloads_dir, _os.path.basename(remote_path))
         _os.makedirs(_os.path.dirname(local_path), exist_ok=True)
         args = (["-s", serial] if serial else []) + ["pull", remote_path, local_path]
         ok, out = self._run_adb_cmd(args, timeout=60.0)

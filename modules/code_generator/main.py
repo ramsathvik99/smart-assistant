@@ -94,7 +94,8 @@ def save_project(files: List[Tuple[str, str]], base_name: Optional[str] = None, 
     else:
         from core.semantic_file_naming import get_semantic_file_naming_service
         namer = get_semantic_file_naming_service()
-        project_path = namer.derive_project_directory(command=base_name or "assistant_project", parent_dir=GENERATED_CODE_DIR)
+        parent = namer.get_downloads_dir() if "download" in (base_name or "").lower() else namer.get_default_output_dir()
+        project_path = namer.derive_project_directory(command=base_name or "assistant_project", parent_dir=parent)
     os.makedirs(project_path, exist_ok=True)
 
     saved_files = []

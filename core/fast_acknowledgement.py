@@ -108,12 +108,11 @@ _ACK_PATTERNS = [
 
 def get_fast_acknowledgement(user_input: str) -> Optional[str]:
     """
-    Returns a short, contextually appropriate acknowledgement string
-    for immediate feedback (within 1-5ms), or a sensible default.
-    Never falsely claims an operation succeeded.
+    Disabled by system policy: Spoken pre-action acknowledgements are prohibited.
+    Actions and queries must execute directly without preliminary spoken chatter.
+    Returns None to guarantee no pre-action speech is generated.
     """
-    if not user_input or not user_input.strip():
-        return None
+    return None
 
     clean = user_input.strip()
     clean_low = clean.lower()

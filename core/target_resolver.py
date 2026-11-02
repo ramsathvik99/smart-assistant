@@ -229,3 +229,219 @@ def get_target_resolver() -> TargetResolver:
     if _target_resolver_instance is None:
         _target_resolver_instance = TargetResolver()
     return _target_resolver_instance
+
+
+class TargetDeviceType:
+    """Canonical device target types for command routing and execution."""
+    WINDOWS_WORKSTATION = "windows_workstation"
+    ANDROID_PHONE = "android_phone"
+    OTHER_DEVICE = "other_device"
+    AMBIGUOUS = "ambiguous"
+    UNSPECIFIED = "unspecified"
+
+
+@dataclass
+class DeviceTargetResolution:
+    """Represents the resolved target device entity for an incoming user command."""
+    target_device: str  # from TargetDeviceType
+    device_id: str
+    device_name: str
+    serial: Optional[str] = None
+    is_enrolled: bool = False
+    confidence: float = 1.0
+    reason: str = ""
+    raw_text: str = ""
+    negated_targets: List[str] = field(default_factory=list)
+    asserted_targets: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "target_device": self.target_device,
+            "device_id": self.device_id,
+            "device_name": self.device_name,
+            "serial": self.serial,
+            "is_enrolled": self.is_enrolled,
+            "confidence": self.confidence,
+            "reason": self.reason,
+            "raw_text": self.raw_text,
+            "negated_targets": self.negated_targets,
+            "asserted_targets": self.asserted_targets,
+        }
+
+
+def resolve_device_target(text: str, user_id: Optional[int] = None) -> DeviceTargetResolution:
+    """
+    Deterministic, architecture-level device target resolution.
+    Distinguishes reliably between:
+      1. Windows Workstation
+      2. Enrolled Android Phone
+      3. Other Registered Devices
+    Preserves negation (e.g. 'Lock my mobile, not the system') and extracts device identities.
+    """
+    if not text or not isinstance(text, str):
+        return DeviceTargetResolution(
+            target_device=TargetDeviceType.UNSPECIFIED,
+            device_id="",
+            device_name="",
+            confidence=0.0,
+            reason="Empty input",
+            raw_text=""
+        )
+
+    text_low = text.lower().strip()
+    negated_targets: List[str] = []
+
+    # 1. Detect negated targets
+    neg_ws_matches = re.findall(
+        r'\b(?:not|never|instead\s+of|rather\s+than|don\x27t\s+touch|don\x27t\s+lock|don\x27t\s+target|don\x27t\s+want|do\s+not\s+want)\s+(?:(?:my|the|this)\s+)?(system|computer|pc|workstation|laptop|desktop|windows|machine)\b',
+        text_low
+    )
+    if neg_ws_matches:
+        negated_targets.append(TargetDeviceType.WINDOWS_WORKSTATION)
+
+    neg_mob_matches = re.findall(
+        r'\b(?:not|never|instead\s+of|rather\s+than|don\x27t\s+touch|don\x27t\s+lock|don\x27t\s+target|don\x27t\s+want|do\s+not\s+want)\s+(?:(?:my|the|this)\s+)?(phone|mobile|android|cell|cellphone|smartphone|device)\b',
+        text_low
+    )
+    if neg_mob_matches:
+        negated_targets.append(TargetDeviceType.ANDROID_PHONE)
+
+    # Strip negated phrases to find asserted targets without interference
+    cleaned = re.sub(
+        r'\b(?:not|never|instead\s+of|rather\s+than|don\x27t\s+touch|don\x27t\s+lock|don\x27t\s+target|don\x27t\s+want|do\s+not\s+want)\s+(?:(?:my|the|this)\s+)?(?:system|computer|pc|workstation|laptop|desktop|windows|machine|phone|mobile|android|cell|cellphone|smartphone|device)\b',
+        '',
+        text_low
+    )
+
+    # Fetch registered device names/models for user if available
+    enrolled_serial = None
+    enrolled_id = "android_phone"
+    enrolled_name = "Android Phone"
+    is_enrolled = False
+    enrolled_names: List[str] = []
+
+    try:
+        from skills.device_management.device_registry import get_device_registry
+        reg = get_device_registry()
+        eff_uid = user_id or 1
+        devs = reg.list_devices(eff_uid)
+        android_devs = [d for d in devs if getattr(d, 'platform', None) == 'android' and not getattr(d, 'revoked', False)]
+        if android_devs:
+            active_dev = next((d for d in android_devs if getattr(d, 'online', False)), android_devs[0])
+            enrolled_id = active_dev.device_id
+            enrolled_name = active_dev.name or "Android Phone"
+            enrolled_serial = (active_dev.metadata or {}).get("serial") or (active_dev.metadata or {}).get("endpoint")
+            is_enrolled = True
+            for d in android_devs:
+                if d.name:
+                    enrolled_names.append(d.name.lower())
+                brand = (d.metadata or {}).get("brand")
+                if brand:
+                    enrolled_names.append(str(brand).lower())
+                model = (d.metadata or {}).get("model")
+                if model:
+                    enrolled_names.append(str(model).lower())
+    except Exception:
+        pass
+
+    # 2. Check mobile target indicators
+    has_mobile_noun = bool(re.search(r'\b(?:phone|mobile|android|cell|cellphone|smartphone|redmi|galaxy|pixel|xiaomi)\b', cleaned))
+    if not has_mobile_noun and enrolled_names:
+        has_mobile_noun = any(en_name in cleaned for en_name in enrolled_names if len(en_name) > 2)
+
+    has_mobile_qualifier = bool(re.search(r'\b(?:on|in|from|to|via)\s+(?:(?:my|the)\s+)?(?:phone|mobile|android(?:\s+device)?)\b', cleaned))
+    has_mobile_feature = bool(
+        re.search(r'\b(?:phone|mobile|android)\s*(?:\x27s)?\s*(?:battery|screen|volume|bluetooth|wifi|wi-fi|status|camera|flashlight|torch|lock|display)\b', cleaned)
+        or re.search(r'\b(?:battery|screen|volume|bluetooth|wifi|wi-fi|status|camera|flashlight|torch|lock|display)\s+(?:of|on|for)\s+(?:(?:my|the)\s+)?(?:phone|mobile|android)\b', cleaned)
+    )
+    is_reminder_or_schedule = bool(
+        re.search(r'^\s*(?:set\s+(?:a\s+)?reminder|remind\s+me|create\s+(?:a\s+)?reminder|add\s+(?:a\s+)?reminder|schedule\s+(?:a\s+)?reminder|remember\s+to|cancel\s+(?:the\s+|all\s+)?(?:my\s+)?(?:reminders?|schedules?)|delete\s+(?:the\s+|all\s+)?(?:my\s+)?(?:reminders?|schedules?))\b', text_low)
+    )
+    has_mobile_action = False if is_reminder_or_schedule else bool(
+        re.search(r'\b(?:whatsapp|scrcpy|torch|flashlight)\b', cleaned)
+        or re.search(r'\b(?:call|dial|make\s+(?:a\s+)?call\s+to|phone\s+call)\s+([a-zA-Z0-9_\s]+?)(?:\s+on\s+(?:(?:my|the)\s+)?(?:phone|mobile))?$', cleaned)
+    )
+
+    has_mobile = (has_mobile_noun or has_mobile_qualifier or has_mobile_feature or has_mobile_action) and (TargetDeviceType.ANDROID_PHONE not in negated_targets)
+
+    # 3. Check workstation target indicators
+    has_ws_noun = bool(re.search(r'\b(?:computer|pc|system|workstation|laptop|desktop|windows|machine)\b', cleaned))
+    has_ws_qualifier = bool(re.search(r'\b(?:on|in|from|to)\s+(?:(?:my|the|this)\s+)?(?:computer|pc|system|workstation|laptop|desktop|windows|machine)\b', cleaned))
+    has_ws_feature = bool(
+        re.search(r'\b(?:computer|pc|system|workstation|laptop|desktop|windows)\s*(?:\x27s)?\s*(?:battery|screen|volume|bluetooth|wifi|wi-fi|status|lock|display|uptime|cpu|ram|disk)\b', cleaned)
+        or re.search(r'\b(?:battery|screen|volume|bluetooth|wifi|wi-fi|status|lock|display|uptime|cpu|ram|disk)\s+(?:of|on|for)\s+(?:(?:my|the|this)\s+)?(?:computer|pc|system|workstation|laptop|desktop|windows)\b', cleaned)
+    )
+
+    has_workstation = (has_ws_noun or has_ws_qualifier or has_ws_feature) and (TargetDeviceType.WINDOWS_WORKSTATION not in negated_targets)
+
+    # Resolution decisions
+    if has_mobile and not has_workstation:
+        return DeviceTargetResolution(
+            target_device=TargetDeviceType.ANDROID_PHONE,
+            device_id=enrolled_id,
+            device_name=enrolled_name,
+            serial=enrolled_serial,
+            is_enrolled=is_enrolled,
+            confidence=0.99,
+            reason="Explicit mobile phone target asserted",
+            raw_text=text,
+            negated_targets=negated_targets,
+            asserted_targets=[TargetDeviceType.ANDROID_PHONE]
+        )
+    elif has_mobile and has_workstation and TargetDeviceType.WINDOWS_WORKSTATION in negated_targets:
+        return DeviceTargetResolution(
+            target_device=TargetDeviceType.ANDROID_PHONE,
+            device_id=enrolled_id,
+            device_name=enrolled_name,
+            serial=enrolled_serial,
+            is_enrolled=is_enrolled,
+            confidence=0.99,
+            reason="Mobile phone target asserted and workstation explicitly negated",
+            raw_text=text,
+            negated_targets=negated_targets,
+            asserted_targets=[TargetDeviceType.ANDROID_PHONE]
+        )
+    elif has_workstation and not has_mobile:
+        return DeviceTargetResolution(
+            target_device=TargetDeviceType.WINDOWS_WORKSTATION,
+            device_id="workstation",
+            device_name="Windows Workstation",
+            confidence=0.99,
+            reason="Explicit workstation target asserted",
+            raw_text=text,
+            negated_targets=negated_targets,
+            asserted_targets=[TargetDeviceType.WINDOWS_WORKSTATION]
+        )
+    elif has_workstation and has_mobile and TargetDeviceType.ANDROID_PHONE in negated_targets:
+        return DeviceTargetResolution(
+            target_device=TargetDeviceType.WINDOWS_WORKSTATION,
+            device_id="workstation",
+            device_name="Windows Workstation",
+            confidence=0.99,
+            reason="Workstation target asserted and mobile explicitly negated",
+            raw_text=text,
+            negated_targets=negated_targets,
+            asserted_targets=[TargetDeviceType.WINDOWS_WORKSTATION]
+        )
+    elif has_mobile and has_workstation:
+        return DeviceTargetResolution(
+            target_device=TargetDeviceType.AMBIGUOUS,
+            device_id="",
+            device_name="",
+            confidence=0.5,
+            reason="Both mobile phone and workstation asserted without negation",
+            raw_text=text,
+            negated_targets=negated_targets,
+            asserted_targets=[TargetDeviceType.ANDROID_PHONE, TargetDeviceType.WINDOWS_WORKSTATION]
+        )
+    else:
+        return DeviceTargetResolution(
+            target_device=TargetDeviceType.UNSPECIFIED,
+            device_id="",
+            device_name="",
+            confidence=0.5,
+            reason="No specific device asserted in input",
+            raw_text=text,
+            negated_targets=negated_targets,
+            asserted_targets=[]
+        )

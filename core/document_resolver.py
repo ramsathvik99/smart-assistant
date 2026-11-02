@@ -538,8 +538,14 @@ class DocumentReferenceResolver:
 
         # Tier 3: Standard User Folders
         home = os.path.expanduser("~")
-        for folder_name in ("Documents", "Desktop", "Downloads"):
-            fpath = os.path.join(home, folder_name)
+        user_dirs = [
+            os.path.join(home, "Desktop"),
+            os.path.join(home, "OneDrive", "Desktop"),
+            os.path.join(home, "Downloads"),
+            os.path.join(home, "Documents"),
+            os.path.join(home, "OneDrive", "Documents"),
+        ]
+        for fpath in user_dirs:
             if os.path.exists(fpath):
                 self._scan_dir_exact(fpath, search_patterns, candidates, max_depth=2)
 

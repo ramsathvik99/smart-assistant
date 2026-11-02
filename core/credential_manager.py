@@ -1709,9 +1709,9 @@ class CredentialManager:
                 return vault["assistant_name"]
         try:
             from instance.config import settings
-            return getattr(settings, "CURRENT_ASSISTANT_NAME", "Friday") or "Friday"
+            return getattr(settings, "CURRENT_ASSISTANT_NAME", None) or settings.get_assistant_name()
         except Exception:
-            return "Friday"
+            return "Trevon"
 
     def set_assistant_name(self, user_context: Any, name: str) -> bool:
         uid = self._resolve_user_id(user_context)
@@ -1738,8 +1738,10 @@ class CredentialManager:
 
 def validate_assistant_name(name: Optional[str]) -> str:
     """Validates custom assistant display name, ensuring length and input safety."""
+    from instance.config import settings
+    default_name = getattr(settings, "CURRENT_ASSISTANT_NAME", None) or settings.get_assistant_name()
     if not name or not str(name).strip():
-        return "Friday"
+        return default_name
     s = str(name).strip()
     # Strip HTML/script tags first
     import re
@@ -1749,10 +1751,10 @@ def validate_assistant_name(name: Optional[str]) -> str:
         s = s.replace(ch, "")
     s = s.strip()
     if len(s) < 2:
-        return "Friday"
+        return default_name
     if len(s) > 30:
         s = s[:30].strip()
-    return s or "Friday"
+    return s or default_name
 
 
 # Global singleton access

@@ -154,12 +154,12 @@ def get_downloads_folder() -> str:
     return get_semantic_file_naming_service().get_downloads_dir()
 
 def save_file(filename: str, code: str) -> str:
-    """Saves content to the user's Downloads folder and returns the absolute filepath with strict verification."""
+    """Saves content to the user's Desktop folder (or Downloads if requested) and returns the absolute filepath with strict verification."""
     from core.semantic_file_naming import get_semantic_file_naming_service
     namer = get_semantic_file_naming_service()
-    downloads = namer.get_downloads_dir()
+    target_dir = namer.get_downloads_dir() if "download" in filename.lower() else namer.get_default_output_dir()
     clean_name = namer.sanitize_filename(filename)
-    filepath = namer.get_unique_path(downloads, os.path.splitext(clean_name)[0], os.path.splitext(clean_name)[1])
+    filepath = namer.get_unique_path(target_dir, os.path.splitext(clean_name)[0], os.path.splitext(clean_name)[1])
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(code)
@@ -173,12 +173,13 @@ def save_file_smart(command: str, content: str, extension: str) -> str:
     """Saves content with a human-readable filename and correct extension derived from the command and content."""
     from core.semantic_file_naming import get_semantic_file_naming_service
     namer = get_semantic_file_naming_service()
+    target_dir = namer.get_downloads_dir() if "download" in command.lower() else namer.get_default_output_dir()
     filepath, _ = namer.resolve_output_path(
         task_description=command,
         content_preview=content,
         artifact_type="code",
         extension=extension,
-        output_dir=namer.get_downloads_dir()
+        output_dir=target_dir
     )
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)

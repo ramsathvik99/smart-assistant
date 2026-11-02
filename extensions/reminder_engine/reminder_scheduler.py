@@ -30,7 +30,7 @@ class ReminderScheduler:
         self.sound_callback = sound_callback
         self.db_manager = db_manager
         self.user_id = user_id
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._mem_id_counter = 1000000000
         
         # Start the background scheduler
@@ -511,6 +511,150 @@ class ReminderScheduler:
                 return True
         return False
 
+    def cancel_all_reminders(self, user_id: int, scope: str = "all", filter_text: Optional[str] = None) -> int:
+        """Cancel all reminders for a user matching scope and optional filter text."""
+        eff_user_id = user_id if user_id is not None else self.user_id
+        if not eff_user_id:
+            return 0
+        
+        # 1. Update database
+        deleted_count = 0
+        if self.db_manager:
+            try:
+                deleted_count = self.db_manager.delete_all_reminders(eff_user_id, scope=scope, filter_text=filter_text)
+            except Exception as e:
+                print(f"[REMINDER ENGINE] Error in db delete_all_reminders: {e}")
+        
+        # 2. Synchronize in-memory scheduler
+        with self._lock:
+            to_remove = []
+            for r in self.reminders:
+                if r.get("user_id") == eff_user_id:
+                    if filter_text and filter_text.lower() not in r.get("text", "").lower():
+                        continue
+                    to_remove.append(r)
+            for r in to_remove:
+                if r in self.reminders:
+                    self.reminders.remove(r)
+        
+        return deleted_count or len(to_remove)
+
+    def pause_reminder(self, reminder_id: str, user_id: Optional[int] = None) -> bool:
+        """Pause a specific reminder."""
+        eff_user_id = user_id if user_id is not None else self.user_id
+        target_id_str = str(reminder_id)
+        if self.db_manager and eff_user_id is not None:
+            self.db_manager.pause_reminder(eff_user_id, target_id_str)
+        with self._lock:
+            existing = next((r for r in self.reminders if str(r.get("id")) == target_id_str), None)
+            if existing:
+                existing["state"] = "PAUSED"
+                if existing in self.reminders:
+                    self.reminders.remove(existing)
+                return True
+        return True
+
+    def resume_reminder(self, reminder_id: str, user_id: Optional[int] = None) -> bool:
+        """Resume a specific reminder."""
+        eff_user_id = user_id if user_id is not None else self.user_id
+        target_id_str = str(reminder_id)
+        if self.db_manager and eff_user_id is not None:
+            self.db_manager.resume_reminder(eff_user_id, target_id_str)
+            rem = self.db_manager.get_reminder_by_id(eff_user_id, target_id_str)
+            if rem and rem.get("due_at"):
+                due_at = rem["due_at"]
+                if isinstance(due_at, str):
+                    try:
+                        due_at = datetime.datetime.strptime(due_at, "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        due_at = datetime.datetime.fromisoformat(due_at)
+                if due_at > datetime.datetime.now():
+                    self.add_reminder_at_time(
+                        rem["task_text"],
+                        due_at,
+                        reminder_id=target_id_str,
+                        user_id=eff_user_id,
+                        recurrence={"frequency": rem.get("recurrence")} if rem.get("recurrence") else None,
+                        is_db_backed=True
+                    )
+            return True
+        return False
+
+    def pause_all_reminders(self, user_id: int) -> int:
+        """Pause all upcoming reminders for a user."""
+        eff_user_id = user_id if user_id is not None else self.user_id
+        if not eff_user_id:
+            return 0
+        count = 0
+        if self.db_manager:
+            count = self.db_manager.pause_all_reminders(eff_user_id)
+        with self._lock:
+            self.reminders = [r for r in self.reminders if r.get("user_id") != eff_user_id]
+        return count
+
+    def resume_all_reminders(self, user_id: int) -> int:
+        """Resume all paused reminders for a user."""
+        eff_user_id = user_id if user_id is not None else self.user_id
+        if not eff_user_id:
+            return 0
+        count = 0
+        if self.db_manager:
+            count = self.db_manager.resume_all_reminders(eff_user_id)
+            _load_reminders_from_database(self, self.db_manager, eff_user_id)
+        return count
+
+    def snooze_reminder(
+        self,
+        reminder_id: str,
+        minutes: int = 10,
+        target_time: Optional[datetime.datetime] = None,
+        user_id: Optional[int] = None
+    ) -> bool:
+        """Snooze a reminder by a duration or to a specific target time."""
+        if target_time is None:
+            target_time = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+        return self.reschedule_reminder(reminder_id, target_time, user_id=user_id)
+
+    def mark_completed(self, reminder_id: str, user_id: Optional[int] = None) -> bool:
+        """Mark a reminder as completed."""
+        eff_user_id = user_id if user_id is not None else self.user_id
+        target_id_str = str(reminder_id)
+        if self.db_manager and eff_user_id is not None:
+            self.db_manager.mark_reminder_completed(eff_user_id, target_id_str)
+        with self._lock:
+            existing = next((r for r in self.reminders if str(r.get("id")) == target_id_str), None)
+            if existing:
+                existing["triggered"] = True
+                existing["state"] = "COMPLETED"
+                if existing in self.reminders:
+                    self.reminders.remove(existing)
+        return True
+
+    def dismiss_reminder(self, reminder_id: str, user_id: Optional[int] = None) -> bool:
+        """Dismiss a reminder."""
+        eff_user_id = user_id if user_id is not None else self.user_id
+        target_id_str = str(reminder_id)
+        if self.db_manager and eff_user_id is not None:
+            self.db_manager.dismiss_reminder(eff_user_id, target_id_str)
+        with self._lock:
+            existing = next((r for r in self.reminders if str(r.get("id")) == target_id_str), None)
+            if existing and existing in self.reminders:
+                self.reminders.remove(existing)
+        return True
+
+    def clear_missed_reminders(self, user_id: Optional[int] = None) -> int:
+        """Clear missed reminders for user."""
+        eff_user_id = user_id if user_id is not None else self.user_id
+        count = 0
+        if self.db_manager and eff_user_id is not None:
+            count = self.db_manager.clear_missed_reminders(eff_user_id)
+        with self._lock:
+            if eff_user_id is not None:
+                self.missed_reminders = [r for r in self.missed_reminders if r.get("user_id") != eff_user_id]
+            else:
+                self.missed_reminders.clear()
+        return count
+
     def get_pending_reminders(self) -> List[Dict]:
         """Get list of pending (not triggered) reminders."""
         with self._lock:
@@ -640,6 +784,22 @@ class ReminderScheduler:
                     next_time = base_time + datetime.timedelta(days=1)
                 elif freq == "weekly":
                     next_time = base_time + datetime.timedelta(weeks=1)
+                elif freq in ("weekdays", "weekday", "workdays"):
+                    # Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
+                    days_to_add = 1
+                    if base_time.weekday() == 4:
+                        days_to_add = 3
+                    elif base_time.weekday() == 5:
+                        days_to_add = 2
+                    next_time = base_time + datetime.timedelta(days=days_to_add)
+                elif freq in ("weekends", "weekend"):
+                    if base_time.weekday() == 5:
+                        days_to_add = 1
+                    elif base_time.weekday() == 6:
+                        days_to_add = 6
+                    else:
+                        days_to_add = (5 - base_time.weekday()) % 7
+                    next_time = base_time + datetime.timedelta(days=days_to_add)
                 elif freq in ("yearly", "annually"):
                     # Birthday / anniversary. Preserve month+day across leap years
                     # (Feb 29 -> Mar 1 in non-leap years), then advance the year.
@@ -717,9 +877,9 @@ class ReminderScheduler:
         """Reload reminders for a specific user (call when user session changes)."""
         self.user_id = user_id
         if self.db_manager and user_id is not None:
-            # Clear current in-memory reminders for isolation
+            # Preserve cross-user reminders in memory: purge only THIS user's entries before reloading from DB
             with self._lock:
-                self.reminders = []
+                self.reminders = [r for r in self.reminders if r.get("user_id") != user_id]
             
             # Load reminders for the new user
             _load_reminders_from_database(self, self.db_manager, user_id)

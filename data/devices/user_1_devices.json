@@ -10,7 +10,7 @@
       "agent_version": "",
       "ip": "192.168.1.4",
       "online": true,
-      "battery": 55,
+      "battery": 10,
       "charging": false,
       "capabilities": [
         "battery",
@@ -21,7 +21,7 @@
       ],
       "permissions": [],
       "paired_at": "2026-10-31 21:03:21.959919+05:30",
-      "last_seen": "2026-11-01T10:29:59.028598+00:00",
+      "last_seen": "2026-11-02T16:17:50.432670+00:00",
       "secret_hash": "ce38c9989878dc63bb84477932ddb5888979ca0f9fb0e8f452cbd73f0c8fee7b",
       "revoked": false,
       "metadata": {
@@ -59,7 +59,7 @@
         "last_connected": "2026-10-31T17:01:48Z",
         "connection_type": "wireless_local",
         "hardware_serial": "ad7c71e20223",
-        "lifecycle_state": "Offline",
+        "lifecycle_state": "Connected locally",
         "device_reference": "IMEI:864398068018392",
         "hotspot_endpoint": "192.168.43.1:5555",
         "ipsec_identifier": "smart-assistant-phone-3",
@@ -223,7 +223,7 @@
         "tcpip_5555_enabled": true,
         "connection_endpoint": "192.168.1.4:5555",
         "remote_vpn_endpoint": "10.8.0.3:5555",
-        "lifecycle_updated_at": "2026-10-31T19:32:29Z",
+        "lifecycle_updated_at": "2026-11-01T17:30:13Z",
         "active_transport_route": "local_wifi"
       },
       "enrollment_code": "",
@@ -232,142 +232,14 @@
       "connection_mode": "local",
       "enrollment_state": "pending",
       "location": {
-        "latitude": 16.310981,
-        "longitude": 80.420874,
-        "accuracy_m": 100.0,
+        "latitude": 16.310973,
+        "longitude": 80.420866,
+        "accuracy_m": 12.665,
         "altitude_m": null,
         "provider": "android_fused",
-        "timestamp": "2026-11-01T10:29:59.028598+00:00"
+        "timestamp": "2026-11-02T16:17:50.432670+00:00"
       },
       "location_history": [
-        {
-          "latitude": 16.310977,
-          "provider": "android_fused",
-          "longitude": 80.420871,
-          "timestamp": "2026-11-01T06:48:46.973662+00:00",
-          "accuracy_m": 12.563,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310977,
-          "provider": "android_fused",
-          "longitude": 80.420871,
-          "timestamp": "2026-11-01T06:49:14.676640+00:00",
-          "accuracy_m": 12.563,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310977,
-          "provider": "android_fused",
-          "longitude": 80.420871,
-          "timestamp": "2026-11-01T06:49:16.283299+00:00",
-          "accuracy_m": 12.563,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310974,
-          "provider": "android_fused",
-          "longitude": 80.420875,
-          "timestamp": "2026-11-01T06:57:51.387343+00:00",
-          "accuracy_m": 12.779,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310974,
-          "provider": "android_fused",
-          "longitude": 80.420875,
-          "timestamp": "2026-11-01T06:59:58.482385+00:00",
-          "accuracy_m": 12.779,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310974,
-          "provider": "android_fused",
-          "longitude": 80.420875,
-          "timestamp": "2026-11-01T07:00:40.737813+00:00",
-          "accuracy_m": 12.779,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310978,
-          "provider": "android_fused",
-          "longitude": 80.420879,
-          "timestamp": "2026-11-01T07:04:55.802358+00:00",
-          "accuracy_m": 12.764,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310978,
-          "provider": "android_fused",
-          "longitude": 80.420879,
-          "timestamp": "2026-11-01T07:07:21.518843+00:00",
-          "accuracy_m": 12.764,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310982,
-          "provider": "android_fused",
-          "longitude": 80.420879,
-          "timestamp": "2026-11-01T07:40:53.773870+00:00",
-          "accuracy_m": 100.0,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310982,
-          "provider": "android_fused",
-          "longitude": 80.420879,
-          "timestamp": "2026-11-01T07:41:16.529987+00:00",
-          "accuracy_m": 100.0,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310982,
-          "provider": "android_fused",
-          "longitude": 80.420883,
-          "timestamp": "2026-11-01T07:50:48.566923+00:00",
-          "accuracy_m": 100.0,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310982,
-          "provider": "android_fused",
-          "longitude": 80.420883,
-          "timestamp": "2026-11-01T07:53:59.789177+00:00",
-          "accuracy_m": 100.0,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.31098,
-          "provider": "android_fused",
-          "longitude": 80.420866,
-          "timestamp": "2026-11-01T08:24:11.932185+00:00",
-          "accuracy_m": 13.351,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.31098,
-          "provider": "android_fused",
-          "longitude": 80.420866,
-          "timestamp": "2026-11-01T08:25:28.810878+00:00",
-          "accuracy_m": 13.351,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.31098,
-          "provider": "android_fused",
-          "longitude": 80.420866,
-          "timestamp": "2026-11-01T08:31:39.410739+00:00",
-          "accuracy_m": 13.351,
-          "altitude_m": null
-        },
-        {
-          "latitude": 16.310976,
-          "provider": "android_fused",
-          "longitude": 80.420868,
-          "timestamp": "2026-11-01T08:55:20.434655+00:00",
-          "accuracy_m": 11.535,
-          "altitude_m": null
-        },
         {
           "latitude": 16.310976,
           "provider": "android_fused",
@@ -626,19 +498,147 @@
         },
         {
           "latitude": 16.310981,
-          "longitude": 80.420874,
-          "accuracy_m": 100.0,
-          "altitude_m": null,
           "provider": "android_fused",
-          "timestamp": "2026-11-01T10:29:45.486211+00:00"
+          "longitude": 80.420874,
+          "timestamp": "2026-11-01T10:29:45.486211+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
         },
         {
           "latitude": 16.310981,
+          "provider": "android_fused",
           "longitude": 80.420874,
+          "timestamp": "2026-11-01T10:29:59.028598+00:00",
           "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.42087,
+          "timestamp": "2026-11-01T15:52:56.842623+00:00",
+          "accuracy_m": 11.01,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310979,
+          "provider": "android_fused",
+          "longitude": 80.42087,
+          "timestamp": "2026-11-01T15:55:22.446157+00:00",
+          "accuracy_m": 11.01,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31097,
+          "provider": "android_fused",
+          "longitude": 80.420873,
+          "timestamp": "2026-11-01T16:03:50.373865+00:00",
+          "accuracy_m": 12.636,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31097,
+          "provider": "android_fused",
+          "longitude": 80.420873,
+          "timestamp": "2026-11-01T16:15:14.625053+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31097,
+          "provider": "android_fused",
+          "longitude": 80.420873,
+          "timestamp": "2026-11-01T16:16:00.873726+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31097,
+          "provider": "android_fused",
+          "longitude": 80.420873,
+          "timestamp": "2026-11-01T16:17:56.306509+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31097,
+          "provider": "android_fused",
+          "longitude": 80.420873,
+          "timestamp": "2026-11-01T16:18:30.296959+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31097,
+          "provider": "android_fused",
+          "longitude": 80.420873,
+          "timestamp": "2026-11-01T16:20:34.169576+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31097,
+          "provider": "android_fused",
+          "longitude": 80.420873,
+          "timestamp": "2026-11-01T16:21:30.259484+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31097,
+          "provider": "android_fused",
+          "longitude": 80.420873,
+          "timestamp": "2026-11-01T16:29:40.392561+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.31097,
+          "provider": "android_fused",
+          "longitude": 80.420873,
+          "timestamp": "2026-11-01T16:30:01.566869+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310971,
+          "provider": "android_fused",
+          "longitude": 80.42088,
+          "timestamp": "2026-11-01T16:57:33.995541+00:00",
+          "accuracy_m": 13.083,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.311008,
+          "provider": "android_fused",
+          "longitude": 80.420882,
+          "timestamp": "2026-11-01T20:25:22.226691+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.311008,
+          "provider": "android_fused",
+          "longitude": 80.420882,
+          "timestamp": "2026-11-01T20:27:37.169177+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.311008,
+          "provider": "android_fused",
+          "longitude": 80.420882,
+          "timestamp": "2026-11-01T20:27:45.799702+00:00",
+          "accuracy_m": 100.0,
+          "altitude_m": null
+        },
+        {
+          "latitude": 16.310973,
+          "longitude": 80.420866,
+          "accuracy_m": 12.665,
           "altitude_m": null,
           "provider": "android_fused",
-          "timestamp": "2026-11-01T10:29:59.028598+00:00"
+          "timestamp": "2026-11-02T16:17:50.432670+00:00"
         }
       ],
       "network_info": {}
@@ -663,7 +663,7 @@
       ],
       "permissions": [],
       "paired_at": "2026-10-31 15:48:33.029803+05:30",
-      "last_seen": "2026-11-01 14:06:56.200924+05:30",
+      "last_seen": "2026-11-01 23:00:13.913484+05:30",
       "secret_hash": "c250d912390fb7e7701cfda43bd74f60f9890434f2cc82dcdf7e3b0e6f92d979",
       "revoked": false,
       "metadata": {
@@ -711,11 +711,11 @@
         "session_type": "adb_direct",
         "last_connected": "2026-10-31T11:34:18Z",
         "connection_type": "wireless",
-        "lifecycle_state": "Offline",
+        "lifecycle_state": "Connected locally",
         "oem_restrictions": [
           "MIUI / HyperOS requires 'USB debugging (Security settings)' for simulated clicks."
         ],
-        "lifecycle_updated_at": "2026-10-31T19:32:41Z",
+        "lifecycle_updated_at": "2026-11-01T17:30:13Z",
         "active_transport_route": "local_wifi"
       },
       "enrollment_code": "",

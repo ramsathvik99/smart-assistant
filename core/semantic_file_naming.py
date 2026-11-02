@@ -162,23 +162,17 @@ class SemanticFileNamingService:
 
     def get_default_output_dir(self, artifact_type: Optional[str] = None) -> str:
         """
-        Resolve standard user-facing deliverable directory.
-        Checks OneDrive Desktop, Standard Desktop, Downloads, and Documents.
+        Resolve standard user-facing deliverable directory (Desktop).
+        Checks OneDrive Desktop first (if active), then standard Desktop.
+        Safely creates the directory if it does not exist.
         """
         home = os.path.expanduser("~")
         onedrive_desktop = os.path.join(home, "OneDrive", "Desktop")
         if os.path.exists(onedrive_desktop) and os.path.isdir(onedrive_desktop):
             return onedrive_desktop
         standard_desktop = os.path.join(home, "Desktop")
-        if os.path.exists(standard_desktop) and os.path.isdir(standard_desktop):
-            return standard_desktop
-        onedrive_docs = os.path.join(home, "OneDrive", "Documents")
-        if os.path.exists(onedrive_docs) and os.path.isdir(onedrive_docs):
-            return onedrive_docs
-        standard_docs = os.path.join(home, "Documents")
-        if os.path.exists(standard_docs) and os.path.isdir(standard_docs):
-            return standard_docs
-        return home
+        os.makedirs(standard_desktop, exist_ok=True)
+        return standard_desktop
 
     def get_downloads_dir(self) -> str:
         """Resolve standard user Downloads directory."""
@@ -734,7 +728,11 @@ class SemanticFileNamingService:
         # 2. Determine target directory
         if eff_dir:
             target_dir = os.path.abspath(eff_dir)
-        elif ext in (".py", ".js", ".ts", ".html", ".css", ".java", ".cpp", ".sql"):
+        elif (
+            artifact_type in ("download", "downloaded", "retrieval")
+            or "download" in (task_description or "").lower()
+            or "retrieve" in (task_description or "").lower()
+        ):
             target_dir = self.get_downloads_dir()
         else:
             target_dir = self.get_default_output_dir(artifact_type=artifact_type)
@@ -785,8 +783,10 @@ class SemanticFileNamingService:
         If the directory already exists, increments cleanly with _2, _3.
         """
         if not parent_dir:
-            from modules.code_generator.constants import GENERATED_CODE_DIR
-            parent_dir = GENERATED_CODE_DIR
+            if "download" in (command or "").lower():
+                parent_dir = self.get_downloads_dir()
+            else:
+                parent_dir = self.get_default_output_dir()
 
         os.makedirs(parent_dir, exist_ok=True)
 

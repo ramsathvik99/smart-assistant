@@ -802,6 +802,113 @@ class ChatGPTMemoryManager:
 
         return "\n".join(blocks) if blocks else ""
 
+    def query_user_documents(self, user_id: int, query_text: str) -> Optional[str]:
+        """
+        Direct grounded query over private indexed documents, document artifacts,
+        and content artifacts in PostgreSQL.
+        """
+        try:
+            from core.db_pool import get_db_pool
+            p = get_db_pool()
+            if not p or not p.is_healthy():
+                return None
+                
+            stop_words = {
+                "what", "does", "say", "about", "tell", "me", "is", "in", "my", "our", "the",
+                "a", "an", "document", "documents", "report", "reports", "artifact", "artifacts",
+                "file", "files", "pdf", "presentation", "pptx", "notes", "note", "summarize", "summary"
+            }
+            cleaned = "".join(c if c.isalnum() or c.isspace() else " " for c in query_text.lower())
+            terms = [w for w in cleaned.split() if len(w) >= 3 and w not in stop_words]
+            if not terms:
+                return None
+                
+            doc_matches = []
+            summary_matches = []
+            content_matches = []
+            
+            with p.get_cursor() as cur:
+                for t in terms:
+                    pat = f"%{t}%"
+                    cur.execute("""
+                        SELECT title, topic, artifact_type, artifact_path, outline, sections_count
+                        FROM document_artifacts
+                        WHERE user_id = %s AND (title ILIKE %s OR topic ILIKE %s)
+                        ORDER BY created_at DESC LIMIT 3
+                    """, (int(user_id), pat, pat))
+                    for r in cur.fetchall():
+                        doc_matches.append({
+                            "title": r[0], "topic": r[1], "type": r[2], "path": r[3],
+                            "outline": r[4], "sections": r[5]
+                        })
+                        
+                    cur.execute("""
+                        SELECT title, mode, summary_text, key_concepts, artifact_path
+                        FROM document_summaries
+                        WHERE user_id = %s AND (title ILIKE %s OR summary_text ILIKE %s)
+                        ORDER BY created_at DESC LIMIT 3
+                    """, (int(user_id), pat, pat))
+                    for r in cur.fetchall():
+                        summary_matches.append({
+                            "title": r[0], "mode": r[1], "summary": r[2], "key_concepts": r[3], "path": r[4]
+                        })
+
+                    cur.execute("""
+                        SELECT topic, subtopic, content, content_type
+                        FROM content_artifacts
+                        WHERE user_id = %s AND (topic ILIKE %s OR subtopic ILIKE %s OR content ILIKE %s)
+                        ORDER BY created_at DESC LIMIT 3
+                    """, (int(user_id), pat, pat, pat))
+                    for r in cur.fetchall():
+                        content_matches.append({
+                            "topic": r[0], "subtopic": r[1], "content": r[2], "type": r[3]
+                        })
+
+            if not doc_matches and not summary_matches and not content_matches:
+                if any(w in query_text.lower() for w in ("my document", "my report", "my artifact", "my notes", "document say")):
+                    topic_str = " ".join(terms)
+                    return f"I searched your private documents and artifacts, but found no record matching '{topic_str}'."
+                return None
+
+            candidates = []
+            full_target_phrase = " ".join(terms)
+            for d in {d["title"]: d for d in doc_matches}.values():
+                d_text = f"{d.get('title', '')} {d.get('topic', '')}".lower()
+                score = 0.0
+                if full_target_phrase in d_text:
+                    score += 100.0
+                score += sum(20.0 for t in terms if t in d_text)
+                desc = f"Your document '{d['title']}' ({d['type']}) covers {d['topic']}."
+                if d.get("outline") and isinstance(d["outline"], list):
+                    sections = [s.get("heading") or s.get("title") for s in d["outline"] if isinstance(s, dict)]
+                    clean_sec = [s for s in sections if s][:4]
+                    if clean_sec:
+                        desc += f" Key sections include: {', '.join(clean_sec)}."
+                candidates.append((score, desc))
+
+            for s in {s["title"]: s for s in summary_matches}.values():
+                s_text = f"{s.get('title', '')} {s.get('summary_text', '')}".lower()
+                score = 0.0
+                if full_target_phrase in s_text:
+                    score += 100.0
+                score += sum(20.0 for t in terms if t in s_text)
+                candidates.append((score, f"Summary for '{s['title']}': {s['summary']}"))
+
+            for c in {c["topic"]: c for c in content_matches}.values():
+                c_text = f"{c.get('topic', '')} {c.get('subtopic', '')} {c.get('content', '')}".lower()
+                score = 0.0
+                if full_target_phrase in c_text:
+                    score += 100.0
+                score += sum(20.0 for t in terms if t in c_text)
+                snippet = (c['content'][:250] + "...") if len(c.get('content', '')) > 250 else c.get('content', '')
+                candidates.append((score, f"From your artifact on {c['topic']}: {snippet}"))
+
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return " ".join(c[1] for c in candidates[:2])
+        except Exception as e:
+            logger.error(f"[DOCUMENT RETRIEVAL] Query error: {e}")
+            return None
+
     def answer_historical_fact_query(self, user_id: int, query_text: str) -> Optional[str]:
         """
         Direct factual recall and preference querying grounded in PostgreSQL storage.
@@ -836,6 +943,11 @@ class ChatGPTMemoryManager:
         # Speech recognition / spelling normalization for education & personal facts
         q = re.sub(r'\binter\s+stu(?:y|ies|dy|dies)\b', 'intermediate studies', q)
         q = re.sub(r'\bmy\s+inter\b', 'my intermediate', q)
+        q = re.sub(r'\buni\b', 'university', q)
+
+        # Jokes, humor, riddles are NOT fact queries
+        if any(w in q for w in ("joke", "jokes", "funny", "laugh", "riddle", "humor")):
+            return None
 
         # 0.02 Temporal reasoning over a stored date fact
         # ("Which day of the week is my birthday next year?", "How many days until
@@ -844,6 +956,12 @@ class ChatGPTMemoryManager:
         temporal_answer = self._answer_temporal_fact_query(q, facts)
         if temporal_answer:
             return temporal_answer
+
+        # 0.03 Private document/artifact querying
+        if any(k in q for k in ("document", "report", "artifact", "notes", "notes on", "what does my doc", "what is in my doc", "neural network", "dbms", "normalization")):
+            doc_ans = self.query_user_documents(user_id, query_text)
+            if doc_ans:
+                return doc_ans
 
         # 0.01 Verification / "Are you sure?" re-evaluation queries
         if q.startswith("are you sure") or q.startswith("are you certain") or "really sure" in q:
@@ -893,7 +1011,8 @@ class ChatGPTMemoryManager:
             "university do i attend", "which university", "what university",
             "where do i study", "what college do i", "which college do i",
             "college do i attend", "what is my university", "what is my college",
-            "my institution", "which institution", "what school do i attend", "where do i go to school"
+            "my institution", "which institution", "what school do i attend", "where do i go to school",
+            "my university name", "my university", "my uni name", "my uni", "what is my uni", "which uni"
         )):
             inst = facts.get("institution") or facts.get("university") or facts.get("college")
             edu = facts.get("education") or facts.get("student_status")
@@ -1082,7 +1201,16 @@ class ChatGPTMemoryManager:
         best_val = None
         best_score = 0.0
 
+        # Specific vehicle inquiry
+        if any(w in q for w in ("car", "vehicle", "drive")):
+            car = facts.get("car") or facts.get("vehicle") or facts.get("car_model")
+            if car:
+                return f"According to your records, you drive a {car}."
+            return "I don't have a record of what car model you drive."
+
         for k, v in facts.items():
+            if any(m_key in k.lower() for m_key in ("model", "token", "secret", "password", "key")):
+                continue
             k_low = k.lower()
             k_words = set(k_low.replace("_", " ").split())
             score = 0.0

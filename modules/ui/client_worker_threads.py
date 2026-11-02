@@ -33,12 +33,9 @@ class ClientCommandWorker(QObject):
         self.started.emit(cmd)
         self.state_changed.emit("thinking")
         try:
-            # Immediate acknowledgement & state transition (< 1ms)
+            # State transition to executing
             try:
-                from core.fast_acknowledgement import get_fast_acknowledgement
-                fast_ack = get_fast_acknowledgement(cmd)
-                if fast_ack:
-                    self.state_changed.emit("executing")
+                self.state_changed.emit("executing")
             except Exception:
                 pass
 

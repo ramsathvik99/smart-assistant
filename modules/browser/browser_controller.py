@@ -289,9 +289,8 @@ def take_page_screenshot(url: str, output_path: Optional[str] = None) -> Dict[st
 
     if not output_path:
         from datetime import datetime
-        home = os.path.expanduser("~")
-        desktop = os.path.join(home, "Desktop")
-        out_dir = desktop if os.path.exists(desktop) else home
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        out_dir = get_semantic_file_naming_service().get_default_output_dir()
         output_path = os.path.join(out_dir, f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
 
     try:
@@ -4432,14 +4431,11 @@ def export_web_scripts(
             "message": "Target must be a valid URL or offline capture JSON path."
         }
 
-    clean_out_dir = (output_directory or "").strip(' "\'')
-    if not clean_out_dir:
-        return {
-            "success": False,
-            "status": "error",
-            "error": "output_directory cannot be empty.",
-            "message": "output_directory cannot be empty."
-        }
+    clean_out_dir = (output_directory or "").strip(' "')
+    if not clean_out_dir or clean_out_dir == "exported_scripts":
+        from core.semantic_file_naming import get_semantic_file_naming_service
+        clean_out_dir = os.path.join(get_semantic_file_naming_service().get_downloads_dir(), "exported_scripts")
+        os.makedirs(clean_out_dir, exist_ok=True)
 
     abs_out_dir = os.path.abspath(clean_out_dir)
     real_out_dir = os.path.realpath(abs_out_dir)

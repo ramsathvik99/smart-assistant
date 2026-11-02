@@ -427,7 +427,10 @@ class AssistantApp(QObject):
                     db_manager=db_manager,
                     user_id=self._user_id
                 )
-                print(f"[REMINDER ENGINE] Initialized successfully with database persistence for user {self._user_id}")
+                if self._user_id is not None:
+                    print(f"[REMINDER ENGINE] Initialized successfully with database persistence for user {self._user_id}")
+                else:
+                    print("[REMINDER ENGINE] Background scheduler started in standby mode (awaiting user authentication)")
         except Exception as e:
             print(f"[UI] Reminder scheduler error: {e}")
 
@@ -447,18 +450,31 @@ class AssistantApp(QObject):
             print(f"[Dashboard] Optional dashboard server skipped: {e}")
 
     def _speak_greeting(self):
-        """Perform canonical post-login greeting and start continuous audio listening."""
+        """Perform dynamic post-login greeting and start continuous audio listening."""
         user = self._username or "there"
         asst = self._assistant_name or "Trevon"
-        greeting = f"Welcome back {user}. {asst} is ready when you are."
-        print(f"[GREETING] {greeting}")
+        uid = getattr(self, "_user_id", None)
 
         def _do_greeting_and_start_audio():
             import threading
             import time
+            greeting = ""
+            try:
+                from extensions.personality_engine.login_greeting import get_login_greeting_service
+                greeting = get_login_greeting_service().generate_greeting(
+                    user_id=uid,
+                    username=user,
+                    assistant_name=asst
+                )
+            except Exception as e:
+                print(f"[GREETING] Error generating dynamic greeting: {e}")
+                greeting = f"Welcome back {user}. {asst} is ready when you are."
+
+            print(f"[GREETING] {greeting}")
+
             try:
                 import legacy.tts as tts_mod
-                # Speak canonical greeting
+                # Speak dynamic greeting
                 tts_mod.speak(greeting)
                 # Wait for greeting to finish before opening microphone to prevent self-hearing
                 tts_mod.wait_for_silence(timeout=10.0)

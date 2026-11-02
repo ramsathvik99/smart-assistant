@@ -804,8 +804,12 @@ class DialogueStateManager:
 
         # ── 0. Discourse Pivot & Interruption / Cancellation ──
         # Handles "Actually, forget that. Help me fix this error instead" or "Nevermind, open calculator"
-        m_pivot = re.match(
-            r'^(?:actually,?\s*)?(?:forget\s+(?:that|it|about\s+that)|never\s*mind|nevermind|scratch\s+that|cancel\s+(?:that|it|the\s+request)?|abort|stop(?:\s+that|\s+it)?|don\'t\s+do\s+that|leave\s+(?:that|it))[.,;! ]*(.*)',
+        _is_direct_domain_action = bool(re.match(
+            r'^(?:cancel|delete|remove|clear|stop|pause|resume|postpone|reschedule)\s+(?:all\s+|every\s+|the\s+|my\s+|our\s+|upcoming\s+|scheduled\s+|recurring\s+|future\s+|active\s+|completed\s+|missed\s+)?(?:reminders?|schedules?|tasks?|meetings?|appointments?|events?|alarms?|timers?|calls?|syncs?|standups?|notifications?)\b',
+            lower
+        ))
+        m_pivot = None if _is_direct_domain_action else re.match(
+            r'^(?:actually,?\s*)?(?:forget\s+(?:that|it|about\s+that)|never\s*mind|nevermind|scratch\s+that|cancel\s+(?:that|it|the\s+request|this|everything)|abort\s+(?:that|it)?|stop(?:\s+(?:that|it))|don\'t\s+do\s+that|leave\s+(?:that|it))[.,;! ]*(.*)',
             lower
         )
         if m_pivot:
@@ -1545,6 +1549,56 @@ class DialogueStateManager:
             print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (explicit cancellation)")
             return resolved, True
 
+        # ── 4f. Reminder Reference & Candidate Resolution ──
+        # 1. Undo cancelled reminder ("bring back the reminder I just cancelled")
+        if re.search(r'\b(?:bring\s+back|restore|undo)\s+(?:the\s+)?(?:reminder|schedule)(?:\s+(?:i\s+just\s+cancelled|i\s+cancelled|cancelled))?\b', lower):
+            last_cancelled = self.current_state.session_context.get("last_cancelled_reminder")
+            if last_cancelled:
+                txt = last_cancelled.get("task_text") or last_cancelled.get("text")
+                due = last_cancelled.get("due_at") or last_cancelled.get("time")
+                if txt and due:
+                    resolved = f"remind me to {txt} at {due}"
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (restored cancelled reminder)")
+                    return resolved, True
+
+        # 2. Ordinal selection from clarification candidates ("cancel the second one", "delete number 2", "the first one")
+        m_ord_rem = re.search(r'\b(?:(?:cancel|delete|remove|reschedule|move|snooze|complete)\s+(?:the\s+)?)?(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)(?:\s+(?:one|reminder))?\b', lower)
+        if m_ord_rem:
+            cand_reminders = self.current_state.session_context.get("last_reminder_candidates") or self.current_state.session_context.get("reminder_candidates") or []
+            if cand_reminders:
+                ord_name = m_ord_rem.group(1).lower()
+                ord_map = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3, "fifth": 4, "5th": 4}
+                idx = (len(cand_reminders) - 1) if ord_name == "last" else ord_map.get(ord_name, 0)
+                if 0 <= idx < len(cand_reminders):
+                    chosen = cand_reminders[idx]
+                    rem_id = chosen.get("id")
+                    act_verb = "cancel"
+                    for v in ["delete", "remove", "cancel", "reschedule", "move", "snooze", "complete"]:
+                        if v in lower:
+                            act_verb = v
+                            break
+                    resolved = f"{act_verb} reminder #{rem_id}"
+                    print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (reminder candidate index {idx})")
+                    return resolved, True
+
+        # 3. Pronoun reference to the active/last reminder ("move that to tomorrow", "push it back by an hour", "snooze it for 10 minutes", "cancel that reminder")
+        m_rem_pronoun = re.search(r'\b(move|push|reschedule|shift|postpone|snooze|cancel|delete|remove|pause|resume|complete)\s+(?:that\s+reminder|that|it\s+back|it)(?:\s+(?:to|by|for)\s+(.+))?\b', lower)
+        if m_rem_pronoun:
+            last_rem_id = self.current_state.session_context.get("last_reminder_id")
+            if not last_rem_id and self.current_state.session_context.get("last_reminder"):
+                last_rem_id = (self.current_state.session_context.get("last_reminder") or {}).get("id")
+            if not last_rem_id and self.current_state.session_context.get("last_mentioned_reminder"):
+                last_rem_id = (self.current_state.session_context.get("last_mentioned_reminder") or {}).get("id")
+            if last_rem_id:
+                action_word = m_rem_pronoun.group(1)
+                time_arg = m_rem_pronoun.group(2) or ""
+                if time_arg:
+                    resolved = f"{action_word} reminder #{last_rem_id} to {time_arg}".strip()
+                else:
+                    resolved = f"{action_word} reminder #{last_rem_id}".strip()
+                print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (bound to last reminder #{last_rem_id})")
+                return resolved, True
+
         # ── 4e. Conversational Pause / Short Utterance Hold ("Wait", "Wait...", "Hold on") ──
         if lower in (
             "wait", "wait...", "wait!", "hold on", "hang on",
@@ -1769,6 +1823,11 @@ class DialogueStateManager:
                 candidates = self.current_state.current_recommendation_list
                 is_search_fresh = True
 
+            # Check reminder candidates in session context
+            if not candidates and self.current_state.session_context.get("reminder_candidates"):
+                candidates = self.current_state.session_context.get("reminder_candidates")
+                is_search_fresh = True
+
             if not is_search_fresh or not candidates:
                 resolved = "clarify_candidate_selection_unavailable"
                 print(f"[REFERENCE_RESOLUTION] '{user_input}' -> '{resolved}' (no fresh search candidates in state)")
@@ -1777,8 +1836,13 @@ class DialogueStateManager:
             if idx < len(candidates):
                 target_item = candidates[idx]
                 if isinstance(target_item, dict):
-                    fpath = target_item.get("path") or target_item.get("name")
-                    resolved = f"open file {fpath}"
+                    if "task_text" in target_item:
+                        rem_id = target_item.get("id")
+                        act = "cancel" if any(w in lower for w in ("cancel", "delete", "remove", "drop", "clear")) else "view"
+                        resolved = f"{act} reminder #{rem_id}"
+                    else:
+                        fpath = target_item.get("path") or target_item.get("name")
+                        resolved = f"open file {fpath}"
                 else:
                     is_rec = (candidates is self.current_state.current_recommendation_list) or (
                         getattr(self.current_state, "current_recommendation_list", None) == candidates
@@ -3993,6 +4057,7 @@ def get_dialogue_manager(user_id: Any = None) -> DialogueStateManager:
 
 
 DialogueStateManager.get_instance = staticmethod(get_dialogue_manager)
+get_dialogue_state_manager = get_dialogue_manager
 
 
 # ============================================================================

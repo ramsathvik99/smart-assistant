@@ -658,6 +658,22 @@ def _brain_process_core(
     input_to_analyze = routing_input if reference_resolved else user_input
     semantic_rep = semantic_understanding_engine.analyze(input_to_analyze, dialogue_mgr.current_state, uid_int)
 
+    # ── Step 1.1b-Q: Pure Conversational Questions & Non-Action Knowledge Queries ──
+    if (getattr(semantic_rep, "request_type", "") == "QUESTION" and not getattr(semantic_rep, "action_required", True)) or (
+        not getattr(semantic_rep, "action_required", True) and getattr(semantic_rep, "intent", "") == "GENERAL_CONVERSATION" and not getattr(semantic_rep, "is_negation", False)
+    ):
+        from core.unified_command_router import unified_router
+        ans_res = unified_router.execute_single_action(
+            routing_input,
+            user_id=uid_int,
+            semantic_command=semantic_rep
+        )
+        full_resp = (pending_prefix + (ans_res.get("response") or "")).strip()
+        dialogue_mgr.record_response(full_resp)
+        ans_res["response"] = full_resp
+        ans_res["semantic_representation"] = semantic_rep.to_dict()
+        return ans_res
+
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # Step 1.1b0 — SPEECH CANCELLATION / ASSISTANT TTS STOP
@@ -3131,9 +3147,15 @@ def _brain_process_core(
         except Exception:
             pass
 
-    # Contextual CONTINUE: Resolves by paused context (Reading -> Music -> Goal)
+    # Contextual CONTINUE: Resolves by paused context (Reading -> Music -> Work Goal -> Activity)
     _clean_cont_cmd = clean_low.rstrip('.?!,').strip()
-    if _clean_cont_cmd in ("continue", "resume", "keep reading", "continue reading", "resume reading"):
+    is_continue_request = (
+        _clean_cont_cmd in ("continue", "resume", "keep reading", "continue reading", "resume reading", "continue what we were doing", "continue what i was doing", "resume previous work", "keep going with what we were doing")
+        or getattr(semantic_rep, "request_type", "") == "CONTINUATION"
+        or getattr(semantic_rep, "is_continuation", False)
+        or bool(re.search(r'\b(?:continue|resume|go\s+on\s+with|keep\s+going\s+with)\s+(?:what\s+(?:we|i)\s+were\s+doing|where\s+we\s+left\s+off|previous\s+(?:task|work|activity))\b', _clean_cont_cmd))
+    )
+    if is_continue_request:
         # 1. Check if Document Reading was paused
         try:
             from core.artifact_reader import get_artifact_reading_controller
@@ -3171,6 +3193,41 @@ def _brain_process_core(
         except Exception:
             pass
 
+        # 3. Check if an active Work Goal was paused
+        curr_g = dialogue_mgr.current_state.current_goal
+        goals_dict = dialogue_mgr.current_state.session_context.get("active_work_goals", {})
+        if curr_g or goals_dict:
+            target_g = curr_g or (list(goals_dict.values())[-1] if goals_dict else None)
+            if target_g:
+                from core.goal_planner import WorkGoal
+                wg = WorkGoal.from_dict(target_g)
+                wg.resume()
+                dialogue_mgr.current_state.current_goal = wg.to_dict()
+                dialogue_mgr.current_state.goal_status = "RUNNING"
+                resp_str = f"Resumed work on {wg.topic or wg.title}. Standing by to proceed."
+                dialogue_mgr.record_response(resp_str)
+                return {
+                    "status": "success",
+                    "intent": "GOAL_MANAGEMENT",
+                    "goal_status": "RUNNING",
+                    "response": resp_str,
+                    "handled": True,
+                }
+
+        # 4. If no background task was active, resume dialogue context
+        recent_action = getattr(dialogue_mgr.current_state, "last_action", None)
+        if recent_action:
+            resp_str = f"Resuming our workflow. Our last action was {recent_action}. What would you like to do next?"
+        else:
+            resp_str = "Standing by. We don't have an active background task in progress. What would you like to work on?"
+        dialogue_mgr.record_response(resp_str)
+        return {
+            "status": "success",
+            "intent": "GOAL_MANAGEMENT",
+            "response": resp_str,
+            "handled": True,
+        }
+
     if routing_input == "pause current goal" or clean_low in ("wait", "wait...", "wait!", "hold on", "hang on", "wait a second", "wait a sec", "wait a minute", "pause"):
         active_g = dialogue_mgr.current_state.current_goal or {}
         dialogue_mgr.current_state.goal_status = "WAITING_FOR_USER"
@@ -3196,7 +3253,7 @@ def _brain_process_core(
     )
 
     # Section 6, 7, 18: Distinguish actual cancellation from correction / new command
-    _action_verbs_pattern = r'\b(?:open|create|show|make|convert|export|save|edit|search|close|add|update|type|write|view|read|start|launch|play|run)\b'
+    _action_verbs_pattern = r'\b(?:open|create|show|make|convert|export|save|edit|search|close|add|update|type|write|view|read|start|launch|play|run|lock|unlock|mute|unmute|call|battery|power|reboot|shutdown|stop)\b'
     _has_new_action = bool(re.search(_action_verbs_pattern, clean_low_nopunct))
 
     if (_pending_act or getattr(dialogue_mgr.current_state, "pending_confirmation", False)) and not _is_explicit_goal_cancel:
@@ -3222,7 +3279,7 @@ def _brain_process_core(
 
             # Strip correction prefixes from routing input
             clean_cmd = re.sub(
-                r'^(?:(?:oh\s+)?no[,\s]+(?:i\s+need\s+you\s+to\s+|i\s+meant\s+|not\s+that\s+)?|yes[,\s]+(?:but\s+)?|but\s+|actually\s+|i\s+meant\s+|rather\s+|instead\s+|(?:i\s+)?(?:need|want)\s+you\s+to\s+)',
+                r'^(?:(?:oh\s+)?no[,\s]+(?:(?:stop|cancel)\s+that[.,\s]+)?(?:i\s+need\s+you\s+to\s+|i\s+meant\s+|not\s+that\s+)?|yes[,\s]+(?:but\s+)?|but\s+|actually\s+|i\s+meant\s+|rather\s+|instead\s+|(?:i\s+)?(?:need|want)\s+you\s+to\s+)',
                 '',
                 clean_low_nopunct,
                 flags=re.IGNORECASE
@@ -3499,18 +3556,18 @@ def _brain_process_core(
 
         # Check if user input is an unrelated intent (like TIME_QUERY, CALCULATOR, etc.)
         analyzed_pending = _multi_intent_analyzer.analyze(routing_input)
-        is_clarification_response = bool(
+        is_new_command = bool(
+            re.match(r'^(?:set\s+a\s+reminder|remind\s+me|create\s+a\s+document|open\s+(?!file\b)|close\s+|play\s+|check\s+|what\s+is|what\s+time|cancel|stop|help\s+me)\b', routing_input.lower())
+        )
+        is_clarification_response = not is_new_command and bool(
             (isinstance(dialogue_mgr.current_state.pending_goal_continuation, dict) and (
                 dialogue_mgr.current_state.pending_goal_continuation.get("type") in ("document_generation_clarification", "reminder_clarification")
                 or "plan" in dialogue_mgr.current_state.pending_goal_continuation
             ))
             or re.search(r'([a-zA-Z0-9_\-\\]+\.(?:txt|pdf|docx|pptx|xlsx|csv|py))', routing_input)
-            or any(w in routing_input.lower() for w in ["first", "second", "third", "other", "1st", "2nd", "3rd", "one", "this", "that", "the "])
-            or any(w in user_input.lower() for w in ["first", "second", "third", "other", "1st", "2nd", "3rd", "one", "this", "that", "the "])
+            or any(w in routing_input.lower() for w in ["first", "second", "third", "other", "1st", "2nd", "3rd", "this", "that"])
+            or any(w in user_input.lower() for w in ["first", "second", "third", "other", "1st", "2nd", "3rd", "this", "that"])
             or reference_resolved
-        )
-        is_new_command = not is_clarification_response and bool(
-            re.match(r'^(?:set\s+a\s+reminder|remind\s+me|create\s+a\s+document|open\s+(?!file\b)|close\s+|play\s+|check\s+|what\s+is|what\s+time|cancel|stop|help\s+me)\b', routing_input.lower())
         )
         if is_new_command or (not is_clarification_response and analyzed_pending.primary_intent.name in ("TIME_QUERY", "WEATHER_QUERY", "CALCULATOR", "DATE_QUERY", "MUSIC", "REMINDERS", "OPEN_APPLICATION", "CLOSE_APPLICATION")):
             # Unrelated new request interrupts the waiting goal
@@ -3688,7 +3745,7 @@ def _brain_process_core(
         else:
             before_snap = EnvironmentSnapshot(observed_categories=[])
 
-        result = _single_route(routing_input, user_id=user_id)
+        result = _single_route(routing_input, user_id=user_id, semantic_command=semantic_rep)
         intent_name = result.get("intent", analysis.primary_intent.name)
 
         # Step 5 — OBSERVE RESULT (capture actual system state)
@@ -3963,13 +4020,11 @@ def _brain_process_core(
     dialogue_mgr.current_state.current_goal = goal_info
 
     ack_msg = None
-    if plan.total_steps > 1:
-        ack_msg = f"I'm on it. Starting {plan.total_steps}-step task..."
-        if on_progress:
-            try:
-                on_progress(ack_msg)
-            except Exception:
-                pass
+    if on_progress and plan.total_steps > 1:
+        try:
+            on_progress({"total_steps": plan.total_steps, "status": "starting"})
+        except Exception:
+            pass
 
     for step in plan.steps:
         subgoals.append({

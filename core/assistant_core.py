@@ -147,8 +147,10 @@ class AssistantCore:
             uid = self._user_id
         if uid:
             try:
-                from legacy.memory_manager import set_assistant_name_db
-                set_assistant_name_db(uid, name)
+                from legacy.memory_manager import get_assistant_name_db, set_assistant_name_db
+                existing_name = get_assistant_name_db(uid)
+                if existing_name != name:
+                    set_assistant_name_db(uid, name)
             except Exception as e:
                 print(f"[CORE] Error saving assistant name: {e}")
             try:

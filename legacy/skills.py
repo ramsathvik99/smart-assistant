@@ -701,8 +701,8 @@ def convert_units(value, unit_from, unit_to):
 # SCREENSHOTS
 # ======================================================
 def get_device_screenshot_folder():
-    downloads = Path(os.environ["USERPROFILE"]) / "Downloads"
-    folder = downloads / "AssistantScreenshots"
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    folder = Path(get_semantic_file_naming_service().get_default_output_dir())
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
@@ -1609,15 +1609,18 @@ def play_rock_paper_scissors(user_choice):
 
 def get_location_path(location_hint):
     """Resolve location string to actual path."""
-    location_hint = location_hint.lower().strip()
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    namer = get_semantic_file_naming_service()
+    location_hint = (location_hint or "").lower().strip()
     
-    if "desktop" in location_hint:
-        return os.path.join(os.path.expanduser("~"), "Desktop")
-    elif "documents" in location_hint:
-        return os.path.join(os.path.expanduser("~"), "Documents")
+    if "download" in location_hint:
+        return namer.get_downloads_dir()
+    elif "document" in location_hint:
+        docs = os.path.join(os.path.expanduser("~"), "Documents")
+        os.makedirs(docs, exist_ok=True)
+        return docs
     else:
-        # Default to Downloads
-        return os.path.join(os.path.expanduser("~"), "Downloads")
+        return namer.get_default_output_dir()
 
 def get_unique_name(base_path):
     """Generate a unique numbered filename if base_path exists."""
@@ -1675,7 +1678,7 @@ def ask_replace_or_rename(path, item_type):
         print(f"[File Conflict] Error getting user response: {e}")
         return "rename"
 
-def create_file(name, location="Downloads", content=""):
+def create_file(name, location="Desktop", content=""):
     """Create a file with conflict handling."""
     try:
         # Resolve location

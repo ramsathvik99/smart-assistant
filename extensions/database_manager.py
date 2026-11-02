@@ -277,27 +277,33 @@ class DatabaseManager:
 
     # =========================================================================
     # REMINDERS
-    # Canonical table: reminders(id, user_id, task_text, due_at, is_notified, created_at)
+    # Canonical table: reminders(id, user_id, task_text, due_at, is_notified, created_at, status, recurrence, description)
     # =========================================================================
 
-    def add_reminder(self, user_id, task_text, due_at):
+    def add_reminder(self, user_id, task_text, due_at, recurrence=None, description=None):
         """Add a new reminder to the database atomically and concurrency-safely."""
         if not self.pool or not user_id:
             return None
         clean_text = str(task_text).strip()
+        rec_str = None
+        if recurrence:
+            if isinstance(recurrence, dict):
+                rec_str = recurrence.get("frequency") or str(recurrence)
+            else:
+                rec_str = str(recurrence)
         try:
             with self._get_cursor() as cur:
                 try:
                     cur.execute("SAVEPOINT sp_reminder")
                     cur.execute(
                         """
-                        INSERT INTO reminders (user_id, task_text, due_at, is_notified)
-                        VALUES (%s, %s, %s, FALSE)
+                        INSERT INTO reminders (user_id, task_text, due_at, is_notified, status, recurrence, description)
+                        VALUES (%s, %s, %s, FALSE, 'active', %s, %s)
                         ON CONFLICT (user_id, LOWER(TRIM(task_text)), due_at) WHERE (is_notified = FALSE)
-                        DO UPDATE SET is_notified = FALSE
+                        DO UPDATE SET is_notified = FALSE, status = 'active', recurrence = EXCLUDED.recurrence, description = EXCLUDED.description
                         RETURNING id
                         """,
-                        (user_id, clean_text, due_at)
+                        (user_id, clean_text, due_at, rec_str, description)
                     )
                     row = cur.fetchone()
                     cur.execute("RELEASE SAVEPOINT sp_reminder")
@@ -319,15 +325,23 @@ class DatabaseManager:
                     )
                     existing = cur.fetchone()
                     if existing:
+                        cur.execute(
+                            """
+                            UPDATE reminders
+                            SET status = 'active', recurrence = %s, description = %s
+                            WHERE id = %s
+                            """,
+                            (rec_str, description, existing[0])
+                        )
                         return existing[0]
 
                     cur.execute(
                         """
-                        INSERT INTO reminders (user_id, task_text, due_at, is_notified)
-                        VALUES (%s, %s, %s, FALSE)
+                        INSERT INTO reminders (user_id, task_text, due_at, is_notified, status, recurrence, description)
+                        VALUES (%s, %s, %s, FALSE, 'active', %s, %s)
                         RETURNING id
                         """,
-                        (user_id, clean_text, due_at)
+                        (user_id, clean_text, due_at, rec_str, description)
                     )
                     row = cur.fetchone()
                     return row[0] if row else None
@@ -335,8 +349,19 @@ class DatabaseManager:
             print(f"[DB REMINDER ERROR] add_reminder: {e}")
             return None
 
-    def get_reminders(self, user_id, start_date=None, end_date=None):
-        """Get reminders for a user, optionally filtered by date range."""
+    def get_reminders(self, user_id, start_date=None, end_date=None, scope="upcoming", status=None):
+        """
+        Get reminders for a user with smart filtering.
+        Scopes:
+          - upcoming: due_at >= CURRENT_TIMESTAMP AND is_notified = FALSE AND status = 'active'
+          - today: today's active unnotified reminders
+          - tomorrow: tomorrow's active unnotified reminders
+          - this_week: next 7 days active unnotified reminders
+          - overdue / missed: due_at < CURRENT_TIMESTAMP AND is_notified = FALSE AND status = 'active'
+          - completed: is_notified = TRUE OR status = 'completed'
+          - paused: status = 'paused'
+          - all: all reminders regardless of date or status
+        """
         if not self.pool or not user_id:
             return []
         try:
@@ -357,20 +382,108 @@ class DatabaseManager:
 
                     cur.execute(
                         """
-                        SELECT id, task_text, due_at, is_notified, created_at
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
                         FROM reminders
                         WHERE user_id = %s
                           AND due_at BETWEEN %s AND %s
+                          AND (status = 'active' OR status IS NULL)
                         ORDER BY due_at ASC
                         """,
                         (user_id, norm_start, norm_end)
                     )
-                else:
+                elif scope == "today":
                     cur.execute(
                         """
-                        SELECT id, task_text, due_at, is_notified, created_at
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
                         FROM reminders
                         WHERE user_id = %s
+                          AND due_at >= CURRENT_DATE AND due_at < CURRENT_DATE + INTERVAL '1 day'
+                          AND is_notified = FALSE
+                          AND (status = 'active' OR status IS NULL)
+                        ORDER BY due_at ASC
+                        """,
+                        (user_id,)
+                    )
+                elif scope == "tomorrow":
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND due_at >= CURRENT_DATE + INTERVAL '1 day' AND due_at < CURRENT_DATE + INTERVAL '2 day'
+                          AND is_notified = FALSE
+                          AND (status = 'active' OR status IS NULL)
+                        ORDER BY due_at ASC
+                        """,
+                        (user_id,)
+                    )
+                elif scope == "this_week":
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND due_at >= CURRENT_TIMESTAMP AND due_at < CURRENT_DATE + INTERVAL '7 day'
+                          AND is_notified = FALSE
+                          AND (status = 'active' OR status IS NULL)
+                        ORDER BY due_at ASC
+                        """,
+                        (user_id,)
+                    )
+                elif scope in ("overdue", "missed"):
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND due_at < CURRENT_TIMESTAMP
+                          AND is_notified = FALSE
+                          AND (status = 'active' OR status IS NULL)
+                        ORDER BY due_at DESC
+                        """,
+                        (user_id,)
+                    )
+                elif scope == "completed":
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND (is_notified = TRUE OR status = 'completed')
+                        ORDER BY due_at DESC
+                        """,
+                        (user_id,)
+                    )
+                elif scope == "paused":
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND status = 'paused'
+                        ORDER BY due_at ASC
+                        """,
+                        (user_id,)
+                    )
+                elif scope == "all":
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
+                        FROM reminders
+                        WHERE user_id = %s
+                        ORDER BY due_at ASC
+                        """,
+                        (user_id,)
+                    )
+                else:  # default "upcoming"
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND due_at >= CURRENT_TIMESTAMP
+                          AND is_notified = FALSE
+                          AND (status = 'active' OR status IS NULL)
                         ORDER BY due_at ASC
                         """,
                         (user_id,)
@@ -382,12 +495,65 @@ class DatabaseManager:
                         "task_text": row[1],
                         "due_at": row[2],
                         "is_notified": row[3],
-                        "created_at": row[4]
+                        "created_at": row[4],
+                        "status": row[5] or "active",
+                        "recurrence": row[6],
+                        "description": row[7],
                     }
                     for row in rows
                 ]
         except Exception as e:
             print(f"[DB REMINDER ERROR] get_reminders: {e}")
+            return []
+
+    def search_reminders(self, user_id, query_text, scope=None):
+        """Search reminders by task text or description."""
+        if not self.pool or not user_id or not query_text:
+            return []
+        try:
+            pattern = f"%{query_text.strip()}%"
+            with self._get_cursor() as cur:
+                if scope == "upcoming":
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND (task_text ILIKE %s OR description ILIKE %s)
+                          AND due_at >= CURRENT_TIMESTAMP
+                          AND is_notified = FALSE
+                          AND (status = 'active' OR status IS NULL)
+                        ORDER BY due_at ASC
+                        """,
+                        (user_id, pattern, pattern)
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
+                        FROM reminders
+                        WHERE user_id = %s
+                          AND (task_text ILIKE %s OR description ILIKE %s)
+                        ORDER BY due_at DESC
+                        """,
+                        (user_id, pattern, pattern)
+                    )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "task_text": row[1],
+                        "due_at": row[2],
+                        "is_notified": row[3],
+                        "created_at": row[4],
+                        "status": row[5] or "active",
+                        "recurrence": row[6],
+                        "description": row[7],
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] search_reminders: {e}")
             return []
 
     def get_reminder_by_id(self, user_id, reminder_id):
@@ -398,7 +564,7 @@ class DatabaseManager:
             with self._get_cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, task_text, due_at, is_notified, created_at
+                    SELECT id, task_text, due_at, is_notified, created_at, status, recurrence, description
                     FROM reminders
                     WHERE user_id = %s AND id = %s
                     """,
@@ -411,48 +577,49 @@ class DatabaseManager:
                         "task_text": row[1],
                         "due_at": row[2],
                         "is_notified": row[3],
-                        "created_at": row[4]
+                        "created_at": row[4],
+                        "status": row[5] or "active",
+                        "recurrence": row[6],
+                        "description": row[7],
                     }
                 return None
         except Exception as e:
             print(f"[DB REMINDER ERROR] get_reminder_by_id: {e}")
             return None
 
-    def update_reminder(self, user_id, reminder_id, task_text=None, due_at=None):
-        """Update an existing reminder."""
+    def update_reminder(self, user_id, reminder_id, task_text=None, due_at=None, recurrence=None, description=None, status=None):
+        """Update an existing reminder with flexible fields."""
         if not self.pool or not user_id:
             return False
         try:
+            fields = []
+            values = []
+            if task_text is not None:
+                fields.append("task_text = %s")
+                values.append(task_text)
+            if due_at is not None:
+                fields.append("due_at = %s")
+                values.append(due_at)
+                # Unmark notified if moved to future
+                fields.append("is_notified = FALSE")
+            if recurrence is not None:
+                rec_str = recurrence.get("frequency") if isinstance(recurrence, dict) else str(recurrence)
+                fields.append("recurrence = %s")
+                values.append(rec_str)
+            if description is not None:
+                fields.append("description = %s")
+                values.append(description)
+            if status is not None:
+                fields.append("status = %s")
+                values.append(status)
+
+            if not fields:
+                return False
+
+            values.extend([user_id, reminder_id])
+            sql = f"UPDATE reminders SET {', '.join(fields)} WHERE user_id = %s AND id = %s"
             with self._get_cursor() as cur:
-                if task_text and due_at:
-                    cur.execute(
-                        """
-                        UPDATE reminders
-                        SET task_text = %s, due_at = %s, is_notified = FALSE
-                        WHERE user_id = %s AND id = %s
-                        """,
-                        (task_text, due_at, user_id, reminder_id)
-                    )
-                elif task_text:
-                    cur.execute(
-                        """
-                        UPDATE reminders
-                        SET task_text = %s
-                        WHERE user_id = %s AND id = %s
-                        """,
-                        (task_text, user_id, reminder_id)
-                    )
-                elif due_at:
-                    cur.execute(
-                        """
-                        UPDATE reminders
-                        SET due_at = %s, is_notified = FALSE
-                        WHERE user_id = %s AND id = %s
-                        """,
-                        (due_at, user_id, reminder_id)
-                    )
-                else:
-                    return False
+                cur.execute(sql, tuple(values))
                 return cur.rowcount > 0
         except Exception as e:
             print(f"[DB REMINDER ERROR] update_reminder: {e}")
@@ -476,6 +643,151 @@ class DatabaseManager:
             print(f"[DB REMINDER ERROR] delete_reminder: {e}")
             return False
 
+    def delete_all_reminders(self, user_id, scope="all", filter_text=None):
+        """
+        Delete multiple reminders matching scope and optional filter text.
+        Scopes:
+          - all: delete all reminders for user
+          - upcoming: delete due_at >= CURRENT_TIMESTAMP AND is_notified = FALSE
+          - completed: delete is_notified = TRUE OR status = 'completed'
+          - missed / overdue: delete due_at < CURRENT_TIMESTAMP AND is_notified = FALSE
+          - recurring: delete where recurrence IS NOT NULL
+        """
+        if not self.pool or not user_id:
+            return 0
+        try:
+            with self._get_cursor() as cur:
+                conditions = ["user_id = %s"]
+                params = [user_id]
+
+                if scope == "upcoming":
+                    conditions.append("due_at >= CURRENT_TIMESTAMP AND is_notified = FALSE")
+                elif scope == "completed":
+                    conditions.append("(is_notified = TRUE OR status = 'completed')")
+                elif scope in ("missed", "overdue"):
+                    conditions.append("due_at < CURRENT_TIMESTAMP AND is_notified = FALSE")
+                elif scope == "recurring":
+                    conditions.append("recurrence IS NOT NULL")
+
+                if filter_text:
+                    conditions.append("task_text ILIKE %s")
+                    params.append(f"%{filter_text.strip()}%")
+
+                sql = f"DELETE FROM reminders WHERE {' AND '.join(conditions)}"
+                cur.execute(sql, tuple(params))
+                return cur.rowcount
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] delete_all_reminders: {e}")
+            return 0
+
+    def pause_reminder(self, user_id, reminder_id):
+        """Pause a specific reminder."""
+        return self.update_reminder(user_id, reminder_id, status="paused")
+
+    def resume_reminder(self, user_id, reminder_id):
+        """Resume a specific reminder."""
+        return self.update_reminder(user_id, reminder_id, status="active")
+
+    def pause_all_reminders(self, user_id):
+        """Pause all upcoming active reminders for a user."""
+        if not self.pool or not user_id:
+            return 0
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reminders
+                    SET status = 'paused'
+                    WHERE user_id = %s
+                      AND due_at >= CURRENT_TIMESTAMP
+                      AND is_notified = FALSE
+                      AND (status = 'active' OR status IS NULL)
+                    """,
+                    (user_id,)
+                )
+                return cur.rowcount
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] pause_all_reminders: {e}")
+            return 0
+
+    def resume_all_reminders(self, user_id):
+        """Resume all paused reminders for a user."""
+        if not self.pool or not user_id:
+            return 0
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reminders
+                    SET status = 'active'
+                    WHERE user_id = %s AND status = 'paused'
+                    """,
+                    (user_id,)
+                )
+                return cur.rowcount
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] resume_all_reminders: {e}")
+            return 0
+
+    def mark_reminder_completed(self, user_id, reminder_id):
+        """Mark a reminder as completed."""
+        if not self.pool or not user_id:
+            return False
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reminders
+                    SET is_notified = TRUE, status = 'completed'
+                    WHERE user_id = %s AND id = %s
+                    """,
+                    (user_id, reminder_id)
+                )
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] mark_reminder_completed: {e}")
+            return False
+
+    def dismiss_reminder(self, user_id, reminder_id):
+        """Dismiss a reminder."""
+        if not self.pool or not user_id:
+            return False
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reminders
+                    SET is_notified = TRUE, status = 'dismissed'
+                    WHERE user_id = %s AND id = %s
+                    """,
+                    (user_id, reminder_id)
+                )
+                return cur.rowcount > 0
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] dismiss_reminder: {e}")
+            return False
+
+    def clear_missed_reminders(self, user_id):
+        """Clear (dismiss) all overdue/missed reminders for a user."""
+        if not self.pool or not user_id:
+            return 0
+        try:
+            with self._get_cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reminders
+                    SET is_notified = TRUE, status = 'dismissed'
+                    WHERE user_id = %s
+                      AND due_at < CURRENT_TIMESTAMP
+                      AND is_notified = FALSE
+                    """,
+                    (user_id,)
+                )
+                return cur.rowcount
+        except Exception as e:
+            print(f"[DB REMINDER ERROR] clear_missed_reminders: {e}")
+            return 0
+
     def mark_reminder_notified(self, reminder_id):
         """Mark a reminder as notified."""
         if not self.pool:
@@ -485,7 +797,7 @@ class DatabaseManager:
                 cur.execute(
                     """
                     UPDATE reminders
-                    SET is_notified = TRUE
+                    SET is_notified = TRUE, status = 'completed'
                     WHERE id = %s
                     """,
                     (reminder_id,)
@@ -504,9 +816,9 @@ class DatabaseManager:
                 if user_id:
                     cur.execute(
                         """
-                        SELECT id, user_id, task_text, due_at, created_at
+                        SELECT id, user_id, task_text, due_at, created_at, status, recurrence, description
                         FROM reminders
-                        WHERE user_id = %s AND is_notified = FALSE
+                        WHERE user_id = %s AND is_notified = FALSE AND (status = 'active' OR status IS NULL)
                         ORDER BY due_at ASC
                         """,
                         (user_id,)
@@ -514,9 +826,9 @@ class DatabaseManager:
                 else:
                     cur.execute(
                         """
-                        SELECT id, user_id, task_text, due_at, created_at
+                        SELECT id, user_id, task_text, due_at, created_at, status, recurrence, description
                         FROM reminders
-                        WHERE is_notified = FALSE
+                        WHERE is_notified = FALSE AND (status = 'active' OR status IS NULL)
                         ORDER BY due_at ASC
                         """,
                     )
@@ -527,7 +839,10 @@ class DatabaseManager:
                         "user_id": row[1],
                         "task_text": row[2],
                         "due_at": row[3],
-                        "created_at": row[4]
+                        "created_at": row[4],
+                        "status": row[5] or "active",
+                        "recurrence": row[6],
+                        "description": row[7],
                     }
                     for row in rows
                 ]
@@ -550,6 +865,7 @@ class DatabaseManager:
                           AND due_at = %s
                           AND id != %s
                           AND is_notified = FALSE
+                          AND (status = 'active' OR status IS NULL)
                         """,
                         (user_id, due_at, exclude_id)
                     )
@@ -561,6 +877,7 @@ class DatabaseManager:
                         WHERE user_id = %s
                           AND due_at = %s
                           AND is_notified = FALSE
+                          AND (status = 'active' OR status IS NULL)
                         """,
                         (user_id, due_at)
                     )

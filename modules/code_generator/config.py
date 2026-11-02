@@ -58,4 +58,9 @@ DEFAULT_LANGUAGE = "python"
 
 BLOCKED_KEYWORDS = []
 
-GENERATED_CODE_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
+try:
+    from core.semantic_file_naming import get_semantic_file_naming_service
+    GENERATED_CODE_DIR = get_semantic_file_naming_service().get_default_output_dir()
+except Exception:
+    GENERATED_CODE_DIR = os.path.join(os.path.expanduser("~"), "Desktop")
+    os.makedirs(GENERATED_CODE_DIR, exist_ok=True)

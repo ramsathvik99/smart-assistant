@@ -91,6 +91,13 @@ class SemanticCommand:
     is_multi_step: bool = False
     steps: List[Dict[str, Any]] = field(default_factory=list)
     explanation_text: Optional[str] = None
+    required_capabilities: List[str] = field(default_factory=list)
+    prohibited_capabilities: List[str] = field(default_factory=list)
+    target_device: str = "none"
+    negated_targets: List[str] = field(default_factory=list)
+    corrected_target: Optional[str] = None
+    is_continuation: bool = False
+    continuation_goal_id: Optional[str] = None
 
     def __post_init__(self):
         if not self.command_id:
@@ -168,6 +175,13 @@ class SemanticCommand:
             "is_multi_step": self.is_multi_step,
             "steps": self.steps,
             "explanation_text": self.explanation_text,
+            "required_capabilities": self.required_capabilities,
+            "prohibited_capabilities": self.prohibited_capabilities,
+            "target_device": self.target_device,
+            "negated_targets": self.negated_targets,
+            "corrected_target": self.corrected_target,
+            "is_continuation": self.is_continuation,
+            "continuation_goal_id": self.continuation_goal_id,
         }
 
 
@@ -771,6 +785,10 @@ class SemanticUnderstandingEngine:
         if not text:
             return False
         tl = text.lower().strip()
+        # Scheduling and reminder commands are never location queries unless map/navigation is explicitly asked
+        if re.search(r'\b(?:schedules?|shedules?|reminders?|remiders?|alarms?|timers?|meetings?|appointments?)\b', tl):
+            if not any(k in tl for k in ('map', 'location', 'directions', 'route', 'navigate', 'distance', 'where is', 'eta')):
+                return False
         location_patterns = [
             r'\b(?:where\s+am\s+i|where\s+am\s+i\s+located)\b',
             r'\b(?:what(?:\x27s|\s+is)\s+(?:my\s+)?(?:current\s+)?location|check\s+(?:my\s+)?(?:current\s+)?location|get\s+(?:my\s+)?(?:current\s+)?location|find\s+(?:my\s+)?(?:current\s+)?location|my\s+current\s+location|current\s+location|my\s+location)\b',
@@ -800,7 +818,7 @@ class SemanticUnderstandingEngine:
             r'\b(?:show\s+only|filter\s+(?:by|to)|only\s+show)\s+(?:hospitals?|pharmacies|pharmacy|restaurants?|petrol\s+stations?|gas\s+stations?|fuel\s+stations?|atms?|hotels?)\b',
             r'\b(?:add|include|show)\s+(?:hospitals?|pharmacies|pharmacy|restaurants?|petrol\s+stations?|gas\s+stations?|fuel\s+stations?|atms?|hotels?)(?:\s+(?:too|as\s+well|also))?\b',
             r'\b(?:remove|hide|exclude)\s+(?:hospitals?|pharmacies|pharmacy|restaurants?|petrol\s+stations?|gas\s+stations?|fuel\s+stations?|atms?|hotels?)\b',
-            r'\b(?:show\s+all(?:\s+of\s+them|\s+places|\s+markers|\s+results)?|reset\s+filters?|clear\s+filters?)\b',
+            r'\b(?:show\s+all\s+(?:of\s+them|places|markers|results)|show\s+all\s+(?:on|in)\s+(?:the\s+)?map|reset\s+filters?|clear\s+filters?)\b',
             r'\b(?:go\s+to|navigate\s+to|route\s+to|take\s+me\s+to|select)\s+(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|nearest|closest)(?:\s+(?:one|place|hospital|pharmacy|restaurant|stop))?\b',
             r'\b(?:navigate\s+there|take\s+me\s+there|route\s+there|directions?\s+there)\b',
             r'\b(?:zoom\s+in|zoom\s+out|zoom\s+map|reset\s+zoom)\b',
@@ -1513,11 +1531,42 @@ class SemanticUnderstandingEngine:
         norm = re.sub(r'\bturn\s+of\s+(?:the\s+)?wifi\b', 'turn off wifi', norm)
         norm = re.sub(r'\bshedule\b', 'schedule', norm)
         norm = re.sub(r'\bmeting\b', 'meeting', norm)
+        norm = re.sub(r'\bwats\b', 'what is', norm)
+        norm = re.sub(r'\bwat\b', 'what', norm)
+        norm = re.sub(r'\bcurrnt\b', 'current', norm)
+        norm = re.sub(r'\bplz\b|\bpls\b', '', norm).strip()
+        norm = re.sub(r'\bu\b', 'you', norm)
+        norm = re.sub(r'\brite\b', 'right', norm)
+        norm = re.sub(r'\bunloack\b', 'unlock', norm)
+        norm = re.sub(r'\blok\b', 'lock', norm)
+        norm = re.sub(r'\bphne\b', 'phone', norm)
+        norm = re.sub(r'\bmob\b', 'mobile', norm)
+        norm = re.sub(r'\bclg\b', 'college', norm)
+        norm = re.sub(r'\buni\b', 'university', norm)
+        norm = re.sub(r"\bwho's\b|\bwhos\b", 'who is', norm)
+        norm = re.sub(r"\bwhat's\b|\bwhats\b", 'what is', norm)
+        norm = re.sub(r"\bwhere's\b|\bwheres\b", 'where is', norm)
+        norm = re.sub(r"\bwhen's\b|\bwhens\b", 'when is', norm)
+        norm = re.sub(r"\bhow's\b|\bhows\b", 'how is', norm)
+        norm = re.sub(r"\bthat's\b", 'that is', norm)
+        norm = re.sub(r"\bit's\b", 'it is', norm)
+        norm = re.sub(r"\bthere's\b", 'there is', norm)
+
+        # Scheduling, reminder, and colloquial speech normalization
+        try:
+            from core.unified_command_router import normalize_scheduling_text
+            norm = normalize_scheduling_text(norm)
+        except Exception:
+            pass
 
         # -------------------------------------------------------------
         # 1. Garbled Speech / Plausibility Guard (Section 11)
         # -------------------------------------------------------------
-        if norm in ("open open", "close close", "run run") or any(k in norm for k in ["hernia of the games", "hernia of games"]):
+        if (
+            norm in ("open open", "close close", "run run")
+            or bool(re.search(r'\b(?:open\s+open|close\s+close|run\s+run)\b', norm))
+            or any(k in norm for k in ["hernia of the games", "hernia of games"])
+        ):
             clarification_prompt = "Did you mean: 'What games are compatible with this system?'" if "hernia" in norm else "I did not quite understand that. Could you please clarify your request?"
             return SemanticCommand(
                 user_text=text_stripped,
@@ -1531,6 +1580,262 @@ class SemanticUnderstandingEngine:
                 ambiguity_reason="implausible_or_garbled_speech",
                 explanation_text=clarification_prompt,
                 parameters={"action": "clarification", "response": clarification_prompt},
+                action_required=False,
+                request_type="QUESTION",
+            )
+
+        # -------------------------------------------------------------
+        # 1.05 Canonical Conversational Knowledge & Questions (Intent-Driven)
+        # -------------------------------------------------------------
+        is_explicit_creation_cmd = bool(re.search(r'\b(?:create|make|write|generate|save|export|build)\s+(?:a\s+|an\s+)?(?:doc|document|word|pdf|presentation|ppt|file|code|script|report)\b', norm))
+        is_explanation_how_it_works = bool(re.search(r'\bhow\s+([a-zA-Z0-9_\-\s]+?)\s+(?:works?|functions?)\b', norm)) or norm.startswith("tell me how ") or norm.startswith("explain how ")
+        if is_explanation_how_it_works and not is_explicit_creation_cmd:
+            m_topic = re.search(r'\bhow\s+([a-zA-Z0-9_\-\s]+?)\s+(?:works?|functions?)\b', norm)
+            topic = m_topic.group(1).strip() if m_topic else norm
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"Explain how {topic} works",
+                intent="GENERAL_CONVERSATION",
+                action="answer_question",
+                request_type="QUESTION",
+                action_required=False,
+                required_capabilities=["conversational_knowledge"],
+                prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                parameters={"topic": topic, "question": text_stripped},
+                confidence=0.98,
+            )
+
+        is_explicit_device_cmd = bool(re.search(r'\b(?:lock|unlock|shutdown|restart|sleep|mute|volume|brightness|bluetooth|wifi|battery|call)\b', norm))
+        is_explicit_app_cmd = bool(re.search(r'\b(?:open|launch|start|close|kill|terminate|switch\s+to)\s+[a-zA-Z0-9_\-\s]+', norm))
+        is_correction_cmd = bool(re.search(r'^(?:no\s*,?\s*)?(?:i\s+mean|i\s+meant|not\s+(?:the|my)|switch\s+to|change\s+to|stop\s+that[;,]?\s*i\s+meant)\b', norm))
+
+        # -------------------------------------------------------------
+        # 1.05 Canonical Question Understanding & Information Requirement Routing
+        # -------------------------------------------------------------
+        if not is_explicit_creation_cmd and not is_explicit_device_cmd and not is_explicit_app_cmd and not is_correction_cmd:
+            # 1.05a Local Clock Time Query
+            if re.search(r'\b(?:what\s+time\s+is\s+it|what\s+(?:is\s+the\s+)?(?:current\s+)?time|tell\s+me\s+(?:the\s+)?time|current\s+time)\b', norm):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal="Query current local time from system clock",
+                    intent="TIME_QUERY",
+                    action="time_query",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["clock_service"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"action": "time_query", "question": text_stripped},
+                    confidence=0.99,
+                )
+
+            # 1.05b Local Clock Date Query
+            is_past_event = bool(re.search(r'\b(?:did|was|were|happened|occurred|took\s+place|landed|landing|apollo|born|died|invented|discovered|founded|built|war)\b', norm))
+            if not is_past_event and re.search(r'\b(?:what\s+(?:is\s+)?(?:the\s+)?date|what\s+is\s+today\'?s?\s+date|what\s+day(?:\s+of\s+(?:the\s+)?week)?\s+is\s+(?:it|today)|today\'?s?\s+date|current\s+date|what\s+year\s+is\s+it|what\s+year\s+are\s+we\s+(?:currently\s+)?in|what\s+is\s+(?:the\s+)?current\s+year|current\s+year|which\s+year\s+are\s+we\s+in|what\s+is\s+this\s+year)\b', norm):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal="Query current local date from system clock",
+                    intent="DATE_QUERY",
+                    action="date_query",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["clock_service"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"action": "date_query", "question": text_stripped},
+                    confidence=0.99,
+                )
+
+            # 1.05c User Personal Memory & Profile Query
+            if not any(k in norm for k in ('job', 'prospect', 'career', 'opportunit', 'salary')) and re.search(r'\b(?:(?:what\s+is\s+)?my\s+(?:name|university|uni|college|degree|major|school|role|email|(?:phone|mobile)\s+number|placement)(?:\s+name)?|where\s+do\s+i\s+(?:study|work|live|go\s+to\s+school)|who\s+am\s+i|what\s+do\s+you\s+remember\s+about\s+me|what\s+are\s+my\s+(?:skills|interests|facts))\b', norm):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal=f"Query user personal memory: {text_stripped}",
+                    intent="MEMORY_QUERY",
+                    action="retrieve_memory",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["persistent_memory"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"action": "retrieve_memory", "question": text_stripped},
+                    confidence=0.99,
+                )
+
+            # 1.05d Private Document / Artifact Corpus Query
+            if (
+                re.search(r'\b(?:what\s+does\s+my\s+[a-z0-9_\-\s]{0,30}?(?:document|report|notes?|file|pdf|presentation|artifact)\s+say|what\s+is\s+in\s+my\s+[a-z0-9_\-\s]{0,30}?(?:document|report|notes?|file|pdf|presentation|artifact)|summarize\s+my\s+[a-z0-9_\-\s]{0,30}?(?:document|report|notes?|file|pdf|presentation|artifact)|in\s+my\s+(?:document|report|notes?|file|pdf|presentation|artifact))\b', norm)
+                or re.search(r'\b(?:artificial\s+neural\s+networks?\s+(?:report|artifact|doc|presentation)|dbms\s+normalization(?:\s+artifact)?)\b', norm)
+            ):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal=f"Search user private document corpus: {text_stripped}",
+                    intent="RAG_SEARCH",
+                    action="document_search",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["rag_retrieval"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"scope": "documents", "query": text_stripped},
+                    confidence=0.98,
+                )
+
+            # 1.05e Hybrid Personal Memory & Live Research Query
+            if re.search(r'\b(?:job\s+prospects\s+for\s+my\s+(?:degree|major|career)|opportunities\s+for\s+my\s+(?:degree|major)|jobs\s+for\s+my\s+degree)\b', norm):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal=f"Hybrid personal memory and live research: {text_stripped}",
+                    intent="RAG_SEARCH",
+                    action="hybrid_search",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["persistent_memory", "rag_retrieval"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"requires_live_search": True, "requires_memory": True, "query": text_stripped},
+                    confidence=0.98,
+                )
+
+            # 1.05f Current Dynamic / Live Fact Query (Officeholders, Leaders, Real-time status)
+            if (
+                re.search(r'\b(?:who\s+is\s+(?:the\s+)?(?:current\s+)?(?:president|potus|vice\s+president|prime\s+minister|ceo|governor|chancellor|leader|mayor)|what\s+is\s+(?:the\s+)?current\s+(?:price|stock\s+price|weather|version|population)|current\s+ceo\s+of|latest\s+(?:news|updates?|score))\b', norm)
+                or (norm.startswith("who is ") and any(k in norm for k in ("president", "potus", "ceo", "prime minister", "governor", "leader", "chief")))
+            ):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal=f"Retrieve dynamic real-world facts: {text_stripped}",
+                    intent="RAG_SEARCH",
+                    action="research",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["rag_retrieval"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"requires_live_search": True, "scope": "web", "query": text_stripped},
+                    confidence=0.98,
+                )
+
+            # 1.05g Historical Factual Queries (Specific past years/events)
+            if re.search(r'\b(?:who\s+was\s+(?:the\s+)?(?:president|prime\s+minister|ceo|leader|winner)|who\s+won\s+the\s+\d{4}|in\s+\d{4}\b|during\s+\d{4}\b|back\s+in\s+\d{4}\b)', norm):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal=f"Answer historical factual query: {text_stripped}",
+                    intent="RAG_SEARCH",
+                    action="research",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["conversational_knowledge"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"temporal_scope": "historical", "query": text_stripped},
+                    confidence=0.98,
+                )
+
+            # 1.05h Conversational Verification ("Are you sure?", "Really?")
+            if re.match(r'^(?:are\s+you\s+(?:sure|certain|positive)|really|you\s+sure|is\s+that\s+(?:true|accurate|correct))\??$', norm):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal="Verify accuracy of previous statement",
+                    intent="GENERAL_CONVERSATION",
+                    action="conversational_verification",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["conversational_knowledge"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"action": "verify_claim", "question": text_stripped},
+                    confidence=0.99,
+                )
+
+            # 1.05i Conversational Follow-up Inquiry ("What about X?", "How about X?")
+            m_follow_up = re.match(r'^(?:what|how)\s+about\s+(.+?)\??$', norm)
+            if m_follow_up:
+                topic = m_follow_up.group(1).strip()
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal=f"Answer follow-up question regarding {topic}",
+                    intent="GENERAL_CONVERSATION",
+                    action="follow_up_inquiry",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["conversational_knowledge"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"action": "follow_up", "topic": topic, "question": text_stripped},
+                    confidence=0.98,
+                )
+
+            # 1.05j-Math Canonical Mathematical & Arithmetic Calculation (Intent-Driven)
+            if (
+                re.search(r'\b(?:calculate|compute|solve)\b', norm)
+                or re.search(r'\bwhat\s+is\s+[\d.]+\s*(?:[\+\-\*/\^x]|plus|minus|times|multiplied\s+by|divided\s+by)\s*[\d.]+', norm)
+                or re.search(r'^\s*[\d.]+\s*(?:[\+\-\*/\^]|plus|minus|times|multiplied\s+by|divided\s+by)\s*[\d.]+\s*$', norm)
+            ):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal=f"Perform calculation: {text_stripped}",
+                    intent="CALCULATOR",
+                    action="calculate",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["calculator"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"action": "calculate", "expression": text_stripped},
+                    confidence=0.99,
+                )
+
+            # 1.05j Casual Entertainment / Joke Request
+            if re.search(r'\b(?:tell\s+me|give\s+me|say)?\s*(?:a|another|a\s+different)?\s*(?:[a-zA-Z0-9_\-]+\s+)?jokes?\b', norm) or norm in ("joke", "another joke", "tell me a joke"):
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal="Tell a joke",
+                    intent="GENERAL_CONVERSATION",
+                    action="joke",
+                    request_type="QUESTION",
+                    action_required=False,
+                    required_capabilities=["conversational_knowledge"],
+                    prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                    parameters={"action": "joke", "question": text_stripped},
+                    confidence=0.99,
+                )
+
+        m_knowledge = re.match(r'^(?:tell\s+me\s+(?:about\s+)?|what\s+(?:is|are|was|were|year|day|month|time|company|animal|planet|kind|type|sort|part|language|happened)|which\s+|where\s+(?:is|was|are|were|did|do|does)|when\s+(?:is|was|were|did|will)|who\s+(?:is|was|are|were|did)|why\s+(?:is|was|are|were|do|does|did)|how\s+(?:does|do|did|is|are|can|come)|explain\s+(?:to\s+me\s+)?(?:what\s+is\s+|how\s+|the\s+concept\s+of\s+)?)(.+)', norm)
+        if m_knowledge and not is_explicit_creation_cmd and not is_explicit_device_cmd and not is_explicit_app_cmd:
+            topic = m_knowledge.group(1).strip()
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"Answer conversational question about {topic}",
+                intent="GENERAL_CONVERSATION",
+                action="answer_question",
+                request_type="QUESTION",
+                action_required=False,
+                required_capabilities=["conversational_knowledge"],
+                prohibited_capabilities=["windows_workstation", "android_device", "applications", "media_control", "os_operations"],
+                parameters={"topic": topic, "question": text_stripped},
+                confidence=0.98,
+            )
+
+        # -------------------------------------------------------------
+        # 1.06 Canonical Reminders & Memory Directives (Intent-Driven)
+        # -------------------------------------------------------------
+        if re.search(r'\b(?:remember\s+(?:this|that)|remind\s+me\s+(?:about\s+this|to|for))\s+(?:for|on|at|by)\s+(tomorrow|tonight|next\s+\w+|\d+)', norm) or norm.startswith("remember this for tomorrow"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="Store reminder in persistent memory and schedule reminder",
+                intent="REMINDERS",
+                action="create_reminder",
+                request_type="INSTRUCTION",
+                action_required=True,
+                required_capabilities=["persistent_memory", "reminders"],
+                prohibited_capabilities=["windows_workstation", "android_device", "applications"],
+                parameters={"action": "create_reminder", "content": text_stripped, "time": "tomorrow"},
+                confidence=0.98,
             )
 
         # -------------------------------------------------------------
@@ -1553,6 +1858,123 @@ class SemanticUnderstandingEngine:
                 action="device_location",
                 target_type=EntityType.DEVICE_OR_SYSTEM,
                 parameters={"action": "device_location", "raw_input": text_stripped, "query": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
+        # -------------------------------------------------------------
+        # 1.16 Canonical Reminders & Alerts & Schedules (Master Directive)
+        # -------------------------------------------------------------
+        # 1. Bulk cancellation / deletion / clear ("cancel all my reminders", "cancel all my schedules", "remove all the reminders", "delete all reminders", "cancel all meeting reminders", "clear reminder history")
+        is_reminder_noun = bool(re.search(r'\b(?:reminders?|schedules?|reminder\s+history)\b', norm))
+        is_cancel_verb = bool(re.search(r'\b(?:cancel|delete|remove|clear|purge)\b', norm))
+        if (is_cancel_verb and is_reminder_noun) or norm in ("cancel all schedules", "cancel all my schedules", "cancel all my reminders", "remove all the reminders", "delete all reminders", "clear reminder history"):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"cancel/delete reminders: {text_stripped}",
+                intent="REMINDERS",
+                action="cancel",
+                parameters={"action": "cancel", "raw_input": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
+        # 2. Pause & resume reminders / schedules
+        if re.search(r'\b(?:pause|resume)\s+(?:all\s+)?(?:of\s+)?(?:the\s+|my\s+)?(?:reminders?|schedules?)\b', norm) or norm in ("pause reminders", "resume reminders", "pause my reminders", "resume my reminders", "pause schedules", "resume schedules"):
+            act = "pause" if "pause" in norm else "resume"
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"{act} reminders: {text_stripped}",
+                intent="REMINDERS",
+                action=act,
+                parameters={"action": act, "raw_input": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
+        # 3. Snooze reminder
+        if re.search(r'\bsnooze\b', norm):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"snooze reminder: {text_stripped}",
+                intent="REMINDERS",
+                action="snooze",
+                parameters={"action": "snooze", "raw_input": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
+        # 4. Mark completed / done / dismiss
+        if re.search(r'\b(?:mark\s+(?:the\s+|this\s+|my\s+)?reminder(?:\s*#?\d+)?\s*(?:as\s+)?(?:done|complete|completed|finished)|complete\s+(?:the\s+|this\s+|my\s+)?reminder|dismiss\s+(?:the\s+|this\s+|my\s+)?reminder)\b', norm):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"complete reminder: {text_stripped}",
+                intent="REMINDERS",
+                action="complete",
+                parameters={"action": "complete", "raw_input": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
+        # 5. Reschedule / postpone / move reminder
+        if re.search(r'\b(?:reschedule|postpone|move|defer|delay)\s+(?:the\s+|my\s+)?(?:reminder|schedule|that|it|#\d+)\b', norm):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"reschedule reminder: {text_stripped}",
+                intent="REMINDERS",
+                action="reschedule",
+                parameters={"action": "reschedule", "raw_input": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
+        # 6. Create reminder / schedule
+        if re.search(r'\b(?:set\s+(?:a\s+)?(?:reminder|meeting|appointment|schedule)|remind\s+me|create\s+(?:a\s+)?(?:reminder|meeting|appointment|schedule)|add\s+(?:a\s+)?(?:reminder|meeting|appointment|schedule)|schedule\b|remember\s+to\b)', norm):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"set reminder: {text_stripped}",
+                intent="REMINDERS",
+                action="create",
+                parameters={"action": "create", "raw_input": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
+        # 7. List / Query reminders & schedules
+        if (
+            re.search(r'\b(?:show|list|view|get|check)\s+(?:me\s+)?(?:all\s+)?(?:my\s+)?(?:upcoming\s+|overdue\s+|missed\s+|completed\s+|paused\s+)?(?:reminders?|schedules?)\b', norm)
+            or re.search(r'\bwhat\s+(?:are\s+)?(?:all\s+)?(?:my\s+)?(?:reminders|schedules)\b', norm)
+            or re.search(r'\bdo\s+i\s+have\s+(?:any\s+)?(?:reminders|schedules|anything\s+scheduled)\b', norm)
+            or re.search(r'\bwhat\s+do\s+i\s+have\s+scheduled\b', norm)
+            or re.search(r'\b(?:search|find)\s+(?:my\s+)?(?:reminders?|schedules?)\b', norm)
+            or norm in ("reminders", "my reminders", "schedules", "my schedules", "all my schedules", "check reminders", "what are my reminders", "what do i have scheduled", "reminder history", "show reminders", "list reminders")
+        ):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="list reminders",
+                intent="REMINDERS",
+                action="list",
+                parameters={"action": "list", "raw_input": text_stripped},
+                confidence=0.99,
+                action_required=True,
+            )
+
+        # 8. Single cancel / delete
+        if re.search(r'\b(?:cancel|delete|remove|clear)\s+(?:the\s+|this\s+|my\s+)?(?:reminder|schedule|#\d+|reminder\s+#\d+)\b', norm):
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal="cancel reminder",
+                intent="REMINDERS",
+                action="cancel",
+                parameters={"action": "cancel", "raw_input": text_stripped},
                 confidence=0.99,
                 action_required=True,
             )
@@ -1645,6 +2067,12 @@ class SemanticUnderstandingEngine:
             )
         if neg_alt_match:
             affirmative_cmd = neg_alt_match.group("affirmative").strip()
+            neg_part = norm[:neg_alt_match.start("affirmative")].strip(";,. ")
+            m_neg_tgt = re.search(r'\b(?:open|launch|run|start|create|make|delete|remove|send|search|play|set)\s+([a-zA-Z0-9_\-]+)', neg_part)
+            neg_tgt_name = m_neg_tgt.group(1).strip() if m_neg_tgt else ""
+            if neg_tgt_name:
+                affirmative_cmd = re.sub(r'\b(?:it|that|this)\b', neg_tgt_name, affirmative_cmd)
+
             if affirmative_cmd:
                 sub_res = self.interpret(affirmative_cmd, dialogue_state=dialogue_state, user_id=user_id)
                 sub_res.user_text = text_stripped
@@ -2218,12 +2646,13 @@ class SemanticUnderstandingEngine:
         # -------------------------------------------------------------
         # 3b. Context Resumption / Continuation (Section 7, 20)
         # -------------------------------------------------------------
-        if any(k in norm for k in (
-            "continue that", "continue what i was doing", "can you bring back what we were doing",
+        is_continuation_phrase = any(k in norm for k in (
+            "continue that", "continue what i was doing", "continue what we were doing", "can you bring back what we were doing",
             "bring back what we were doing", "go back to what we were doing", "do that again",
             "continue where we left off", "resume previous work", "return to the task",
-            "return to what we were doing", "back to what we were doing"
-        )) or norm.startswith(("return to the task", "go back to the task", "resume the task", "return to what")):
+            "return to what we were doing", "back to what we were doing", "keep going with what we were doing"
+        )) or bool(re.search(r'\b(?:continue|resume|go\s+on\s+with|keep\s+going\s+with)\s+(?:what\s+(?:we|i)\s+were\s+doing|where\s+we\s+left\s+off|previous\s+(?:task|work|activity))\b', norm)) or norm.startswith(("return to the task", "go back to the task", "resume the task", "return to what"))
+        if is_continuation_phrase:
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
@@ -2232,9 +2661,98 @@ class SemanticUnderstandingEngine:
                 action="resume",
                 target="previous_task",
                 desired_state="resumed",
+                request_type="CONTINUATION",
+                action_required=True,
+                is_continuation=True,
+                required_capabilities=["task_continuation"],
+                prohibited_capabilities=["windows_workstation", "android_device", "applications"],
                 parameters={"action": "resume"},
                 confidence=1.0,
             )
+
+        # -------------------------------------------------------------
+        # 3.9 Architecture-Level Device Target Resolution & Mobile Guard
+        # -------------------------------------------------------------
+        from core.target_resolver import resolve_device_target, TargetDeviceType
+        dev_target = resolve_device_target(text_stripped, user_id=user_id)
+        if dev_target.target_device == TargetDeviceType.ANDROID_PHONE:
+            is_corr = bool(re.search(r'^(?:no\s*,?\s*)?(?:i\s+mean|i\s+meant|not\s+(?:the|my)|switch\s+to|change\s+to)\b', norm)) or bool(dev_target.negated_targets)
+            is_lock_status_query = bool(re.search(r'\b(?:is|check\s+if)\s+(?:(?:my|the)\s+)?(?:phone|mobile)\s+(?:currently\s+)?(locked|sleeping|awake|screen\s+off|screen\s+on)\b', norm))
+            resolved_req_action = "query_lock_status" if is_lock_status_query else "PHONE_CONTROL"
+            raw_dispatch_cmd = text_stripped
+
+            if is_corr and dialogue_state:
+                # Inherit previous action from dialogue state context (e.g. lock -> phone_lock)
+                prev_action_str = getattr(dialogue_state, "last_action", "") or ""
+                recent_acts = getattr(dialogue_state, "recent_actions", []) or []
+                recent_action_names = [a.get("action", "") if isinstance(a, dict) else str(a) for a in recent_acts]
+                if any("lock" in a.lower() for a in ([prev_action_str] + recent_action_names)) or (hasattr(dialogue_state, "turns") and any("lock" in getattr(t, "user_input", "").lower() for t in getattr(dialogue_state, "turns", [])[-2:])):
+                    resolved_req_action = "phone_lock"
+                    raw_dispatch_cmd = "lock phone"
+                elif any("whatsapp" in a.lower() for a in ([prev_action_str] + recent_action_names)):
+                    resolved_req_action = "launch_app"
+                    raw_dispatch_cmd = "open whatsapp on phone"
+
+            return SemanticCommand(
+                user_text=text_stripped,
+                normalized_text=norm,
+                goal=f"Execute mobile device command: {raw_dispatch_cmd}" if not is_lock_status_query else "Query phone lock status",
+                intent="DEVICE_CONTROL",
+                action="remote_device" if not is_lock_status_query else "query_lock_status",
+                target=dev_target.device_name or "phone",
+                target_type=EntityType.DEVICE_OR_SYSTEM,
+                target_device="android_phone",
+                required_capabilities=["android_device"],
+                prohibited_capabilities=["windows_workstation", "applications"],
+                negated_targets=["windows_workstation"],
+                is_correction=is_corr,
+                corrected_target="android_phone" if is_corr else None,
+                parameters={
+                    "action": "remote_device" if not is_lock_status_query else "query_lock_status",
+                    "raw_command": raw_dispatch_cmd,
+                    "target_device": "android_phone",
+                    "device_id": dev_target.device_id,
+                    "device_name": dev_target.device_name,
+                    "serial": dev_target.serial,
+                    "requested_device_target": "android_phone",
+                    "resolved_device": dev_target.serial or dev_target.device_name,
+                    "requested_action": resolved_req_action,
+                    "resolved_action": resolved_req_action,
+                    "executor_action": "remote_device" if not is_lock_status_query else "query_lock_status",
+                    "is_correction": is_corr,
+                },
+                confidence=0.99,
+                action_required=not is_lock_status_query,
+            )
+
+        if dev_target.target_device == TargetDeviceType.WINDOWS_WORKSTATION:
+            is_corr_ws = bool(re.search(r'^(?:no\s*,?\s*)?(?:i\s+mean|i\s+meant|not\s+(?:the|my)|switch\s+to|change\s+to|stop\s+that[;,]?\s*i\s+meant)\b', norm)) or bool(dev_target.negated_targets)
+            if is_corr_ws:
+                return SemanticCommand(
+                    user_text=text_stripped,
+                    normalized_text=norm,
+                    goal="lock workstation",
+                    intent="DEVICE_CONTROL",
+                    action="LOCK",
+                    target="workstation",
+                    desired_state="locked",
+                    target_device="windows_workstation",
+                    required_capabilities=["windows_workstation"],
+                    prohibited_capabilities=["android_device"],
+                    negated_targets=["android_phone"],
+                    is_correction=True,
+                    corrected_target="windows_workstation",
+                    parameters={
+                        "action": "lock",
+                        "requested_action": "LOCK",
+                        "resolved_action": "LOCK",
+                        "executor_action": "lock",
+                        "target_device": "windows_workstation",
+                        "is_correction": True,
+                    },
+                    confidence=0.99,
+                    action_required=True,
+                )
 
         # -------------------------------------------------------------
         # 4. Universal Diagnostics (Section 18)
@@ -2495,11 +3013,15 @@ class SemanticUnderstandingEngine:
         # -------------------------------------------------------------
         # 8. Workstation Lock / Unlock Equivalence Group (Section 9)
         # -------------------------------------------------------------
-        has_workstation_noun = any(k in norm for k in ("computer", "pc", "system", "workstation", "screen", "session", "machine"))
+        has_workstation_noun = any(k in norm for k in ("computer", "pc", "system", "workstation", "screen", "session", "machine")) and (TargetDeviceType.WINDOWS_WORKSTATION not in dev_target.negated_targets)
         is_unlock_act = (
-            "unlock" in norm
-            or ("open" in norm and any(k in norm for k in ("workstation", "session")) and not any(k in norm for k in ("browser", "app", "file", "folder", "chrome", "notepad", "code")))
-            or ("access" in norm and any(k in norm for k in ("workstation", "session")))
+            dev_target.target_device != TargetDeviceType.ANDROID_PHONE
+            and (
+                (has_workstation_noun and "unlock" in norm)
+                or ("unlock" in norm and not any(k in norm for k in ("phone", "mobile", "android", "cell", "cellphone", "device")))
+                or ("open" in norm and any(k in norm for k in ("workstation", "session")) and not any(k in norm for k in ("browser", "app", "file", "folder", "chrome", "notepad", "code", "phone", "mobile")))
+                or ("access" in norm and any(k in norm for k in ("workstation", "session")))
+            )
         )
         if is_unlock_act:
             return SemanticCommand(
@@ -2510,8 +3032,14 @@ class SemanticUnderstandingEngine:
                 action="UNLOCK",
                 target="workstation",
                 desired_state="unlocked",
+                target_device="windows_workstation",
+                required_capabilities=["windows_workstation"],
+                prohibited_capabilities=["android_device"],
+                negated_targets=["android_phone"],
                 parameters={
-                    "requested_device_target": "unlock",
+                    "requested_device_target": "windows_workstation",
+                    "target_device": "windows_workstation",
+                    "device_id": "workstation",
                     "requested_action": "UNLOCK",
                     "resolved_action": "UNLOCK",
                     "executor_action": "unlock",
@@ -2520,7 +3048,7 @@ class SemanticUnderstandingEngine:
                 confidence=1.0,
             )
 
-        if any(k in norm for k in ("lock", "secure")) and (has_workstation_noun or norm in ("lock", "lock it", "lock now")):
+        if any(k in norm for k in ("lock", "secure")) and (has_workstation_noun or norm in ("lock", "lock it", "lock now")) and dev_target.target_device != TargetDeviceType.ANDROID_PHONE:
             return SemanticCommand(
                 user_text=text_stripped,
                 normalized_text=norm,
@@ -2529,8 +3057,14 @@ class SemanticUnderstandingEngine:
                 action="LOCK",
                 target="workstation",
                 desired_state="locked",
+                target_device="windows_workstation",
+                required_capabilities=["windows_workstation"],
+                prohibited_capabilities=["android_device"],
+                negated_targets=["android_phone"],
                 parameters={
-                    "requested_device_target": "lock",
+                    "requested_device_target": "windows_workstation",
+                    "target_device": "windows_workstation",
+                    "device_id": "workstation",
                     "requested_action": "LOCK",
                     "resolved_action": "LOCK",
                     "executor_action": "lock",
@@ -3778,7 +4312,7 @@ class SemanticUnderstandingEngine:
         if not is_joke_or_chat and any(re.search(p, text_low) for p in [
             r'\b(?:gather|collect|find|research)\s+(?:all\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s+(?:information|info|facts|details)\b',
             r'\b(?:gather|collect|find|search\s+for|look\s+up|get)\s+(?:some\s+|all\s+(?:the\s+)?|any\s+|the\s+)?information\s+(?:about|on|for)\s+(.+)',
-            r'\b(?:tell\s+me|find\s+out)\s+(?:something\s+|some\s+information\s+|all\s+information\s+)?about\s+(.+)',
+            r'\b(?:gather\s+(?:all\s+)?(?:the\s+)?|collect\s+(?:all\s+)?(?:the\s+)?|research\s+and\s+gather\s+)(?:information|info|facts|details)\s+about\s+(.+)',
             r'\bresearch\s+(?:normalization\s+in\s+dbms|this\s+topic|this\s+concept|.+)',
             r'\bget\s+(?:the\s+)?code\s+(?:for|of)\s+(.+)',
             r'\bget\s+(?:the\s+)?(?:python|javascript|cpp|c\+\+|java)\s+implementation(?:\s+(?:for|of)\s+(.+))?',
@@ -4448,13 +4982,26 @@ class SemanticUnderstandingEngine:
                 if confidence is None:
                     logger.debug("[SEMANTIC_ENGINE] Reasoning object missing confidence; ignoring")
                 else:
+                    dev_res = resolve_device_target(raw_text, user_id=user_id)
+                    tgt_dev = dev_res.target_device if dev_res.target_device not in (TargetDeviceType.UNSPECIFIED, TargetDeviceType.AMBIGUOUS) else "none"
+                    req_caps = ["android_device"] if tgt_dev == "android_phone" else (["windows_workstation"] if tgt_dev == "windows_workstation" else (caps or []))
+                    prohib_caps = ["windows_workstation"] if tgt_dev == "android_phone" else (["android_device"] if tgt_dev == "windows_workstation" else [])
+                    is_corr_flag = (req_t == "CORRECTION") or bool(re.search(r'^(?:no\s*,?\s*)?(?:i\s+mean|i\s+meant|not\s+(?:the|my)|switch\s+to|change\s+to|stop\s+that[;,]?\s*i\s+meant)\b', raw_text.lower()))
+                    act_name = "lock" if (is_corr_flag and tgt_dev == "windows_workstation") else ("remote_device" if tgt_dev == "android_phone" else "")
+
                     return SemanticIntentRepresentation(
                         user_input=raw_text,
                         interpreted_meaning=goal,
-                        intent=primary_cap,
+                        intent="DEVICE_CONTROL" if (tgt_dev in ("android_phone", "windows_workstation") and is_corr_flag) else primary_cap,
+                        action=act_name,
                         request_type=req_t,
                         action_required=act_req,
                         is_negation=(req_t == "NEGATION"),
+                        is_correction=is_corr_flag,
+                        target_device=tgt_dev,
+                        required_capabilities=req_caps,
+                        prohibited_capabilities=prohib_caps,
+                        negated_targets=dev_res.negated_targets,
                         entities=[{"value": v, "type": k} for k, v in params.items()] if isinstance(params, dict) else [],
                         references=list(refs.keys()) if isinstance(refs, dict) else [],
                         resolved_references=refs if isinstance(refs, dict) else {},
@@ -4464,12 +5011,29 @@ class SemanticUnderstandingEngine:
         except Exception as e:
             logger.debug(f"[SEMANTIC_ENGINE] LLM reasoning fallback skipped: {e}")
 
-        # Default pass-through for regular commands
+        # Default pass-through with architecture-level device target and negation binding
+        from core.target_resolver import resolve_device_target, TargetDeviceType
+        dev_res = resolve_device_target(raw_text, user_id=user_id)
+        tgt_dev = dev_res.target_device if dev_res.target_device not in (TargetDeviceType.UNSPECIFIED, TargetDeviceType.AMBIGUOUS) else "none"
+        req_caps = ["android_device"] if tgt_dev == "android_phone" else (["windows_workstation"] if tgt_dev == "windows_workstation" else [])
+        prohib_caps = ["windows_workstation"] if tgt_dev == "android_phone" else (["android_device"] if tgt_dev == "windows_workstation" else [])
+        is_corr_flag = bool(re.search(r'^(?:no\s*,?\s*)?(?:i\s+mean|i\s+meant|not\s+(?:the|my)|switch\s+to|change\s+to|stop\s+that[;,]?\s*i\s+meant)\b', raw_text.lower()))
+        is_neg_query = bool(re.search(r'\b(?:don\x27t|do\s+not)\s+(?:open|launch|run|start)\b', raw_text.lower()))
+        act_name = "lock" if (is_corr_flag and tgt_dev == "windows_workstation") else ("remote_device" if tgt_dev == "android_phone" else "")
+
         return SemanticIntentRepresentation(
             user_input=raw_text,
             interpreted_meaning=raw_text,
-            intent="AUTO",
-            action_required=True,
+            intent="DEVICE_CONTROL" if (tgt_dev in ("android_phone", "windows_workstation") and is_corr_flag) else ("ENVIRONMENT_QUERY" if is_neg_query else "AUTO"),
+            action=act_name,
+            request_type="CORRECTION" if is_corr_flag else ("QUESTION" if is_neg_query else "INSTRUCTION"),
+            action_required=not is_neg_query,
+            is_negation=is_neg_query,
+            is_correction=is_corr_flag,
+            target_device=tgt_dev,
+            required_capabilities=req_caps,
+            prohibited_capabilities=prohib_caps,
+            negated_targets=dev_res.negated_targets,
             confidence=0.90
         )
 
